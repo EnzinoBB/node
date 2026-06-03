@@ -181,13 +181,15 @@ bool BlockChain::init(
         return false;
     };
 
-    // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] block_db)
-    const bool lmdbBlocks = cs::ConfigHolder::instance().config()->getStorageSettings().lmdbBlocks;
-    if (lmdbBlocks) {
-        cslog() << kLogPrefix << "block database: LMDB in " << path << "/lmdb";
-    }
+    const auto& storageCfg = cs::ConfigHolder::instance().config()->getStorageSettings();
+    // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] db_backend)
+    cslog() << kLogPrefix << "block database: " << storageCfg.dbBackend
+            << (storageCfg.dbBackend == "lmdb" ? " in " + path + "/lmdb" : std::string{});
     if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
-                       lmdbBlocks ? csdb::Storage::Engine::Lmdb : csdb::Storage::Engine::BerkeleyDB)) {
+                       storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
+                       static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
+                       static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
+                       storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
     }

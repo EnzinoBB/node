@@ -965,14 +965,21 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     }
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES, storageData_.checkpointEveryMinutes);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_PRUNE_KEEP_BLOCKS, storageData_.pruneKeepBlocks);
-    if (data.count(PARAM_NAME_STORAGE_BLOCK_DB)) {
-        const auto engine = data.get<std::string>(PARAM_NAME_STORAGE_BLOCK_DB);
-        if (engine == "lmdb") {
-            storageData_.lmdbBlocks = true;
-        }
-        else if (engine != "berkeleydb") {
-            cswarning() << "config: unknown block_db=" << engine << ", using berkeleydb";
-        }
+    checkAndSaveValue(data, block, "async_write_queue_size", storageData_.asyncWriteQueueSize);
+    checkAndSaveValue(data, block, "write_batch_size",       storageData_.writeBatchSize);
+    checkAndSaveValue(data, block, "db_backend",             storageData_.dbBackend);
+    checkAndSaveValue(data, block, "rocksdb_block_cache_mb", storageData_.rocksdbBlockCacheMb);
+    checkAndSaveValue(data, block, "rocksdb_memtable_mb",    storageData_.rocksdbMemtableMb);
+    // block_db=lmdb (community releases before RocksDB) means db_backend=lmdb, unless db_backend is set
+    if (data.count(PARAM_NAME_STORAGE_BLOCK_DB) && !data.count("db_backend")) {
+        storageData_.dbBackend = data.get<std::string>(PARAM_NAME_STORAGE_BLOCK_DB);
+    }
+    if (storageData_.dbBackend == "rocks") {
+        storageData_.dbBackend = "rocksdb";
+    }
+    if (storageData_.dbBackend != "berkeleydb" && storageData_.dbBackend != "rocksdb" && storageData_.dbBackend != "lmdb") {
+        cswarning() << "config: unknown db_backend=" << storageData_.dbBackend << ", using berkeleydb";
+        storageData_.dbBackend = "berkeleydb";
     }
     if (storageData_.pruneKeepBlocks > 0) {
         // contracts refer to blocks up to 100 rounds back; keep a margin above that
