@@ -47,9 +47,9 @@ jobs:
 
       # The project links Boost statically with a static runtime (Boost_USE_STATIC_RUNTIME),
       # which distro packages do not provide, so Boost is built once and cached.
-      - name: Cache Boost
+      - name: Restore Boost
         id: cache-boost
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.BOOST_PREFIX }}
           key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-24.04-v1
@@ -67,8 +67,16 @@ jobs:
             cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
             install --prefix="${BOOST_PREFIX}"
 
-      - name: Cache ccache
-        uses: actions/cache@v4
+      # Saved right away (not in a post step) so a later failing step does not lose it.
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-ubuntu-24.04-${{ github.sha }}
@@ -76,6 +84,8 @@ jobs:
 
       # -include cstdint/cstddef: some sources (third-party base58, csnode/bitheap.hpp)
       # rely on headers that GCC 13 no longer includes transitively.
+      # WITH_HASKELL=OFF: the runner image ships GHC/cabal, which makes Thrift try to
+      # build its Haskell library (not used by the node, and it fails there).
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
@@ -85,13 +95,21 @@ jobs:
             -DBoost_NO_SYSTEM_PATHS=ON \
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
-            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef"
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF
 
       - name: Build
         run: |
           ccache --max-size=2G
           cmake --build build -j"$(nproc)"
           ccache --show-stats
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-24.04-${{ github.sha }}
 
       - name: Test
         working-directory: build
@@ -103,3 +121,9 @@ jobs:
           name: node-linux-x64-${{ github.sha }}
           path: build/client/node
           retention-days: 30
+
+      - name: Disk usage
+        if: always()
+        run: |
+          df -h "${GITHUB_WORKSPACE}"
+          du -sh "${GITHUB_WORKSPACE}" build "${BOOST_PREFIX}" "${CCACHE_DIR}" 2>/dev/null || true
