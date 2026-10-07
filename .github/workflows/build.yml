@@ -111,9 +111,12 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-ubuntu-24.04-${{ github.sha }}
 
+      # Locally the whole suite runs in about 35 s: a per-test timeout makes a hang fail
+      # fast and print the output of the stuck test instead of holding the runner.
       - name: Test
         working-directory: build
-        run: ctest --output-on-failure
+        timeout-minutes: 20
+        run: ctest --output-on-failure --timeout 300
 
       - name: Upload node binary
         uses: actions/upload-artifact@v4
