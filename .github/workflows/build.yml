@@ -1,0 +1,105 @@
+name: Build node
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  BOOST_PREFIX: /home/runner/boost
+  CCACHE_DIR: /home/runner/.ccache
+
+jobs:
+  linux:
+    name: Linux (GCC, Release)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # third-party/rocksdb is a gitlink with no .gitmodules entry, so a plain
+      # `git submodule update --init --recursive` fails: list the submodules explicitly.
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build flex bison autoconf automake libtool pkg-config ccache
+
+      # The project links Boost statically with a static runtime (Boost_USE_STATIC_RUNTIME),
+      # which distro packages do not provide, so Boost is built once and cached.
+      - name: Cache Boost
+        id: cache-boost
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-24.04-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | sha256sum -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(nproc)" -d0 variant=release link=static runtime-link=static threading=multi \
+            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-24.04-${{ github.sha }}
+          restore-keys: ccache-ubuntu-24.04-
+
+      # -include cstdint/cstddef: some sources (third-party base58, csnode/bitheap.hpp)
+      # rely on headers that GCC 13 no longer includes transitively.
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=ON \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef"
+
+      - name: Build
+        run: |
+          ccache --max-size=2G
+          cmake --build build -j"$(nproc)"
+          ccache --show-stats
+
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure
+
+      - name: Upload node binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-linux-x64-${{ github.sha }}
+          path: build/client/node
+          retention-days: 30
