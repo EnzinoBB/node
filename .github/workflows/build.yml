@@ -118,15 +118,6 @@ jobs:
         timeout-minutes: 20
         run: ctest --output-on-failure --timeout 300
 
-      # TEMPORARY (PR "LockFreeChanger atomic access"): reverted before merge.
-      - name: Stress LockFreeChanger.BaseUsage x100
-        working-directory: build/tests/lib_system
-        timeout-minutes: 15
-        run: |
-          ./system --gtest_filter='LockFreeChanger.BaseUsage' --gtest_repeat=100 > stress.log 2>&1 \
-            || { tail -30 stress.log; exit 1; }
-          echo "passed: $(grep -c '^\[       OK \] LockFreeChanger.BaseUsage' stress.log) / 100"
-
       - name: Upload node binary
         uses: actions/upload-artifact@v4
         with:
