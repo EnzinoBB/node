@@ -258,7 +258,8 @@ class Pool::priv : public ::csdb::internal::shared_data {
 
     bool getTransactions(::csdb::priv::ibstream& is, size_t cnt) {
         transactions_.clear();
-        transactions_.reserve(cnt);
+        // cnt comes from the data: every transaction takes at least one more byte of them
+        transactions_.reserve(std::min(cnt, is.size()));
         for (size_t i = 0; i < cnt; ++i) {
             Transaction tran;
             if (!is.get(tran)) {
@@ -382,7 +383,8 @@ class Pool::priv : public ::csdb::internal::shared_data {
         }
 
         newWallets_.clear();
-        newWallets_.reserve(cnt);
+        // cnt comes from the data: every wallet takes at least one more byte of them
+        newWallets_.reserve(std::min(static_cast<size_t>(cnt), is.size()));
         for (uint32_t i = 0; i < cnt; ++i) {
             NewWalletInfo wall;
             if (!is.get(wall)) {
