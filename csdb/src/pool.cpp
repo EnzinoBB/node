@@ -236,6 +236,16 @@ class Pool::priv : public ::csdb::internal::shared_data {
         return true;
     }
 
+    // hashingLength_ is read from the data being parsed (possibly from the network) and
+    // updateHash() hashes that many bytes of them
+    bool hashingLengthFits(size_t dataSize) const {
+        if (hashingLength_ > dataSize) {
+            csmeta(cswarning) << sequence_ << ": hashing length " << hashingLength_ << " exceeds data size " << dataSize;
+            return false;
+        }
+        return true;
+    }
+
     void updateHash() {
         const auto begin = binary_representation_.data();
         const auto end = begin + hashingLength_;
@@ -923,6 +933,9 @@ PoolHash Pool::hash_from_binary(cs::Bytes&& data) {
 	if (!p->get_hashed_data(is)) {
 		return PoolHash();
 	}
+	if (!p->hashingLengthFits(data.size())) {
+		return PoolHash();
+	}
 	p->update_binary_representation(std::move(data));
 	p->updateHash();
 	return p->hash_;
@@ -932,7 +945,7 @@ PoolHash Pool::hash_from_binary(cs::Bytes&& data) {
 Pool Pool::from_binary(cs::Bytes&& data, bool makeReadOnly) {
     std::unique_ptr<priv> p{new priv()};
     ::csdb::priv::ibstream is(data.data(), data.size());
-    if (!p->get(is)) {
+    if (!p->get(is) || !p->hashingLengthFits(data.size())) {
         return Pool();
     }
     p->update_binary_representation(std::move(data));
@@ -970,7 +983,7 @@ Pool Pool::from_lz4_byte_stream(size_t uncompressedSize) {
 
     ::csdb::priv::ibstream is(p->binary_representation_.data(), p->binary_representation_.size());
 
-    if (!p->get(is)) {
+    if (!p->get(is) || !p->hashingLengthFits(p->binary_representation_.size())) {
         return Pool();
     }
 
