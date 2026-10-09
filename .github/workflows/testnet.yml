@@ -1,7 +1,8 @@
 name: Testnet
 
-# A private network of 7 nodes on one runner, about 30 minutes: blocks are produced, a restarted
-# node catches up, and every node reports the same STATE DIGEST. Too long for every push, so it runs
+# A private network of 7 nodes on one runner, about 30 minutes: the nodes are funded from the genesis
+# key and exchange transfers, a restarted node catches up, and every node reports the same STATE
+# DIGEST. Too long for every push, so it runs
 # nightly, on demand, and on pull requests labelled "testnet".
 on:
   workflow_dispatch:
@@ -47,6 +48,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cmake ninja-build flex bison autoconf automake libtool pkg-config ccache python3-nacl python3-base58
+          python3 -m pip install --user --quiet --break-system-packages thriftpy2
 
       - name: Restore Boost
         id: cache-boost
@@ -75,7 +77,8 @@ jobs:
           key: ccache-ubuntu-24.04-${{ github.sha }}
           restore-keys: ccache-ubuntu-24.04-
 
-      # same configuration as build.yml, so the ccache entries are shared
+      # same configuration as build.yml plus CREDITS_TESTNET (applied only to csnode and net),
+      # so most ccache entries are shared
       - name: Build node
         run: |
           cmake -S . -B build -G Ninja \
@@ -86,7 +89,8 @@ jobs:
             -DCMAKE_C_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
-            -DWITH_HASKELL=OFF
+            -DWITH_HASKELL=OFF \
+            -DCREDITS_TESTNET=ON
           ccache --max-size=2G
           cmake --build build -j"$(nproc)" --target node
 
@@ -96,6 +100,8 @@ jobs:
           NODES: '7'
           TARGET_SEQ: '1100'
           TIMEOUT_MIN: '45'
+          FUND: '1'
+          LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
         run: ci/testnet/run.sh build/client/node
 
@@ -113,5 +119,6 @@ jobs:
           name: testnet-logs-${{ github.run_id }}
           path: |
             testnet-run/n*/*.log
+            testnet-run/fund.log
             testnet-run/n*/config.ini
           retention-days: 14
