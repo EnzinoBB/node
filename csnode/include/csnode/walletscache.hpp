@@ -1,6 +1,7 @@
 #ifndef WALLETS_CACHE_HPP
 #define WALLETS_CACHE_HPP
 
+#include <array>
 #include <list>
 #include <memory>
 #include <unordered_map>
@@ -56,6 +57,9 @@ public:
 #ifdef MONITOR_NODE
         uint64_t createTime_ = 0;
 #endif
+        // ECMH element of this wallet's state, kept by MultiWallets for the state digest (not persisted)
+        std::array<uint8_t, 32> stateElement_{};
+        bool hasStateElement_ = false;
     };
 
     struct TrustedData {

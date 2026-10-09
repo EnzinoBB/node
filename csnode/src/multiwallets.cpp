@@ -69,12 +69,53 @@ void cs::MultiWallets::onWalletCacheUpdated(const cs::WalletsCache::WalletData& 
 	    << ", delegated: " << data.delegated_.to_string(); 
     }
 
+    InternalData stored = data;
+    stored.hasStateElement_ = false;
+    if (digestReady_) {
+        const auto state = cs::serializeWalletState(stored);
+        if (!state.empty()) {
+            stored.stateElement_ = cs::MultisetHash::toElement(state);
+            stored.hasStateElement_ = true;
+        }
+    }
+
     if (auto iter = byKey.find(data.key_); iter != byKey.end()) {
-        byKey.replace(iter, data);
+        // the stored element, not the stored record: delegation maps are shared and already updated in place
+        if (digestReady_ && iter->hasStateElement_) {
+            digest_.remove(iter->stateElement_);
+        }
+        byKey.replace(iter, stored);
     }
     else {
-        indexes_.insert(data);
+        indexes_.insert(stored);
     }
+
+    if (stored.hasStateElement_) {
+        digest_.add(stored.stateElement_);
+    }
+}
+
+cs::MultisetHash::Digest cs::MultiWallets::stateDigest() const {
+    cs::Lock lock(mutex_);
+
+    if (!digestReady_) {
+        digest_.reset();
+        auto& byKey = indexes_.get<Tags::ByPublicKey>();
+        for (auto it = byKey.begin(); it != byKey.end(); ++it) {
+            const auto state = cs::serializeWalletState(*it);
+            const bool hasState = !state.empty();
+            const auto element = hasState ? cs::MultisetHash::toElement(state) : cs::MultisetHash::Element{};
+            if (hasState) {
+                digest_.add(element);
+            }
+            // the element is not a key of any index, so updating it in place keeps the container valid
+            const_cast<InternalData&>(*it).stateElement_ = element;
+            const_cast<InternalData&>(*it).hasStateElement_ = hasState;
+        }
+        digestReady_ = true;
+    }
+
+    return digest_.digest();
 }
 
 void cs::MultiWallets::iterate(std::function<bool(const PublicKey& key, const InternalData& data)> func) {
