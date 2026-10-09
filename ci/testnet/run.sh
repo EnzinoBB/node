@@ -11,6 +11,8 @@
 #        (default 30) and then keeps random transfers flowing for LOAD_SECONDS (default 300)
 #        DPOS_AT / REWARD_ROUND (default 0 = off, needs FUND=1): the master key, which is also the
 #        starter key, moves StartingDPOS and turns block rewards on (special orders 9 and 37)
+#        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
+#        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later; the node must recover and end with the same state digest (needs sudo)
@@ -31,6 +33,8 @@ LOAD_SECONDS=${LOAD_SECONDS:-300}
 DISK_FULL_NODE=${DISK_FULL_NODE:-0}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
+DELEGATE=${DELEGATE:-0}
+DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
 DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
@@ -165,7 +169,8 @@ while :; do
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
-            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" > "$WORK/fund.log" 2>&1 &
+            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" \
+            $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
 
