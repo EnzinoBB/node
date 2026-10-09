@@ -2371,6 +2371,22 @@ void BlockChain::setMiningOn(bool mOn) {
 void BlockChain::setStakingOn(bool stOn) {
     stakingOn_ = stOn;
 }
+void BlockChain::setPendingConsensusSettings(const PendingConsensusSettings& pending) {
+    pendingConsensusSettings_ = pending;
+}
+
+BlockChain::PendingConsensusSettings BlockChain::getPendingConsensusSettings() const {
+    return pendingConsensusSettings_;
+}
+
+void BlockChain::setStartingDPOS(cs::Sequence sequence) {
+    startingDPOS_ = sequence;
+}
+
+cs::Sequence BlockChain::getStartingDPOS() const {
+    return startingDPOS_;
+}
+
 void BlockChain::setTimeMinStage1(uint32_t timeStage1) {
     TimeMinStage1_ = timeStage1;
 }

@@ -197,6 +197,7 @@ bool Node::init() {
         Consensus::miningOn = blockChain_.getMiningOn();
         Consensus::blockReward = blockChain_.getBlockReward();
         Consensus::miningCoefficient = blockChain_.getMiningCoefficient();
+        restorePendingConsensusSettings();
 
         std::string miningStr = Consensus::miningOn ? "true" : "false";
         std::string stakingStr = Consensus::stakingOn ? "true" : "false";
@@ -396,6 +397,35 @@ void Node::onSuccessQS(csdb::Amount blockReward, csdb::Amount miningCoeff, bool 
     csinfo() << curMsg;
     csinfo() << "Number of contracts: " << solver_->smart_contracts().contracts_count();
     //csinfo() << "Test value = " << solver_->smart_contracts().getTestValue();
+    restorePendingConsensusSettings();
+}
+
+void Node::restorePendingConsensusSettings() {
+    if (const auto startingDPOS = blockChain_.getStartingDPOS(); startingDPOS != 0) {
+        Consensus::StartingDPOS = startingDPOS;
+        csinfo() << "StartingDPOS restored from caches: " << Consensus::StartingDPOS;
+    }
+
+    const auto pending = blockChain_.getPendingConsensusSettings();
+    // round 0 never matches a block sequence, so such an order is never applied live either
+    if (pending.round == std::numeric_limits<cs::Sequence>::max() || pending.round == 0) {
+        return;
+    }
+    consensusSettingsChangingRound_ = pending.round;
+    stakingOn_ = pending.stakingOn;
+    miningOn_ = pending.miningOn;
+    blockReward_ = pending.blockReward;
+    miningCoefficient_ = pending.miningCoefficient;
+    csinfo() << "Pending consensus settings restored from caches, active from round " << pending.round
+             << ": blockReward " << blockReward_.to_string();
+
+    // a checkpoint is written before the special-info handlers of its own block run, so the
+    // activation round may already be behind: apply the change now instead of waiting forever
+    if (pending.round <= blockChain_.getLastSeq()) {
+        std::string msg;
+        checkConsensusSettings(pending.round, msg);
+        csinfo() << msg;
+    }
 }
 
 void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
@@ -4115,6 +4145,7 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
                 cs::Sequence startDPOSSequence;
                 stream >> startDPOSSequence;
                 Consensus::StartingDPOS = startDPOSSequence;
+                blockChain_.setStartingDPOS(startDPOSSequence);
                 cslog() << "StartingDPOS sequrnce changed to: " << Consensus::StartingDPOS;
             }
 
@@ -4258,6 +4289,7 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
                 miningOn_ = (sign == 3 || sign == 1) ? true : false;
                 blockReward_ = csdb::Amount(rewInt, rewFrac);
                 miningCoefficient_ = csdb::Amount(coeffInt, coefFrac);
+                blockChain_.setPendingConsensusSettings({ consensusSettingsChangingRound_, stakingOn_, miningOn_, blockReward_, miningCoefficient_ });
 
                 cslog() << "Mining settings will be changed in round " << consensusSettingsChangingRound_ << ": \n staking " << (stakingOn_ ? "ON" : "OFF")
                     << "\n mining " << (miningOn_ ? "ON" : "OFF")
@@ -4288,6 +4320,7 @@ void Node::checkConsensusSettings(cs::Sequence seq, std::string& msg){
         return;
     }
     consensusSettingsChangingRound_ = ULLONG_MAX;
+    blockChain_.setPendingConsensusSettings({});
     Consensus::stakingOn = stakingOn_;
     Consensus::miningOn = miningOn_;
     Consensus::blockReward = blockReward_;
