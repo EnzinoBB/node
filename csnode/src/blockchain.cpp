@@ -1,5 +1,6 @@
 #include <base58.h>
 #include <chrono>
+#include <cstdlib>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
 #include <lib/system/logger.hpp>
@@ -374,6 +375,13 @@ void BlockChain::writeGenesisBlock() {
     csdb::Transaction transaction;
 
     std::string strAddr = "5B3YXqDTcWQFGAqEJQJP3Bg1ZK8FFtHtgCiFLT5VAxpe";
+#ifdef CREDITS_TESTNET
+    // test-network builds only: genesis funds go to a key the test network holds
+    if (const char* key = std::getenv("CS_TESTNET_GENESIS_KEY"); key != nullptr && *key != '\0') {
+        strAddr = key;
+        cswarning() << kLogPrefix << "TESTNET build: genesis funds go to " << strAddr;
+    }
+#endif
     std::vector<uint8_t> pub_key;
     DecodeBase58(strAddr, pub_key);
 
