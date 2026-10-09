@@ -16,6 +16,15 @@ on:
       disk_full_node:
         description: 'Node whose block DB disk fills up for a while (0 = off)'
         default: '0'
+      restart_at:
+        description: 'Sequence at which the last node is restarted (0 = off)'
+        default: '300'
+      dpos_at:
+        description: 'Move StartingDPOS to this sequence via special order 9 (0 = off)'
+        default: '0'
+      reward_round:
+        description: 'Turn block rewards on at this round via special order 37 (0 = off)'
+        default: '0'
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -111,6 +120,9 @@ jobs:
           TARGET_SEQ: ${{ inputs.target_seq || '1100' }}
           TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
           DISK_FULL_NODE: ${{ inputs.disk_full_node || '0' }}
+          RESTART_AT: ${{ inputs.restart_at || '300' }}
+          DPOS_AT: ${{ inputs.dpos_at || '0' }}
+          REWARD_ROUND: ${{ inputs.reward_round || '0' }}
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
