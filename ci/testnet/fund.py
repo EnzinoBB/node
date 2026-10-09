@@ -2,10 +2,16 @@
 """Fund the nodes of a private test network and keep some transfers flowing.
 
 Usage: fund.py <work_dir> <nodes> <master_seed_b58> [--port 9090] [--amount 60000] [--load-seconds 0]
+               [--dpos-at SEQ --reward-round SEQ]
 
 The genesis funds of a CREDITS_TESTNET build go to the key given in CS_TESTNET_GENESIS_KEY; this
 script holds its seed. It sends <amount> CS from it to every node (above the 50'000 minimum stake),
 then, for --load-seconds, small random transfers between nodes, through the Thrift API of node 1.
+
+With --dpos-at and --reward-round the master key, which is also the starter key of the test network
+(CS_TESTNET_STARTER_KEY), sends two special "managing" transactions: order 9 moves StartingDPOS to
+--dpos-at, and order 37 turns mining and staking on with a 1 CS block reward from --reward-round.
+Trusted nodes then earn rewards split by stake, as on mainnet.
 
 Transaction building and signing are adapted from BK's tools/tps_gen/tps_gen.py (akaitrade/node).
 """
@@ -31,6 +37,9 @@ general = thriftpy2.load(os.path.join(IDL, "general.thrift"), module_name="gener
 
 CURRENCY_CS = 1
 TX_TYPE_TRANSFER = 0
+UF_MANAGING = 7          # cs::trx_uf::sp::managing
+UF_TYPE_STRING = 2       # csdb::UserField::String
+SPECIAL_TARGET = bytes(31) + b"\x07"  # the target mainnet special transactions use (1111...118)
 
 
 def encode_max_fee(value):
@@ -63,7 +72,10 @@ def pack_inner_id(inner_id):
     return inner_id.to_bytes(6, "little")  # source and target given as public keys, not wallet ids
 
 
-def transfer(src, dst_pk, amount_int, amount_frac=0):
+def transfer(src, dst_pk, amount_int, amount_frac=0, managing=None):
+    # signed bytes: Transaction::to_byte_stream_for_sig(); a string user field signs as u32 size + bytes
+    fields_for_sig = struct.pack("<B", 0) if managing is None else \
+        struct.pack("<BI", 1, len(managing)) + managing
     payload = b"".join([
         pack_inner_id(src.next_inner_id),
         src.pk,
@@ -71,7 +83,7 @@ def transfer(src, dst_pk, amount_int, amount_frac=0):
         struct.pack("<iQ", amount_int, amount_frac),
         struct.pack("<H", MAX_FEE),
         struct.pack("<B", CURRENCY_CS),
-        struct.pack("<B", 0),  # no user fields
+        fields_for_sig,
     ])
     t = api.Transaction()
     t.id = src.next_inner_id
@@ -83,17 +95,19 @@ def transfer(src, dst_pk, amount_int, amount_frac=0):
     t.signature = src.sk.sign(payload).signature
     t.fee = api.AmountCommission(commission=MAX_FEE)
     t.timeCreation = int(time.time() * 1000)
-    t.userFields = b""
+    # API encoding (APIHandler): flag 0, count, then id u32, type u8, u32 size, bytes
+    t.userFields = b"" if managing is None else \
+        struct.pack("<BBIBI", 0, 1, UF_MANAGING, UF_TYPE_STRING, len(managing)) + managing
     t.type = TX_TYPE_TRANSFER
     t.poolNumber = 0
     return t
 
 
-def send(client, src, dst_pk, amount_int, amount_frac=0):
+def send(client, src, dst_pk, amount_int, amount_frac=0, managing=None):
     if src.next_inner_id is None:
         last = client.WalletTransactionsCountGet(src.pk).lastTransactionInnerId or 0
         src.next_inner_id = int(last) + 1
-    result = client.TransactionFlow(transfer(src, dst_pk, amount_int, amount_frac))
+    result = client.TransactionFlow(transfer(src, dst_pk, amount_int, amount_frac, managing))
     ok = result.status.code == 0
     if ok:
         src.next_inner_id += 1
@@ -118,6 +132,8 @@ def main():
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument("--amount", type=int, default=60000)
     parser.add_argument("--load-seconds", type=int, default=0)
+    parser.add_argument("--dpos-at", type=int, default=0)
+    parser.add_argument("--reward-round", type=int, default=0)
     args = parser.parse_args()
 
     client = make_client(api.API, host="127.0.0.1", port=args.port, proto_factory=TBinaryProtocolFactory(),
@@ -131,6 +147,16 @@ def main():
         ok, message = send(client, master, node.pk, args.amount)
         print(f"fund n{i}: {'ok' if ok else 'FAILED ' + message}", flush=True)
         failures += 0 if ok else 1
+
+    if args.dpos_at and args.reward_round:
+        # Node::processSpecialInfo: u16 order, then the order's fields (cs::IDataStream, little endian)
+        order9 = struct.pack("<HQ", 9, args.dpos_at)
+        order37 = struct.pack("<HBQiQiQ", 37, 3, args.reward_round, 1, 0, 0, 0)  # staking+mining, reward 1.0, coeff 0
+        for name, cmd in (("order 9 (StartingDPOS = %d)" % args.dpos_at, order9),
+                          ("order 37 (rewards from round %d)" % args.reward_round, order37)):
+            ok, message = send(client, master, SPECIAL_TARGET, 0, managing=cmd)
+            print(f"{name}: {'ok' if ok else 'FAILED ' + message}", flush=True)
+            failures += 0 if ok else 1
 
     sent = 0
     deadline = time.time() + args.load_seconds
