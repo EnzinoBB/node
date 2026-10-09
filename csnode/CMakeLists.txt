@@ -147,3 +147,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../lmdbxx
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../client/config
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../client/include)
+
+if(CREDITS_TESTNET)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE CREDITS_TESTNET)
+endif()

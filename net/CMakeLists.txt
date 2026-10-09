@@ -28,3 +28,7 @@ suppress_boost_cmake_warnings()
 configure_msvc_flags()
 
 target_link_libraries(${PROJECT_NAME} csnode lib cscrypto p2p_network csconnector)
+
+if(CREDITS_TESTNET)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE CREDITS_TESTNET)
+endif()
