@@ -90,7 +90,14 @@ bool BlockChain::tryQuickStart(
     for (auto it : initialConfidants) {
         reserveConf.insert(it);
     }
-    bool ok = serializationManPtr_->load();
+    // trust the caches only if their head is still the block this node has at that sequence
+    bool ok = serializationManPtr_->load([this](const cs::CheckpointHead& head) {
+        if (cs::isCheckpointOnChain(head, [this](cs::Sequence seq) { return blockHashes_->find(seq).to_binary(); })) {
+            return true;
+        }
+        cswarning() << "QUICK START: checkpoint head #" << head.sequence << " is not on this chain, skip it";
+        return false;
+    });
 
     if (ok) {
         cslog() << "Caches for QUICK START loaded successfully!";

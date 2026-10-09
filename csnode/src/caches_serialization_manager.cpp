@@ -630,6 +630,14 @@ bool CachesSerializationManager::save(size_t version, const CheckpointHead& head
     return true;
 }
 
+bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Bytes(cs::Sequence)>& chainHashAt) {
+    if (head.sequence == 0 || head.head_hash.empty()) {
+        return true;
+    }
+    const cs::Bytes onChain = chainHashAt(head.sequence);
+    return onChain.empty() || onChain == head.head_hash;
+}
+
 bool CachesSerializationManager::load() {
     return load(ChainVerifier{});
 }
