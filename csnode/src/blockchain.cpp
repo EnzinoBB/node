@@ -1402,20 +1402,17 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         }
     }
 
-    if (finalizeBlock(pool, isTrusted, lastConfidants)) {
-        csdebug() << kLogPrefix << "The block is correct";
-        if (!applyBlockToCaches(pool)) {
-            csdebug() << kLogPrefix << "failed to apply block to caches";
-            return std::nullopt;
-        }
-    }
-    else {
+    if (!finalizeBlock(pool, isTrusted, lastConfidants)) {
         csdebug() << kLogPrefix << "the signatures of the block are insufficient or incorrect";
         setBlocksToBeRemoved(1U);
         return std::nullopt;
     }
-    //========================================
+    csdebug() << kLogPrefix << "The block is correct";
 
+    // Flush the previous (deferred) block before this block touches the caches: if the flush fails,
+    // nothing of this block has been applied, so a later retry cannot apply it twice.
+    size_t flushedSignatures = 0;
+    size_t flushedSmartSignatures = 0;
     {
         cs::Lock lock(dbLock_);
 
@@ -1432,6 +1429,10 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
                     uuid_ = uuidFromBlock(deferredBlock_);
                     csdebug() << kLogPrefix << "UUID = " << uuid_;
                 }
+                flushedSignatures = deferredBlock_.signatures().size();
+                flushedSmartSignatures = deferredBlock_.smartSignatures().size();
+                // it is in storage now (as right after start): never keep it deferred, so it is never saved twice
+                deferredBlock_ = csdb::Pool{};
             }
             else {
                 csmeta(cserror) << kLogPrefix << "Couldn't save block: " << deferredBlock_.sequence();
@@ -1442,9 +1443,14 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
 
     if (flushed_block_seq != NoSequence) {
         csdebug() << "---------------------------- Flush block #" << flushed_block_seq << " to disk ---------------------------";
-        csdebug() << "signatures amount = " << deferredBlock_.signatures().size() << ", smartSignatures amount = " << deferredBlock_.smartSignatures().size()
+        csdebug() << "signatures amount = " << flushedSignatures << ", smartSignatures amount = " << flushedSmartSignatures
                   << ", see block info above";
         csdebug() << "----------------------------------------------------------------------------------";
+    }
+
+    if (!applyBlockToCaches(pool)) {
+        csdebug() << kLogPrefix << "failed to apply block to caches";
+        return std::nullopt;
     }
 
 
