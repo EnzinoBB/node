@@ -11,7 +11,8 @@
 #        (default 30) and then keeps random transfers flowing for LOAD_SECONDS (default 300)
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
-#        (default 60) later; the node must recover and end with the same state digest (needs sudo)
+#        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
+#        state digest (needs sudo)
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -156,6 +157,12 @@ while :; do
         rm -f "$WORK/n$DISK_FULL_NODE/db/filler"
         disk_freed=1
         echo "disk-full test: n$DISK_FULL_NODE block DB freed"
+        # BerkeleyDB throws on ENOSPC and the node terminates: an operator would free space and
+        # restart it, so do the same and require it to catch up with the same state
+        if ! kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+            echo "disk-full test: n$DISK_FULL_NODE had stopped ($(grep -ah 'terminate called\|what():' "$WORK/n$DISK_FULL_NODE"/stdout.log | tail -1)), restarting it"
+            start_node "$DISK_FULL_NODE"
+        fi
     fi
 
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
