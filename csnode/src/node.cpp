@@ -107,6 +107,7 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&blockChain_.tryToStoreBlockEvent, this, &Node::deepBlockValidation);
     cs::Connector::connect(&blockChain_.stopNode, this, &Node::stop);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::processSpecialInfo);
+    cs::Connector::connect(&blockChain_.storeBlockEvent, this, static_cast<void (Node::*)(const csdb::Pool&)>(&Node::logStateDigest));
     cs::Connector::connect(&blockChain_.uncertainBlock, this, &Node::sendBlockRequestToConfidants);
     cs::Connector::connect(&blockChain_.orderNecessaryBlock, this, &Node::sendNecessaryBlockRequest);
     cs::Connector::connect(&stat_.accountInitiationRequest, this, &Node::accountInitiationRequest);
@@ -248,6 +249,8 @@ bool Node::init() {
     }
 
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
+    // full digest once here, before taking part in the network; incremental from now on
+    logStateDigest(blockChain_.getLastSeq());
 
 #ifdef NODE_API
     api_->run();
@@ -4298,6 +4301,19 @@ void Node::checkConsensusSettings(cs::Sequence seq, std::string& msg){
         + "\nminingCoefficient = " + Consensus::miningCoefficient.to_string();
     msg += (msg.size() > 0) ? "\n" + curMsg : curMsg;
     saveConsensusSettingsToChain();
+}
+
+void Node::logStateDigest(const csdb::Pool& pool) {
+    if (pool.sequence() % kStateDigestInterval == 0) {
+        logStateDigest(pool.sequence());
+    }
+}
+
+void Node::logStateDigest(cs::Sequence sequence) {
+    const auto& wallets = blockChain_.multiWallets();
+    const auto digest = wallets.stateDigest();
+    cslog() << "STATE DIGEST #" << sequence << " " << cs::Utils::byteStreamToHex(digest.data(), digest.size())
+            << " wallets " << wallets.size();
 }
 
 void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
