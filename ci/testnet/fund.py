@@ -8,7 +8,7 @@ The genesis funds of a CREDITS_TESTNET build go to the key given in CS_TESTNET_G
 script holds its seed. It sends <amount> CS from it to every node (above the 50'000 minimum stake),
 then, for --load-seconds, small random transfers between nodes, through the Thrift API of node 1.
 
-With --dpos-at and --reward-round the master key, which is also the starter key of the test network
+With --dpos-at and/or --reward-round the master key, which is also the starter key of the test network
 (CS_TESTNET_STARTER_KEY), sends two special "managing" transactions: order 9 moves StartingDPOS to
 --dpos-at, and order 37 turns mining and staking on with a 1 CS block reward from --reward-round.
 Trusted nodes then earn rewards split by stake, as on mainnet.
@@ -168,12 +168,17 @@ def main():
         print(f"fund n{i}: {'ok' if ok else 'FAILED ' + message}", flush=True)
         failures += 0 if ok else 1
 
-    if args.dpos_at and args.reward_round:
-        # Node::processSpecialInfo: u16 order, then the order's fields (cs::IDataStream, little endian)
-        order9 = struct.pack("<HQ", 9, args.dpos_at)
-        order37 = struct.pack("<HBQiQiQ", 37, 3, args.reward_round, 1, 0, 0, 0)  # staking+mining, reward 1.0, coeff 0
-        for name, cmd in (("order 9 (StartingDPOS = %d)" % args.dpos_at, order9),
-                          ("order 37 (rewards from round %d)" % args.reward_round, order37)):
+    # Node::processSpecialInfo: u16 order, then the order's fields (cs::IDataStream, little endian);
+    # each order is optional, without order 9 StartingDPOS stays at its default (10'000)
+    orders = []
+    if args.dpos_at:
+        orders.append(("order 9 (StartingDPOS = %d)" % args.dpos_at, struct.pack("<HQ", 9, args.dpos_at)))
+    if args.reward_round:
+        # staking+mining, reward 1.0, coeff 0
+        orders.append(("order 37 (rewards from round %d)" % args.reward_round,
+                       struct.pack("<HBQiQiQ", 37, 3, args.reward_round, 1, 0, 0, 0)))
+    if orders:
+        for name, cmd in orders:
             ok, message = send(client, master, SPECIAL_TARGET, 0, managing=cmd)
             print(f"{name}: {'ok' if ok else 'FAILED ' + message}", flush=True)
             failures += 0 if ok else 1
