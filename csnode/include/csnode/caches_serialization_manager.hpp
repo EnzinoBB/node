@@ -32,6 +32,10 @@ struct CheckpointHead {
     cs::Bytes prev_hash;
 };
 
+// True when the checkpoint head is the block the chain holds at that sequence, or when this
+// cannot be checked (checkpoint without head, or hash not known locally).
+bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Bytes(cs::Sequence)>& chainHashAt);
+
 class CachesSerializationManager {
 public:
     CachesSerializationManager();
