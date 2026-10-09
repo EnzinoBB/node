@@ -9,6 +9,7 @@
 #include <boost/multi_index/ordered_index.hpp>
 #include <boost/multi_index/hashed_index.hpp>
 
+#include <csnode/statedigest.hpp>
 #include <csnode/walletscache.hpp>
 
 using namespace boost::multi_index;
@@ -57,6 +58,10 @@ public:
     }
 
     csdb::Amount checkWallets();
+
+    // order-independent digest of every wallet's balance-relevant state (ECMH, see statedigest.hpp);
+    // computed in full on the first call, then kept up to date on every wallet update
+    MultisetHash::Digest stateDigest() const;
     void iterate(std::function<bool(const PublicKey& key, const InternalData& data)> func);
 
 protected:
@@ -111,6 +116,9 @@ private:
 
     mutable std::mutex mutex_;
     Container indexes_;
+
+    mutable MultisetHash digest_;
+    mutable bool digestReady_ = false;
 };
 }
 

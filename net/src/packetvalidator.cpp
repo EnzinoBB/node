@@ -1,3 +1,5 @@
+#include <cstdlib>
+
 #include <base58.h>
 #include <consensus.hpp>
 
@@ -18,6 +20,12 @@ std::string bcStr("81p93jgrHqA9L4Vkdut9ESSCV1XNoge7LXBW96cuA7sm");
 
 struct BlockChainKey {
   BlockChainKey() {
+#ifdef CREDITS_TESTNET
+      // test-network builds only: special transactions and bootstrap tables are signed by this key
+      if (const char* key = std::getenv("CS_TESTNET_STARTER_KEY"); key != nullptr && *key != '\0') {
+          bcStr = key;
+      }
+#endif
       cs::Bytes keyBytes;
       DecodeBase58(bcStr, keyBytes);
       std::copy(keyBytes.begin(), keyBytes.end(), key_.begin());

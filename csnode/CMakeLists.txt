@@ -68,6 +68,7 @@ add_library(csnode
   include/csnode/compressor.hpp
   include/csnode/configholder.hpp
   include/csnode/multiwallets.hpp
+  include/csnode/statedigest.hpp
   include/csnode/sendcachedata.hpp
   include/csnode/eventreport.hpp
   include/csnode/idatastream.hpp
@@ -107,6 +108,7 @@ add_library(csnode
   src/roundpackage.cpp
   src/configholder.cpp
   src/multiwallets.cpp
+  src/statedigest.cpp
   src/sendcachedata.cpp
   src/eventreport.cpp
   src/poolcache.cpp
@@ -145,3 +147,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../lmdbxx
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../client/config
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../client/include)
+
+if(CREDITS_TESTNET)
+  target_compile_definitions(${PROJECT_NAME} PRIVATE CREDITS_TESTNET)
+endif()

@@ -385,6 +385,10 @@ public slots:
     // request current trusted nodes for block with specific sequence
     void sendBlockRequestToConfidants(cs::Sequence sequence);
     void processSpecialInfo(const csdb::Pool& pool);
+    // logs the wallet state digest every kStateDigestInterval blocks, comparable between nodes
+    void logStateDigest(const csdb::Pool& pool);
+    void logStateDigest(cs::Sequence sequence);
+    static constexpr cs::Sequence kStateDigestInterval = 1000;
     void checkConsensusSettings(cs::Sequence seq, std::string& msg);
 
     void validateBlock(const csdb::Pool& block, bool* shouldStop);

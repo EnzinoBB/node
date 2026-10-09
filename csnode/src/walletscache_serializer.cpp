@@ -24,6 +24,7 @@ void WalletsCache_Serializer::bind(WalletsCache& wCache) {
     smartPayableTransactions_ =
         reinterpret_cast<decltype(smartPayableTransactions_)>(&wCache.smartPayableTransactions_);
     canceledSmarts_ = reinterpret_cast<decltype(canceledSmarts_)>(&wCache.canceledSmarts_);
+    static_assert(sizeof(WalletData) == sizeof(WalletsCache::WalletData), "WalletData mirror must match WalletsCache::WalletData");
     wallets_ = reinterpret_cast<decltype(wallets_)>(&wCache.multiWallets_->indexes_);
 #ifdef MONITOR_NODE
     trusted_info_ = reinterpret_cast<decltype(trusted_info_)>(&wCache.trusted_info_);

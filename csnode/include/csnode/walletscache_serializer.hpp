@@ -1,5 +1,6 @@
 #ifndef WALLETS_CACHE_SERIALIZER_HPP
 #define WALLETS_CACHE_SERIALIZER_HPP
+#include <array>
 #include <filesystem>
 
 #include <boost/serialization/serialization.hpp>
@@ -161,6 +162,10 @@ private:
 #ifdef MONITOR_NODE
         uint64_t createTime_;
 #endif
+        // keep the layout identical to WalletsCache::WalletData (wallets_ aliases its container);
+        // the state-digest element is rebuilt at start and never serialised
+        std::array<uint8_t, 32> stateElement_{};
+        bool hasStateElement_ = false;
     };
 #ifdef MONITOR_NODE
     class TrustedData {
