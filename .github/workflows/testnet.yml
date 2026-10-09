@@ -6,6 +6,16 @@ name: Testnet
 # nightly, on demand, and on pull requests labelled "testnet".
 on:
   workflow_dispatch:
+    inputs:
+      target_seq:
+        description: 'Sequence every node must reach (StartingDPOS is 10000)'
+        default: '1100'
+      timeout_min:
+        description: 'Minutes allowed to reach it'
+        default: '45'
+      disk_full_node:
+        description: 'Node whose block DB disk fills up for a while (0 = off)'
+        default: '0'
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -30,7 +40,7 @@ jobs:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'testnet')
     name: Private network (7 nodes)
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 340
 
     steps:
       - name: Checkout
@@ -95,11 +105,12 @@ jobs:
           cmake --build build -j"$(nproc)" --target node
 
       - name: Run private network
-        timeout-minutes: 60
+        timeout-minutes: 300
         env:
           NODES: '7'
-          TARGET_SEQ: '1100'
-          TIMEOUT_MIN: '45'
+          TARGET_SEQ: ${{ inputs.target_seq || '1100' }}
+          TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
+          DISK_FULL_NODE: ${{ inputs.disk_full_node || '0' }}
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
