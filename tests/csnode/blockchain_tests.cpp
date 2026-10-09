@@ -61,3 +61,17 @@ TEST(BlockChain, ContentEqualRequiresSameTrustedMask) {
     canonical.add_real_trusted(cs::Utils::maskToBits(cs::Bytes{ 0, 255, 1 }));
     ASSERT_FALSE(BlockChain::testContentEqual(own, canonical));
 }
+
+// these members are saved into quick-start caches and read back on the --set-bc-top path,
+// possibly before any consensus-settings change has set them
+TEST(BlockChain, ConsensusSettingsHaveDefinedDefaults) {
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain blockChain(genesis, start);
+
+    ASSERT_TRUE(blockChain.getBlockReward() == csdb::Amount{ 0 });
+    ASSERT_TRUE(blockChain.getMiningCoefficient() == csdb::Amount{ 0 });
+    ASSERT_FALSE(blockChain.getMiningOn());
+    ASSERT_FALSE(blockChain.getStakingOn());
+    ASSERT_EQ(blockChain.getTimeMinStage1(), 500u);
+}
