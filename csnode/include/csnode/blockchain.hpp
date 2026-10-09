@@ -2,6 +2,7 @@
 #define BLOCKCHAIN_HPP
 
 #include <chrono>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
@@ -408,6 +409,21 @@ public:
     void setStakingOn(bool stOn);
     void setTimeMinStage1(uint32_t timeStage1);
 
+    // Consensus-settings change announced by special order 37 but not active yet, and StartingDPOS
+    // set by order 9. Node owns this state; it is kept here so that quick-start checkpoints carry it
+    // (BlockChain_Serializer), otherwise a node restarted before the activation round never applies it.
+    struct PendingConsensusSettings {
+        cs::Sequence round = std::numeric_limits<cs::Sequence>::max();  // max: nothing pending
+        bool stakingOn = false;
+        bool miningOn = false;
+        csdb::Amount blockReward{0};
+        csdb::Amount miningCoefficient{0};
+    };
+    void setPendingConsensusSettings(const PendingConsensusSettings& pending);
+    PendingConsensusSettings getPendingConsensusSettings() const;
+    void setStartingDPOS(cs::Sequence sequence);
+    cs::Sequence getStartingDPOS() const;  // 0: never set by order 9
+
     // compare only state content: transactions, new wallets, sequence, round fee, user fields, trusted mask
     // true if both pools are not valid, or both pools have equal state content
     static bool testContentEqual(const csdb::Pool& lhs, const csdb::Pool& rhs);
@@ -561,5 +577,7 @@ private:
     bool stakingOn_ = false;
     bool miningOn_ = false;
     uint32_t TimeMinStage1_ = 500;
+    PendingConsensusSettings pendingConsensusSettings_;
+    cs::Sequence startingDPOS_ = 0;
 };
 #endif  //  BLOCKCHAIN_HPP
