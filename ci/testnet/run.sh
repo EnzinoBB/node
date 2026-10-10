@@ -15,6 +15,9 @@
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
+#        PRUNE_NODE (default 0 = off): that node runs with pruned storage (a checkpoint every 1'000
+#        blocks, prune_keep_blocks=300); it must remove old blocks, survive the restart test if it is
+#        the restarted node, and end with the same state digest
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -38,6 +41,7 @@ DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+PRUNE_NODE=${PRUNE_NODE:-0}
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -83,6 +87,7 @@ port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)
 apiexec_port=0
 ajax_port=0
 diag_port=0
+$([ "$i" -eq "$PRUNE_NODE" ] && printf '\n[storage]\ncheckpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\n')
 
 [Core]
 Filter="%Severity% >= info"
@@ -211,6 +216,18 @@ if [ "$MIN_STAKE" -gt 0 ] && [ "$RESTART_AT" -gt 0 ]; then
     echo "special orders: n$NODES applied order 22 $applied time(s)"
     if [ "$applied" -lt 2 ]; then
         echo "FAIL: n$NODES lost special order 22 across its quick start"
+        exit 1
+    fi
+fi
+
+if [ "$PRUNE_NODE" -gt 0 ]; then
+    echo "pruned storage: n$PRUNE_NODE logged:"
+    grep -ah "pruned storage" "$WORK/n$PRUNE_NODE"/node.log | sed 's/^/  /' | tail -n 8
+    for i in $(seq 1 "$NODES"); do
+        echo "  n$i block DB: $(du -sh "$WORK/n$i/db" 2>/dev/null | cut -f1)"
+    done
+    if ! grep -aq "pruned storage: blocks before .* removed" "$WORK/n$PRUNE_NODE"/node.log; then
+        echo "FAIL: n$PRUNE_NODE never pruned its storage"
         exit 1
     fi
 fi
