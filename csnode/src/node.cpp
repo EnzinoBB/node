@@ -401,6 +401,8 @@ void Node::onSuccessQS(csdb::Amount blockReward, csdb::Amount miningCoeff, bool 
 }
 
 void Node::restorePendingConsensusSettings() {
+    restoreSpecialOrders();
+
     if (const auto startingDPOS = blockChain_.getStartingDPOS(); startingDPOS != 0) {
         Consensus::StartingDPOS = startingDPOS;
         csinfo() << "StartingDPOS restored from caches: " << Consensus::StartingDPOS;
@@ -425,6 +427,18 @@ void Node::restorePendingConsensusSettings() {
         std::string msg;
         checkConsensusSettings(pending.round, msg);
         csinfo() << msg;
+    }
+}
+
+void Node::restoreSpecialOrders() {
+    // the effect of these orders is held only in memory; a slow start rebuilds it by reading the blocks
+    const auto& orders = blockChain_.getSpecialOrders();
+    if (orders.empty()) {
+        return;
+    }
+    csinfo() << "Restoring " << orders.size() << " special order(s) from caches";
+    for (const auto& entry : orders) {
+        processSpecialOrder(entry.second);
     }
 }
 
@@ -4107,7 +4121,18 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
             continue;
         } 
         else {
-            auto stringBytes = it.user_field(cs::trx_uf::sp::managing).value<std::string>();
+            processSpecialOrder(it.user_field(cs::trx_uf::sp::managing).value<std::string>());
+        }
+    }
+    std::string msg;
+    checkNodeVersion(pool.sequence(), msg);
+    checkConsensusSettings(pool.sequence(), msg);
+    if (!msg.empty()) {
+        cslog() << msg;
+    }
+}
+
+void Node::processSpecialOrder(const std::string& stringBytes) {
             std::vector<cs::Byte> msg(stringBytes.begin(), stringBytes.end());
             cs::IDataStream stream(msg.data(), msg.size());
             uint16_t order;
@@ -4117,7 +4142,7 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
                 uint8_t cnt;
                 stream >> cnt;
                 if (size_t(cnt) < Consensus::MinTrustedNodes) {
-                  continue;
+                  return;
                 }
                 cslog() << "New bootstrap nodes: ";
                 initialConfidants_.clear();
@@ -4296,15 +4321,6 @@ void Node::processSpecialInfo(const csdb::Pool& pool) {
                     << "\n blockReward " << blockReward_.to_string()
                     << "\n miningCoefficient " << miningCoefficient_.to_string();
             }
-
-        }
-    }
-    std::string msg;
-    checkNodeVersion(pool.sequence(), msg);
-    checkConsensusSettings(pool.sequence(), msg);
-    if (!msg.empty()) {
-        cslog() << msg;
-    }
 }
 
 void Node::saveConsensusSettingsToChain() {

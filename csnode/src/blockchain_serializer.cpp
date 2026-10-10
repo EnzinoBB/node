@@ -7,6 +7,8 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <boost/serialization/map.hpp>
+#include <boost/serialization/string.hpp>
 
 #include <csnode/blockchain.hpp>
 #include <csnode/blockchain_serializer.hpp>
@@ -16,7 +18,7 @@
 namespace {
 const std::string kDataFileName = "blockchain.dat";
 const std::string kPendingFileName = "consensus_pending.dat";
-constexpr uint8_t kPendingFormat = 1;
+constexpr uint8_t kPendingFormat = 2;  // 1: no special orders
 } // namespace
 
 namespace cs {
@@ -41,6 +43,7 @@ void BlockChain_Serializer::bind(BlockChain& bchain, std::set<cs::PublicKey>& in
     pendingBlockReward_ = &bchain.pendingConsensusSettings_.blockReward;
     pendingMiningCoefficient_ = &bchain.pendingConsensusSettings_.miningCoefficient;
     startingDPOS_ = &bchain.startingDPOS_;
+    specialOrders_ = &bchain.specialOrders_;
     csdebug() << "Blockchain bindings made";
 }
 
@@ -92,6 +95,7 @@ void BlockChain_Serializer::savePending(const std::filesystem::path& rootDir) {
     oa << pendingBlockReward_->integral() << pendingBlockReward_->fraction();
     oa << pendingMiningCoefficient_->integral() << pendingMiningCoefficient_->fraction();
     oa << *startingDPOS_;
+    oa << *specialOrders_;
 }
 
 void BlockChain_Serializer::loadPending(const std::filesystem::path& rootDir) {
@@ -104,7 +108,7 @@ void BlockChain_Serializer::loadPending(const std::filesystem::path& rootDir) {
     boost::archive::binary_iarchive ia(ifs);
     uint8_t format = 0;
     ia >> format;
-    if (format != kPendingFormat) {
+    if (format != 1 && format != kPendingFormat) {
         cswarning() << "BlockChain_Serializer: unknown " << kPendingFileName << " format " << int(format) << ", ignored";
         return;
     }
@@ -115,6 +119,9 @@ void BlockChain_Serializer::loadPending(const std::filesystem::path& rootDir) {
     ia >> rewardIntegral >> rewardFraction;
     ia >> coefficientIntegral >> coefficientFraction;
     ia >> *startingDPOS_;
+    if (format >= 2) {
+        ia >> *specialOrders_;
+    }
     *pendingBlockReward_ = csdb::Amount(rewardIntegral, rewardFraction);
     *pendingMiningCoefficient_ = csdb::Amount(coefficientIntegral, coefficientFraction);
 }
@@ -126,6 +133,7 @@ void BlockChain_Serializer::resetPending() {
     *pendingBlockReward_ = csdb::Amount{0};
     *pendingMiningCoefficient_ = csdb::Amount{0};
     *startingDPOS_ = 0;
+    specialOrders_->clear();
 }
 
 ::cscrypto::Hash BlockChain_Serializer::hash() {

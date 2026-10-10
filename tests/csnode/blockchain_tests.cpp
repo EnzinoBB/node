@@ -10,7 +10,10 @@
 #include <csnode/blockchain.hpp>
 #include <csnode/blockchain_serializer.hpp>
 
+#include <csdb/amount_commission.hpp>
+#include <csdb/currency.hpp>
 #include <csdb/pool.hpp>
+#include <csnode/nodecore.hpp>
 
 TEST(BlockChain, block_service_info) {
     csdb::Pool block{};
@@ -120,6 +123,66 @@ TEST(BlockChain, PendingConsensusSettingsSurviveCheckpoint) {
     serializer.load(dir);
     ASSERT_EQ(loaded.getPendingConsensusSettings().round, std::numeric_limits<cs::Sequence>::max());
     ASSERT_EQ(loaded.getStartingDPOS(), 0u);
+
+    std::filesystem::remove_all(dir);
+}
+
+namespace {
+// a transaction carrying a special order: u16 order number (little endian) then its fields
+csdb::Transaction specialOrderTransaction(int64_t id, uint16_t order, uint64_t value) {
+    csdb::Transaction transaction{id, csdb::Address::from_public_key(cs::PublicKey{}), csdb::Address::from_public_key(cs::PublicKey{}),
+                                  csdb::Currency{1}, csdb::Amount{0}, csdb::AmountCommission{0.}, csdb::AmountCommission{0.}, cs::Signature{}};
+    std::string payload(reinterpret_cast<const char*>(&order), sizeof(order));
+    payload.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    transaction.add_user_field(cs::trx_uf::sp::managing, payload);
+    return transaction;
+}
+
+uint64_t orderValue(const std::string& payload) {
+    uint64_t value = 0;
+    std::copy(payload.begin() + sizeof(uint16_t), payload.end(), reinterpret_cast<char*>(&value));
+    return value;
+}
+}  // namespace
+
+TEST(BlockChain, SpecialOrdersSurviveCheckpoint) {
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    const auto dir = std::filesystem::temp_directory_path() / "cs_special_orders_test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::set<cs::PublicKey> confidants;
+    {
+        BlockChain saved(genesis, start);
+        csdb::Pool first;
+        first.add_transaction(specialOrderTransaction(1, 26, 1000));  // MaxTransactionSize
+        first.add_transaction(specialOrderTransaction(2, 35, 777));   // syncroChangeRound
+        first.add_transaction(specialOrderTransaction(3, 37, 1));     // kept by the pending settings instead
+        saved.recordSpecialOrders(first);
+        csdb::Pool second;
+        second.add_transaction(specialOrderTransaction(4, 26, 2000));  // a later order of the same kind wins
+        saved.recordSpecialOrders(second);
+        ASSERT_EQ(saved.getSpecialOrders().size(), 2u);
+
+        cs::BlockChain_Serializer serializer;
+        serializer.bind(saved, confidants);
+        serializer.save(dir);
+    }
+
+    BlockChain loaded(genesis, start);
+    cs::BlockChain_Serializer serializer;
+    serializer.bind(loaded, confidants);
+    serializer.load(dir);
+    const auto& orders = loaded.getSpecialOrders();
+    ASSERT_EQ(orders.size(), 2u);
+    ASSERT_EQ(orderValue(orders.at(26)), 2000u);
+    ASSERT_EQ(orderValue(orders.at(35)), 777u);
+
+    // older checkpoints have no companion file: nothing to replay
+    std::filesystem::remove(dir / "consensus_pending.dat");
+    serializer.load(dir);
+    ASSERT_TRUE(loaded.getSpecialOrders().empty());
 
     std::filesystem::remove_all(dir);
 }
