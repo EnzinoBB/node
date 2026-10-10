@@ -226,6 +226,10 @@ if [ "$PRUNE_NODE" -gt 0 ]; then
     for i in $(seq 1 "$NODES"); do
         echo "  n$i block DB: $(du -sh "$WORK/n$i/db" 2>/dev/null | cut -f1)"
     done
+    # file by file, for the pruned node and a full one: block records, hash index, logs, environment
+    for i in 1 "$PRUNE_NODE"; do
+        echo "  n$i files: $(cd "$WORK/n$i/db" && du -k * 2>/dev/null | sort -k2 | awk '{printf "%s=%sK ", $2, $1}')"
+    done
     if ! grep -aq "pruned storage: blocks before .* removed" "$WORK/n$PRUNE_NODE"/node.log; then
         echo "FAIL: n$PRUNE_NODE never pruned its storage"
         exit 1
