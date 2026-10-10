@@ -3785,10 +3785,9 @@ std::string Node::KeyToBase58(cs::PublicKey key) {
 }
 
 void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
-    // a pruned node only follows the network for now: it never takes the Trusted role
-    const bool trxIndexReady = blockChain_.isTrxIndexReady() && !blockChain_.isPruned();
+    const bool trxIndexReady = blockChain_.isTrxIndexReady();
 
-    if (!blockChain_.isTrxIndexReady()) {
+    if (!trxIndexReady) {
         cswarning() << "trxIndex __incomplete__ — refusing Trusted role this round";
     }
 
