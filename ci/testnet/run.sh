@@ -56,7 +56,7 @@ DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
 WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
-declare -a PIDS KEYS
+declare -a PIDS KEYS REPORTED_DOWN
 
 mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
 
@@ -110,7 +110,8 @@ done
 
 start_node() {
     local i=$1
-    (cd "$WORK/n$i" && exec "$BIN" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
+    # core dumps (see core_pattern in the workflow) let a crash be traced afterwards
+    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$BIN" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
 }
 
@@ -156,7 +157,14 @@ while :; do
     for i in $(seq 1 "$NODES"); do
         s=$(seq_of "$i"); s=${s:-0}
         line+=" n$i=$s"
-        if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then line+="(down)"; fi
+        if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            line+="(down)"
+            if [ -z "${REPORTED_DOWN[$i]:-}" ]; then
+                REPORTED_DOWN[$i]=1
+                status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
+                echo "n$i exited with status $status$([ "$status" -gt 128 ] && echo " (signal $((status - 128)))")"
+            fi
+        fi
         if [ "$min" -lt 0 ] || [ "$s" -lt "$min" ]; then min=$s; fi
     done
     join_seq=-1
@@ -236,6 +244,13 @@ if [ "$MIN_STAKE" -gt 0 ] && [ "$RESTART_AT" -gt 0 ]; then
         exit 1
     fi
 fi
+
+# a crashed node left a core file: print where it stopped
+for core in "$WORK"/core.* "$WORK"/n*/core*; do
+    [ -f "$core" ] || continue
+    echo "core dump $core:"
+    gdb -q -batch -ex "bt 40" "$BIN" "$core" 2>/dev/null | grep -E '^#' | head -n 40
+done
 
 for p in "$PRUNE_NODE" "$JOIN_NODE"; do
     [ "$p" -gt 0 ] || continue

@@ -125,6 +125,11 @@ jobs:
           ccache --max-size=2G
           cmake --build build -j"$(nproc)" --target node
 
+      - name: Enable core dumps
+        run: |
+          sudo apt-get install -y -qq gdb
+          sudo sysctl -w kernel.core_pattern="${{ github.workspace }}/testnet-run/core.%e.%p"
+
       - name: Run private network
         timeout-minutes: 300
         env:
