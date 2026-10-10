@@ -131,18 +131,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: executor
-          key: contract-executor-mainnet-4.2.532.0-v1
+          key: contract-executor-mainnet-4.2.532.0-v2
 
       - name: Fetch contract executor
         if: inputs.contracts == '1' && steps.cache-executor.outputs.cache-hit != 'true'
         run: |
           curl -sSfL -o release.tar.gz \
             https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
-          tar -tzf release.tar.gz | grep -iv '/$' | grep -iE 'executor|\.jar$|settings|java' | head -40
           mkdir -p executor
-          tar -xzf release.tar.gz -C executor --wildcards --no-anchored '*contract-executor*.jar'
+          tar -xzf release.tar.gz -C executor
+          rm -rf executor/csnode/javafx-sdk-13
           rm release.tar.gz
-          find executor -type f | head
+          ls -la executor/csnode | grep -v '\.log$' | head -40
+          grep -ihE 'executor|jdk|java' executor/csnode/config.ini executor/csnode/*.sh executor/csnode/settings.properties 2>/dev/null | head -20
+          unzip -p executor/csnode/contract-executor.jar META-INF/MANIFEST.MF | head -20
 
       - name: Set up Java 11
         if: inputs.contracts == '1'
