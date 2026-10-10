@@ -2,7 +2,7 @@
 """Fund the nodes of a private test network and keep some transfers flowing.
 
 Usage: fund.py <work_dir> <nodes> <master_seed_b58> [--port 9090] [--amount 60000] [--load-seconds 0]
-               [--dpos-at SEQ --reward-round SEQ] [--delegations]
+               [--dpos-at SEQ --reward-round SEQ] [--min-stake CS] [--delegations]
 
 The genesis funds of a CREDITS_TESTNET build go to the key given in CS_TESTNET_GENESIS_KEY; this
 script holds its seed. It sends <amount> CS from it to every node (above the 50'000 minimum stake),
@@ -11,7 +11,8 @@ then, for --load-seconds, small random transfers between nodes, through the Thri
 With --dpos-at and/or --reward-round the master key, which is also the starter key of the test network
 (CS_TESTNET_STARTER_KEY), sends two special "managing" transactions: order 9 moves StartingDPOS to
 --dpos-at, and order 37 turns mining and staking on with a 1 CS block reward from --reward-round.
-Trusted nodes then earn rewards split by stake, as on mainnet.
+Trusted nodes then earn rewards split by stake, as on mainnet. --min-stake sends order 22, which
+sets the minimum stake of a trusted node (keep it below the funded amount).
 
 With --delegations every node delegates to the next one twice: 1'000 CS without a time limit and
 500 CS until --delegation-seconds from now (a timed delegation, which the nodes release on their
@@ -152,6 +153,7 @@ def main():
     parser.add_argument("--load-seconds", type=int, default=0)
     parser.add_argument("--dpos-at", type=int, default=0)
     parser.add_argument("--reward-round", type=int, default=0)
+    parser.add_argument("--min-stake", type=int, default=0)
     parser.add_argument("--delegations", action="store_true")
     parser.add_argument("--delegation-seconds", type=int, default=240)
     args = parser.parse_args()
@@ -177,6 +179,8 @@ def main():
         # staking+mining, reward 1.0, coeff 0
         orders.append(("order 37 (rewards from round %d)" % args.reward_round,
                        struct.pack("<HBQiQiQ", 37, 3, args.reward_round, 1, 0, 0, 0)))
+    if args.min_stake:
+        orders.append(("order 22 (MinStakeValue = %d)" % args.min_stake, struct.pack("<HiQ", 22, args.min_stake, 0)))
     if orders:
         for name, cmd in orders:
             ok, message = send(client, master, SPECIAL_TARGET, 0, managing=cmd)

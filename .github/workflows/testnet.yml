@@ -25,6 +25,9 @@ on:
       reward_round:
         description: 'Turn block rewards on at this round via special order 37 (0 = off)'
         default: '0'
+      min_stake:
+        description: 'Set the minimum stake via special order 22, in CS (0 = off)'
+        default: '0'
       delegate:
         description: 'Nodes delegate to each other, with and without a time limit (0 = off)'
         default: '0'
@@ -127,6 +130,7 @@ jobs:
           DPOS_AT: ${{ inputs.dpos_at || '0' }}
           REWARD_ROUND: ${{ inputs.reward_round || '0' }}
           DELEGATE: ${{ inputs.delegate || '0' }}
+          MIN_STAKE: ${{ inputs.min_stake || '0' }}
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run

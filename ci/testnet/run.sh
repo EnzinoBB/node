@@ -11,6 +11,8 @@
 #        (default 30) and then keeps random transfers flowing for LOAD_SECONDS (default 300)
 #        DPOS_AT / REWARD_ROUND (default 0 = off, needs FUND=1): the master key, which is also the
 #        starter key, moves StartingDPOS and turns block rewards on (special orders 9 and 37)
+#        MIN_STAKE (default 0 = off, needs FUND=1): special order 22 sets the minimum stake; with the
+#        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
@@ -34,6 +36,7 @@ DISK_FULL_NODE=${DISK_FULL_NODE:-0}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
+MIN_STAKE=${MIN_STAKE:-0}
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -169,7 +172,7 @@ while :; do
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
-            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" \
+            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" \
             $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
@@ -193,6 +196,16 @@ fi
 
 if [ "$DISK_FULL_NODE" -gt 0 ]; then
     echo "disk-full test: n$DISK_FULL_NODE logged $(grep -ah "Couldn't save block" "$WORK/n$DISK_FULL_NODE"/*.log | wc -l) failed block saves"
+fi
+
+if [ "$MIN_STAKE" -gt 0 ] && [ "$RESTART_AT" -gt 0 ]; then
+    # order 22 lands well before the restart: once applied live, once more after the quick start
+    applied=$(grep -ah "MinStakeValue changed to" "$WORK/n$NODES"/*.log | wc -l)
+    echo "special orders: n$NODES applied order 22 $applied time(s)"
+    if [ "$applied" -lt 2 ]; then
+        echo "FAIL: n$NODES lost special order 22 across its quick start"
+        exit 1
+    fi
 fi
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
