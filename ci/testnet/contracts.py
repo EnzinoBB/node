@@ -48,8 +48,9 @@ public class Callee extends SmartContract {
 }
 """
 
-CALLER = """import com.credits.scapi.annotations.UsingContract;
-import com.credits.scapi.v0.SmartContract;
+# no @UsingContract: the node refuses any call to a method that declares one (Violations::SubsequentCall,
+# checked by the API and by IterValidator), so the call is a plain invokeExternalContract
+CALLER = """import com.credits.scapi.v0.SmartContract;
 
 public class Caller extends SmartContract {
     private int calls;
@@ -59,7 +60,6 @@ public class Caller extends SmartContract {
         super();
     }
 
-    @UsingContract(address = "%s", method = "get")
     public int callCallee() {
         last = (Integer) invokeExternalContract("%s", "get");
         calls += 1;
@@ -75,7 +75,7 @@ def write_sources(directory):
     with open(os.path.join(directory, "Callee.java"), "w") as f:
         f.write(CALLEE)
     with open(os.path.join(directory, "Caller.java"), "w") as f:
-        f.write(CALLER % (placeholder, placeholder))
+        f.write(CALLER % placeholder)
 
 
 def invocation(method="", used=(), deploy=None):
@@ -139,9 +139,9 @@ def deploy(client, master, name, source):
     sys.exit(f"{name} not deployed after 300 s")
 
 
-def call(client, master, caller, callee, label):
+def call(client, master, caller, label):
     next_inner_id(client, master)
-    sci = invocation(method="callCallee", used=[callee])
+    sci = invocation(method="callCallee")
     result = client.TransactionFlow(smart_transaction(master, caller, sci, TT_EXECUTE))
     value = result.smart_contract_result.v_int if result.smart_contract_result else None
     ok = result.status.code == 0 and value == EXPECTED
@@ -167,15 +167,14 @@ def main():
         return make_client(api.API, host="127.0.0.1", port=port, proto_factory=TBinaryProtocolFactory(),
                            trans_factory=TBufferedTransportFactory(), timeout=300000)
 
-    client = client_for(1)
     master = Account(base58.b58decode(args.master_seed))
-    callee = deploy(client, master, "Callee", CALLEE)
+    callee = deploy(client_for(1), master, "Callee", CALLEE)
     callee_b58 = base58.b58encode(callee).decode()
-    caller = deploy(client, master, "Caller", CALLER % (callee_b58, callee_b58))
+    caller = deploy(client_for(1), master, "Caller", CALLER % callee_b58)
 
     failures = 0
     for n in range(args.calls_before):
-        failures += 0 if call(client, master, caller, callee, f"call {n + 1} before restart") else 1
+        failures += 0 if call(client_for(1), master, caller, f"call {n + 1} before restart") else 1
     if args.ready_file:
         open(args.ready_file, "w").close()
     if args.wait_file:
@@ -184,7 +183,7 @@ def main():
             time.sleep(5)
         print(f"wait file {'found' if os.path.exists(args.wait_file) else 'MISSING'}", flush=True)
     for n in range(args.calls_after):
-        failures += 0 if call(client, master, caller, callee, f"call {n + 1} after restart") else 1
+        failures += 0 if call(client_for(1), master, caller, f"call {n + 1} after restart") else 1
 
     time.sleep(60)  # let the last state reach every node
     states = {}
