@@ -100,7 +100,7 @@ node.api.port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))
 contract.executor.port=$((9300 + i))
 contract.executor.node.api.port=$((9200 + i))
 contract.executor.node.api.host=127.0.0.1
-contract.executor.read.client.timeout=10000
+contract.executor.read.client.timeout=0
 jdk.path=$EXECUTOR_JDK
 PROPS
     # the marker lets run.sh stop the executor of a stopped node
