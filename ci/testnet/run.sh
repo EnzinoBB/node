@@ -60,6 +60,14 @@ if [ "$FUND" = "1" ]; then
     echo "testnet master key $MASTER_PUB"
 fi
 
+# the release ships its executor with the JDK it runs on (ojdkbuild 11.0.4); jdk.path must be a JDK,
+# the executor compiles contracts with it
+if [ "$CONTRACTS" = "1" ]; then
+    EXECUTOR_JDK=$(find "$(dirname "$EXECUTOR_JAR")" -maxdepth 2 -type d -name 'java-11-openjdk-*' | head -1)
+    EXECUTOR_JDK=${EXECUTOR_JDK:-${JAVA_HOME:-/usr}}
+    echo "contract executor $EXECUTOR_JAR on $EXECUTOR_JDK"
+fi
+
 # public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their
 # contract states) and its own executor, started by the node through executor.sh
 api_settings() {
@@ -74,6 +82,9 @@ api_settings() {
     echo "executor_port=$((9300 + i))"
     echo "executor_command=$WORK/n$i/executor.sh"
     echo "executor_multi_instance=true"
+    # the first contract compile in a fresh JVM takes longer than the 4 s default
+    echo "executor_send_timeout=60000"
+    echo "executor_receive_timeout=60000"
     cat > "$WORK/n$i/settings.properties" <<PROPS
 node.api.host=127.0.0.1
 node.api.port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))
@@ -81,11 +92,11 @@ contract.executor.port=$((9300 + i))
 contract.executor.node.api.port=$((9200 + i))
 contract.executor.node.api.host=127.0.0.1
 contract.executor.read.client.timeout=10000
-jdk.path=${JAVA_HOME:-/usr}
+jdk.path=$EXECUTOR_JDK
 PROPS
     # the marker lets run.sh stop the executor of a stopped node
-    printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec java -Xmx256m -Dcs.testnet.node=n%s -jar "%s" >> executor.log 2>&1\n' \
-        "$i" "$EXECUTOR_JAR" > "$WORK/n$i/executor.sh"
+    printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec "%s" -Xmx384m -XX:MaxMetaspaceSize=256m -Dcs.testnet.node=n%s -jar "%s" >> executor.log 2>&1\n' \
+        "$EXECUTOR_JDK/bin/java" "$i" "$EXECUTOR_JAR" > "$WORK/n$i/executor.sh"
     chmod +x "$WORK/n$i/executor.sh"
 }
 
