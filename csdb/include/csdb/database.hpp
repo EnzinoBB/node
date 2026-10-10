@@ -48,6 +48,11 @@ public:
     virtual bool updateContractData(const cs::Bytes& key, const cs::Bytes& data) = 0;
     virtual bool getContractData(const cs::Bytes& key, cs::Bytes& data) = 0;
 
+    // returns the space of removed records to the file system; a no-op where not supported
+    virtual bool compact() {
+        return true;
+    }
+
     class Iterator {
     protected:
         Iterator();
