@@ -163,6 +163,13 @@ while :; do
                 REPORTED_DOWN[$i]=1
                 status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
                 echo "n$i exited with status $status$([ "$status" -gt 128 ] && echo " (signal $((status - 128)))")"
+                # the run may end on its timeout later, so trace a crash right away
+                for core in "$WORK"/core.*."${PIDS[$i]}"; do
+                    [ -f "$core" ] || continue
+                    echo "n$i core dump $core:"
+                    gdb -q -batch -ex "thread apply all bt 25" "$BIN" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 120
+                    mv "$core" "$core.traced"
+                done
             fi
         fi
         if [ "$min" -lt 0 ] || [ "$s" -lt "$min" ]; then min=$s; fi
