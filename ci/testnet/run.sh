@@ -15,6 +15,9 @@
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
+#        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
+#        runs its own executor; contracts.py deploys two contracts, one calling the other, and calls
+#        it before and after the restart test, which waits for the first calls
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -38,6 +41,7 @@ DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+CONTRACTS=${CONTRACTS:-0}
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -55,6 +59,35 @@ if [ "$FUND" = "1" ]; then
     export CS_TESTNET_GENESIS_KEY=$MASTER_PUB CS_TESTNET_STARTER_KEY=$MASTER_PUB
     echo "testnet master key $MASTER_PUB"
 fi
+
+# public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their
+# contract states) and its own executor, started by the node through executor.sh
+api_settings() {
+    local i=$1
+    if [ "$CONTRACTS" != "1" ]; then
+        echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
+        echo "apiexec_port=0"
+        return
+    fi
+    echo "port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))"
+    echo "apiexec_port=$((9200 + i))"
+    echo "executor_port=$((9300 + i))"
+    echo "executor_command=$WORK/n$i/executor.sh"
+    echo "executor_multi_instance=true"
+    cat > "$WORK/n$i/settings.properties" <<PROPS
+node.api.host=127.0.0.1
+node.api.port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))
+contract.executor.port=$((9300 + i))
+contract.executor.node.api.port=$((9200 + i))
+contract.executor.node.api.host=127.0.0.1
+contract.executor.read.client.timeout=10000
+jdk.path=${JAVA_HOME:-/usr}
+PROPS
+    # the marker lets run.sh stop the executor of a stopped node
+    printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec java -Xmx256m -Dcs.testnet.node=n%s -jar "%s" >> executor.log 2>&1\n' \
+        "$i" "$EXECUTOR_JAR" > "$WORK/n$i/executor.sh"
+    chmod +x "$WORK/n$i/executor.sh"
+}
 
 for i in $(seq 1 "$NODES"); do
     dir="$WORK/n$i"
@@ -79,8 +112,7 @@ ip=127.0.0.1
 port=$((BASE_PORT + i))
 
 [api]
-port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)
-apiexec_port=0
+$(api_settings "$i")
 ajax_port=0
 diag_port=0
 
@@ -110,6 +142,7 @@ stop_all() {
     for i in $(seq 1 "$NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true
     done
+    pkill -f "cs.testnet.node=" 2>/dev/null || true
     if [ "$DISK_FULL_NODE" -gt 0 ]; then
         sudo umount "$WORK/n$DISK_FULL_NODE/db" 2>/dev/null || true
     fi
@@ -134,7 +167,9 @@ echo "started $NODES nodes in $WORK"
 
 deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 restarted=0
+stopped_at=0
 FUND_PID=
+CONTRACTS_PID=
 disk_filled_at=0
 disk_freed=0
 while :; do
@@ -149,10 +184,13 @@ while :; do
     done
     echo "$line"
 
-    if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ]; then
+    if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ] \
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
         echo "restart test: stopping n$NODES at sequence $min"
+        stopped_at=$min
         kill -TERM "${PIDS[$NODES]}"
         wait "${PIDS[$NODES]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$NODES " 2>/dev/null || true
         sleep 30
         start_node "$NODES"
         restarted=1
@@ -184,12 +222,39 @@ while :; do
         FUND_PID=$!
     fi
 
-    if [ "$min" -ge "$TARGET_SEQ" ]; then break; fi
+    if [ "$CONTRACTS" = "1" ] && [ -z "$CONTRACTS_PID" ] && grep -q "master transactions done" "$WORK/fund.log" 2>/dev/null; then
+        echo "contracts: deploying and calling them through node 1"
+        (cd "$HERE" && python3 contracts.py "$WORK" "$NODES" "$MASTER_SEED" \
+            --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done") > "$WORK/contracts.log" 2>&1 &
+        CONTRACTS_PID=$!
+    fi
+    # the calls after the restart must run on the restarted node too, so let it catch up first
+    if [ "$restarted" -eq 1 ] && [ ! -e "$WORK/restart-done" ] && [ "$(seq_of "$NODES")" -ge $((stopped_at + 30)) ] 2>/dev/null; then
+        touch "$WORK/restart-done"
+    fi
+
+    if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$CONTRACTS" != "1" ] || ! kill -0 "${CONTRACTS_PID:-0}" 2>/dev/null; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
     fi
 done
+
+if [ -n "$CONTRACTS_PID" ]; then
+    contracts_status=0
+    wait "$CONTRACTS_PID" || contracts_status=$?
+    cat "$WORK/contracts.log"
+    for i in $(seq 1 "$NODES"); do
+        echo "n$i executor: $(grep -ac . "$WORK/n$i/executor.log" 2>/dev/null || echo 0) log lines, $(grep -aci "SmartContractGet\|exception" "$WORK/n$i/node.log" 2>/dev/null || echo 0) node log lines on SmartContractGet/exceptions"
+    done
+    if [ "$contracts_status" -ne 0 ]; then
+        echo "FAIL: contract deploys or calls failed"
+        exit 1
+    fi
+elif [ "$CONTRACTS" = "1" ]; then
+    echo "FAIL: contracts.py never started"
+    exit 1
+fi
 
 if [ -n "$FUND_PID" ]; then
     fund_status=0
