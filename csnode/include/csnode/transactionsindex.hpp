@@ -45,6 +45,10 @@ public:
 
     Sequence getPrevTransBlock(const csdb::Address& _addr, Sequence _curr) const;
 
+    // pruned storage: forget an old block's entries; a walk back through an address's history
+    // then ends at the oldest block still stored (getPrevTransBlock answers kWrongSequence)
+    void onPruneBlock(const csdb::Pool&);
+
 public slots:
     void onStartReadFromDb(Sequence _lastWrittenPoolSeq);
     void onReadFromDb(const csdb::Pool&);
