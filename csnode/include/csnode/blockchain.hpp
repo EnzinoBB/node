@@ -424,6 +424,14 @@ public:
     void setStartingDPOS(cs::Sequence sequence);
     cs::Sequence getStartingDPOS() const;  // 0: never set by order 9
 
+    // Payload of the last special order of each kind whose effect is held only in memory (version
+    // limits, consensus limits, MinStakeValue, syncroChangeRound), recorded when a block
+    // is applied to the caches, so before a checkpoint of that block is saved. A quick start replays
+    // them (Node::restoreSpecialOrders), as a slow start does when it reads the blocks.
+    using SpecialOrders = std::map<uint16_t, std::string>;
+    void recordSpecialOrders(const csdb::Pool& pool);
+    const SpecialOrders& getSpecialOrders() const;
+
     // compare only state content: transactions, new wallets, sequence, round fee, user fields, trusted mask
     // true if both pools are not valid, or both pools have equal state content
     static bool testContentEqual(const csdb::Pool& lhs, const csdb::Pool& rhs);
@@ -579,5 +587,6 @@ private:
     uint32_t TimeMinStage1_ = 500;
     PendingConsensusSettings pendingConsensusSettings_;
     cs::Sequence startingDPOS_ = 0;
+    SpecialOrders specialOrders_;
 };
 #endif  //  BLOCKCHAIN_HPP

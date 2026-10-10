@@ -66,6 +66,7 @@ private:
     csdb::Amount *pendingBlockReward_;
     csdb::Amount *pendingMiningCoefficient_;
     cs::Sequence *startingDPOS_;
+    std::map<uint16_t, std::string> *specialOrders_;
 };
 }  // namespace cs
 #endif //  BLOCKCHAIN_SERIALIZER_HPP

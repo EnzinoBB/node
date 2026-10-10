@@ -271,6 +271,7 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
             }
             updateNonEmptyBlocks(block);
             walletsCacheUpdater_->loadNextBlock(block, block.confidants(), *this);
+            recordSpecialOrders(block);
         }
     }
 
@@ -841,6 +842,7 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
 
         // update non-empty block storage
         updateNonEmptyBlocks(pool);
+        recordSpecialOrders(pool);
     }
     catch (std::exception & e) {
         cserror() << "apply block to caches, exception: " << e.what();
@@ -2385,6 +2387,30 @@ void BlockChain::setStartingDPOS(cs::Sequence sequence) {
 
 cs::Sequence BlockChain::getStartingDPOS() const {
     return startingDPOS_;
+}
+
+void BlockChain::recordSpecialOrders(const csdb::Pool& pool) {
+    // 2 is kept as the initial confidants, 9 and 37 by setStartingDPOS / setPendingConsensusSettings,
+    // 23 by setTimeMinStage1, 32 and 33 by the smart-contract caches; 10 does nothing
+    static const std::set<uint16_t> kRecorded = { 5, 11, 21, 22, 24, 25, 26, 27, 28, 29, 30, 31, 35 };
+    for (const auto& t : pool.transactions()) {
+        if (!isSpecial(t)) {
+            continue;
+        }
+        const auto payload = t.user_field(cs::trx_uf::sp::managing).value<std::string>();
+        if (payload.size() < sizeof(uint16_t)) {
+            continue;
+        }
+        // Node::processSpecialInfo reads the order as a little-endian u16
+        const auto order = static_cast<uint16_t>(static_cast<uint8_t>(payload[0]) | (static_cast<uint8_t>(payload[1]) << 8));
+        if (kRecorded.count(order) != 0) {
+            specialOrders_[order] = payload;
+        }
+    }
+}
+
+const BlockChain::SpecialOrders& BlockChain::getSpecialOrders() const {
+    return specialOrders_;
 }
 
 void BlockChain::setTimeMinStage1(uint32_t timeStage1) {

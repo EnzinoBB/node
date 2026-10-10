@@ -246,6 +246,8 @@ public:
     void saveConsensusSettingsToChain();
     // puts back the order-37 change still pending and the order-9 StartingDPOS saved in the caches
     void restorePendingConsensusSettings();
+    // replays the last special orders of each kind kept in the caches (BlockChain::getSpecialOrders)
+    void restoreSpecialOrders();
 
     void getNodeRewardEvaluation(std::vector<api_diag::NodeRewardSet>& request, std::string& msg, const cs::PublicKey& pKey, bool oneNode);
 
@@ -387,6 +389,7 @@ public slots:
     // request current trusted nodes for block with specific sequence
     void sendBlockRequestToConfidants(cs::Sequence sequence);
     void processSpecialInfo(const csdb::Pool& pool);
+    void processSpecialOrder(const std::string& payload);  // one special order, as carried by a special transaction
     // logs the wallet state digest every kStateDigestInterval blocks, comparable between nodes
     void logStateDigest(const csdb::Pool& pool);
     void logStateDigest(cs::Sequence sequence);
