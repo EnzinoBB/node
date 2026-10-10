@@ -239,10 +239,6 @@ bool BlockChain::isTrxIndexReady() const {
     return !trxIndex_ || trxIndex_->isReady();
 }
 
-bool BlockChain::isPruned() const {
-    return firstStoredSeq_ > 0 || cs::ConfigHolder::instance().config()->getStorageSettings().pruneKeepBlocks > 0;
-}
-
 cs::Sequence BlockChain::getFirstStoredSequence() const {
     return firstStoredSeq_;
 }

@@ -94,7 +94,6 @@ public:
 
     // pruned storage ([storage] prune_keep_blocks): the blocks before getFirstStoredSequence() were
     // removed once a later periodic checkpoint made them unnecessary
-    bool isPruned() const;
     cs::Sequence getFirstStoredSequence() const;
 
     // return unique id of database if at least one unique block has written, otherwise (only genesis block) 0
