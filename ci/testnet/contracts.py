@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
-"""Deploy two smart contracts on the private test network and call one through the other.
+"""Deploy smart contracts on the private test network and call them across the restart test.
 
 Usage: contracts.py <work_dir> <nodes> <master_seed_b58> [--calls-before 3] [--calls-after 5]
                     [--ready-file PATH] [--wait-file PATH] [--wait-timeout 1800]
 
-The master key deploys Callee (get() returns 7) and Caller, whose callCallee() reads Callee through
-invokeExternalContract, so the executor of every trusted node has to fetch Callee's byte code from
-its node (APIEXECHandler::SmartContractGet). Caller.callCallee() is called --calls-before times,
-then it creates --ready-file and, once --wait-file exists (run.sh creates both around the restart
-test), calls it --calls-after times more.
-Every call must return 7, and at the end every node must report the same Caller state.
+The master key deploys Counter, whose next() adds one to its state and returns it, and calls it
+--calls-before times. It then creates --ready-file and, once --wait-file exists (run.sh creates
+both around the restart test, so the restarted node has caught up), calls it --calls-after times
+more. Every call must return the next value, and at the end every node must report the same
+Counter state.
+
+It also deploys Caller, whose callCounter() reaches Counter through invokeExternalContract, and
+calls it once; the result is only reported. Contract-to-contract calls do not work with the
+mainnet node and executor: the node refuses methods declaring @UsingContract
+(Violations::SubsequentCall), and executor build 1518 fails an undeclared invokeExternalContract
+with an AccessControlException (its configuration is created lazily inside the contract sandbox).
 
 Transactions go through node 1's API (port 9090); the final check reads every node's API
 (node i > 1 listens on 9100 + i).
@@ -33,17 +38,22 @@ CURRENCY_CS = 1
 TT_DEPLOY = 1   # api.TransactionType: contract deployment
 TT_EXECUTE = 2  # api.TransactionType: contract execution
 SMART_MAX_FEE = encode_max_fee(10.0)
-EXPECTED = 7
+COUNTER = """import com.credits.scapi.v0.SmartContract;
 
-CALLEE = """import com.credits.scapi.v0.SmartContract;
+public class Counter extends SmartContract {
+    private int value;
 
-public class Callee extends SmartContract {
-    public Callee() {
+    public Counter() {
         super();
     }
 
+    public int next() {
+        value += 1;
+        return value;
+    }
+
     public int get() {
-        return 7;
+        return value;
     }
 }
 """
@@ -60,7 +70,7 @@ public class Caller extends SmartContract {
         super();
     }
 
-    public int callCallee() {
+    public int callCounter() {
         last = (Integer) invokeExternalContract("%s", "get");
         calls += 1;
         return last;
@@ -72,8 +82,8 @@ public class Caller extends SmartContract {
 def write_sources(directory):
     """Write the test contracts as Java files, for a compile check before the network starts."""
     placeholder = "11111111111111111111111111111111"
-    with open(os.path.join(directory, "Callee.java"), "w") as f:
-        f.write(CALLEE)
+    with open(os.path.join(directory, "Counter.java"), "w") as f:
+        f.write(COUNTER)
     with open(os.path.join(directory, "Caller.java"), "w") as f:
         f.write(CALLER % placeholder)
 
@@ -139,14 +149,14 @@ def deploy(client, master, name, source):
     sys.exit(f"{name} not deployed after 300 s")
 
 
-def call(client, master, caller, label):
+def call(client, master, contract, method, label, expected=None):
     next_inner_id(client, master)
-    sci = invocation(method="callCallee")
-    result = client.TransactionFlow(smart_transaction(master, caller, sci, TT_EXECUTE))
+    sci = invocation(method=method)
+    result = client.TransactionFlow(smart_transaction(master, contract, sci, TT_EXECUTE))
     value = result.smart_contract_result.v_int if result.smart_contract_result else None
-    ok = result.status.code == 0 and value == EXPECTED
-    print(f"{label}: {'ok' if ok else 'FAILED'} (status {result.status.code} {result.status.message!r}, "
-          f"returned {value})", flush=True)
+    ok = result.status.code == 0 and value == expected
+    outcome = ("ok" if ok else "FAILED") if expected is not None else "reported"
+    print(f"{label}: {outcome} (status {result.status.code} {result.status.message!r}, returned {value})", flush=True)
     return ok
 
 
@@ -168,13 +178,15 @@ def main():
                            trans_factory=TBufferedTransportFactory(), timeout=300000)
 
     master = Account(base58.b58decode(args.master_seed))
-    callee = deploy(client_for(1), master, "Callee", CALLEE)
-    callee_b58 = base58.b58encode(callee).decode()
-    caller = deploy(client_for(1), master, "Caller", CALLER % callee_b58)
+    counter = deploy(client_for(1), master, "Counter", COUNTER)
+    caller = deploy(client_for(1), master, "Caller", CALLER % base58.b58encode(counter).decode())
+    call(client_for(1), master, caller, "callCounter", "contract-to-contract call (known not to work)")
 
     failures = 0
+    calls = 0
     for n in range(args.calls_before):
-        failures += 0 if call(client_for(1), master, caller, f"call {n + 1} before restart") else 1
+        calls += 1
+        failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} before restart", calls) else 1
     if args.ready_file:
         open(args.ready_file, "w").close()
     if args.wait_file:
@@ -183,19 +195,20 @@ def main():
             time.sleep(5)
         print(f"wait file {'found' if os.path.exists(args.wait_file) else 'MISSING'}", flush=True)
     for n in range(args.calls_after):
-        failures += 0 if call(client_for(1), master, caller, f"call {n + 1} after restart") else 1
+        calls += 1
+        failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} after restart", calls) else 1
 
     time.sleep(60)  # let the last state reach every node
     states = {}
     for i in range(1, args.nodes + 1):
         try:
-            got = client_for(i).SmartContractGet(caller)
+            got = client_for(i).SmartContractGet(counter)
             states[i] = hashlib.sha256(got.smartContract.objectState).hexdigest()[:16] if got.status.code == 0 else "error"
         except Exception as e:  # a node without a reachable API counts as a mismatch
             states[i] = f"unreachable ({type(e).__name__})"
-    print(f"Caller state per node: {states}", flush=True)
+    print(f"Counter state per node: {states}", flush=True)
     if len(set(states.values())) != 1:
-        print("FAIL: nodes disagree on the Caller state", flush=True)
+        print("FAIL: nodes disagree on the Counter state", flush=True)
         failures += 1
     sys.exit(1 if failures else 0)
 

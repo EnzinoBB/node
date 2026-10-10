@@ -32,7 +32,7 @@ on:
         description: 'Nodes delegate to each other, with and without a time limit (0 = off)'
         default: '0'
       contracts:
-        description: 'Run a contract executor per node and call a contract through another one (0 = off)'
+        description: 'Run a contract executor per node and call a contract across the restart test (0 = off)'
         default: '0'
   schedule:
     - cron: '17 2 * * *'

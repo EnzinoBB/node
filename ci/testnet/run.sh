@@ -16,8 +16,8 @@
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
 #        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
-#        runs its own executor; contracts.py deploys two contracts, one calling the other, and calls
-#        it before and after the restart test, which waits for the first calls
+#        runs its own executor; contracts.py deploys a counter contract and calls it before and after
+#        the restart test, which waits for the first calls; all nodes must end with the same state
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
