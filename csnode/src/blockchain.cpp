@@ -264,13 +264,17 @@ void BlockChain::pruneStep() {
     }
     const cs::Sequence end = std::min(pruneUpTo_, from + kBlocksPerStep);
     for (; from < end; ++from) {
-        csdb::PoolHash hash = blockHashes_->find(from);
-        if (hash.is_empty()) {
-            hash = storage_.pool_hash(from);
+        // the block itself tells which transaction index entries it owns
+        const csdb::Pool pool = storage_.pool_load(from);
+        csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(from);
+        if (pool.is_valid() && trxIndex_) {
+            trxIndex_->onPruneBlock(pool);
         }
         if (hash.is_empty() || !storage_.pool_prune(hash)) {
             csdebug() << kLogPrefix << "pruned storage: block " << from << " not found";
         }
+        // getHashBySequence() then answers an empty hash, as for any block not stored
+        blockHashes_->remove(from);
     }
     firstStoredSeq_ = from;
     if (from == pruneUpTo_) {
