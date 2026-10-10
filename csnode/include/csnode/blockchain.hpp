@@ -92,6 +92,10 @@ public:
     // false while trxIndex has an unwalked floor gap; consensus uses this to gate Trusted.
     bool isTrxIndexReady() const;
 
+    // pruned storage ([storage] prune_keep_blocks): the blocks before getFirstStoredSequence() were
+    // removed once a later periodic checkpoint made them unnecessary
+    cs::Sequence getFirstStoredSequence() const;
+
     // return unique id of database if at least one unique block has written, otherwise (only genesis block) 0
     uint64_t uuid() const;
 
@@ -577,6 +581,13 @@ private:
 
     static constexpr size_t kQuickStartSaveCachesInterval = 500'000;
     std::chrono::steady_clock::time_point lastCheckpointWallClock_ = std::chrono::steady_clock::now();
+
+    // pruned storage: after the periodic checkpoint C, the blocks before C - checkpoint_every -
+    // prune_keep_blocks go; they are removed a few at a time as new blocks are applied
+    void schedulePruning(cs::Sequence checkpointSeq);
+    void pruneStep();
+    std::atomic<cs::Sequence> firstStoredSeq_ = 0;
+    cs::Sequence pruneUpTo_ = 0;
     // consensus settings persisted in quick-start caches; same defaults as BlockChain_Serializer::clear()
     int32_t blockRewardIntegral_ = 0;
     uint64_t blockRewardFraction_ = 0;

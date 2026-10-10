@@ -272,6 +272,16 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
         csinfo() << "Storage: slow start";
         it->seek_to_first();
         slowStart = true;
+        // a pruned storage starts after block 0: replaying it onto empty caches would build a wrong
+        // state, so such a node can only start from a quick-start checkpoint
+        if (it->is_valid() && it->key() != 0) {
+            set_last_error(Storage::DataIntegrityError,
+                           "Pruned storage starts at block %u: it needs a quick-start checkpoint, a slow start is not possible",
+                           it->key());
+            cserror() << "Storage: pruned storage starts at block " << it->key()
+                      << ", no quick-start checkpoint covers it; restore one in qs/ or resync from scratch";
+            return false;
+        }
     }
 
     if (count_pool == last_seq_in_db && !slowStart) {
@@ -1068,6 +1078,41 @@ bool Storage::update_contract_data(const Address& abs_addr /*input*/, const cs::
     cs::Bytes bytes(pk.size());
     bytes.assign(pk.cbegin(), pk.cend());
     return d->db->updateContractData(bytes, data);
+}
+
+bool Storage::pool_prune(const PoolHash& hash) {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    // the pool cache is left alone: it is not locked, and an old pool it may still hold stays valid
+    if (!d->db->remove(hash.to_binary())) {
+        d->set_last_error(DatabaseError, "%s: cannot remove pool %s", funcName(), hash.to_string().c_str());
+        return false;
+    }
+    return true;
+}
+
+cs::Sequence Storage::first_sequence() const {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return std::numeric_limits<cs::Sequence>::max();
+    }
+    auto it = d->db->new_iterator();
+    it->seek_to_first();
+    return it->is_valid() ? it->key() : std::numeric_limits<cs::Sequence>::max();
+}
+
+bool Storage::compact() {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    if (!d->db->compact()) {
+        d->set_last_error(DatabaseError, "%s: %s", funcName(), d->db->last_error_message().c_str());
+        return false;
+    }
+    return true;
 }
 
 cs::Sequence Storage::pool_sequence(const PoolHash& hash) const {

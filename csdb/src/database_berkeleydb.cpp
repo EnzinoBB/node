@@ -356,6 +356,25 @@ bool DatabaseBerkeleyDB::remove(const cs::Bytes &key) {
     return true;
 }
 
+bool DatabaseBerkeleyDB::compact() {
+    if (!db_blocks_) {
+        set_last_error(NotOpen);
+        return false;
+    }
+
+    // DB_FREE_SPACE gives emptied pages back to the file system
+    for (Db* db : { db_blocks_.get(), db_seq_no_.get() }) {
+        int status = db->compact(nullptr, nullptr, nullptr, nullptr, DB_FREE_SPACE, nullptr);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+    }
+
+    set_last_error();
+    return true;
+}
+
 bool DatabaseBerkeleyDB::write_batch(const ItemList &) {
     assert(false);
 
