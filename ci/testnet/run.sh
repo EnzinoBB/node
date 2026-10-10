@@ -256,9 +256,11 @@ if [ -n "$CONTRACTS_PID" ]; then
     wait "$CONTRACTS_PID" || contracts_status=$?
     cat "$WORK/contracts.log"
     for i in $(seq 1 "$NODES"); do
-        echo "n$i executor: $(grep -ac . "$WORK/n$i/executor.log" 2>/dev/null || echo 0) log lines, $(grep -aci "SmartContractGet\|exception" "$WORK/n$i/node.log" 2>/dev/null || echo 0) node log lines on SmartContractGet/exceptions"
+        echo "n$i executor: $(cat "$WORK/n$i"/log/*.txt 2>/dev/null | grep -ac . || true) log lines, $(grep -aci "SmartContractGet\|exception" "$WORK/n$i/node.log" 2>/dev/null || echo 0) node log lines on SmartContractGet/exceptions"
     done
     if [ "$contracts_status" -ne 0 ]; then
+        # the executor logs to log/executor-log-<day>.txt in its working directory (its logback.xml)
+        tail -n 40 "$WORK"/n1/log/*.txt 2>/dev/null || true
         echo "FAIL: contract deploys or calls failed"
         exit 1
     fi

@@ -195,5 +195,6 @@ jobs:
             testnet-run/n*/*.log
             testnet-run/fund.log
             testnet-run/contracts.log
+            testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
           retention-days: 14
