@@ -244,6 +244,8 @@ public:
     uint8_t requestKBAnswer(std::vector<std::string> choice);
     void onSuccessQS(csdb::Amount blockReward, csdb::Amount miningCoeff, bool miningOn, bool stakingOn, uint32_t stageOneHashesTime);
     void saveConsensusSettingsToChain();
+    // puts back the order-37 change still pending and the order-9 StartingDPOS saved in the caches
+    void restorePendingConsensusSettings();
 
     void getNodeRewardEvaluation(std::vector<api_diag::NodeRewardSet>& request, std::string& msg, const cs::PublicKey& pKey, bool oneNode);
 

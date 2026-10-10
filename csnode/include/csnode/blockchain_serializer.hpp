@@ -54,6 +54,18 @@ private:
     bool *stakingOn_;
     bool *miningOn_;
     uint32_t *TimeMinStage1_;
+
+    // optional companion file: checkpoints written before it existed simply load without it
+    void savePending(const std::filesystem::path& rootDir);
+    void loadPending(const std::filesystem::path& rootDir);
+    void resetPending();
+
+    cs::Sequence *pendingRound_;
+    bool *pendingStakingOn_;
+    bool *pendingMiningOn_;
+    csdb::Amount *pendingBlockReward_;
+    csdb::Amount *pendingMiningCoefficient_;
+    cs::Sequence *startingDPOS_;
 };
 }  // namespace cs
 #endif //  BLOCKCHAIN_SERIALIZER_HPP
