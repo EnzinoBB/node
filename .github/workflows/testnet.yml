@@ -131,7 +131,9 @@ jobs:
         run: |
           git clone --quiet https://github.com/CREDITSCOM/contract-executor.git executor
           git clone --quiet --depth 1 --branch dev https://github.com/CREDITSCOM/sc-api.git executor-deps/sc-api
-          git clone --quiet --depth 1 https://github.com/CREDITSCOM/thrift-api-client.git executor-deps/thrift-api-client
+          # pinned before the libthrift 0.14 bump (a254f6ae), whose module name breaks executor_client's module-info
+          git clone --quiet https://github.com/CREDITSCOM/thrift-api-client.git executor-deps/thrift-api-client
+          git -C executor-deps/thrift-api-client checkout --quiet 59d1e9af
 
       - name: Set up Java 11
         if: inputs.contracts == '1'
