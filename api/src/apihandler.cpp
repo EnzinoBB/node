@@ -3200,13 +3200,24 @@ void apiexec::APIEXECHandler::WalletIdGet(api::WalletIdGetResult& _return, const
 void apiexec::APIEXECHandler::SmartContractGet(SmartContractGetResult& _return, const general::AccessID accessId, const general::Address& address) {
     const auto addr = BlockChain::getAddressFromKey(address);
     auto opt_transaction_id = executor_.getDeployTrxn(addr);
-    if (!opt_transaction_id.has_value()) {
+    csdb::Transaction trxn;
+    if (opt_transaction_id.has_value()) {
+        trxn = executor_.loadTransactionApi(opt_transaction_id.value());
+    }
+    else if (auto restored = executor_.getRestoredDeploy(addr); restored.has_value()) {
+        trxn = restored.value();  // deployed before the quick-start checkpoint
+    }
+    else {
         SetResponseStatus(_return.status, APIRequestStatusType::FAILURE);
         return;
     }
 
-    auto trxn = executor_.loadTransactionApi(opt_transaction_id.value());
     const auto sci = cs::Serializer::deserialize<api::SmartContractInvocation>(trxn.user_field(0).value<std::string>());
+    if (!opt_transaction_id.has_value() && sci.smartContractDeploy.byteCodeObjects.empty()) {
+        // deployTrxns_ never lists a deploy without byte code
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE);
+        return;
+    }
     _return.byteCodeObjects = sci.smartContractDeploy.byteCodeObjects;
     const auto opt_state = executor_.getAccessState(accessId, addr);
     if (!opt_state.has_value()) {

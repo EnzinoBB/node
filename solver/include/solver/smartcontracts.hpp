@@ -406,6 +406,9 @@ public:
 
     csdb::Transaction get_contract_deploy(const csdb::Address& addr) const;
 
+    // deploy transactions of all known contracts, blacklisted ones included, by absolute address
+    std::map<csdb::Address, csdb::Transaction> get_deploy_transactions() const;
+
     // get & handle rejected transactions from smart contract(s)
     // usually ordinary consensus may reject smart-related transactions
     // failed list refers to rejected calls

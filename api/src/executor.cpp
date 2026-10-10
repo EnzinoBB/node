@@ -243,6 +243,21 @@ void cs::Executor::updateDeployTrxns(const csdb::Address& address, const csdb::T
     deployTrxns_[address] = trxnsId;
 }
 
+void cs::Executor::setRestoredDeploys(std::map<csdb::Address, csdb::Transaction> deploys) {
+    std::lock_guard lock(mutex_);
+    restoredDeploys_ = std::move(deploys);
+}
+
+std::optional<csdb::Transaction> cs::Executor::getRestoredDeploy(const csdb::Address& address) {
+    std::shared_lock lock(mutex_);
+
+    if (const auto it = restoredDeploys_.find(address); it != restoredDeploys_.end()) {
+        return std::make_optional(it->second);
+    }
+
+    return std::nullopt;
+}
+
 void cs::Executor::setLastState(const csdb::Address& address, const std::string& state) {
     std::lock_guard lock(mutex_);
     lastState_[address] = state;
