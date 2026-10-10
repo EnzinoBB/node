@@ -16,6 +16,12 @@ on:
       disk_full_node:
         description: 'Node whose block DB disk fills up for a while (0 = off)'
         default: '0'
+      prune_node:
+        description: 'Node running with pruned storage (0 = off)'
+        default: '0'
+      join_pruned_at:
+        description: 'Sequence at which one more node joins from block 0 with pruned storage (0 = off)'
+        default: '0'
       restart_at:
         description: 'Sequence at which the last node is restarted (0 = off)'
         default: '300'
@@ -127,6 +133,8 @@ jobs:
           TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
           DISK_FULL_NODE: ${{ inputs.disk_full_node || '0' }}
           RESTART_AT: ${{ inputs.restart_at || '300' }}
+          PRUNE_NODE: ${{ inputs.prune_node || '0' }}
+          JOIN_PRUNED_AT: ${{ inputs.join_pruned_at || '0' }}
           DPOS_AT: ${{ inputs.dpos_at || '0' }}
           REWARD_ROUND: ${{ inputs.reward_round || '0' }}
           DELEGATE: ${{ inputs.delegate || '0' }}
