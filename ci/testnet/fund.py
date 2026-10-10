@@ -204,6 +204,8 @@ def main():
             failures += delegate(f"n{i} delegates 500 to n{i % len(nodes) + 1} until {expiry}",
                                  src, dst, 500, expiry)
 
+    print("master transactions done", flush=True)  # run.sh: the master key is free for contracts.py
+
     sent = 0
     start = time.time()
     deadline = start + args.load_seconds

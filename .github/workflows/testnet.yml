@@ -31,6 +31,9 @@ on:
       delegate:
         description: 'Nodes delegate to each other, with and without a time limit (0 = off)'
         default: '0'
+      contracts:
+        description: 'Run a contract executor per node and call a contract across the restart test (0 = off)'
+        default: '0'
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -119,6 +122,45 @@ jobs:
           ccache --max-size=2G
           cmake --build build -j"$(nproc)" --target node
 
+      # the contract executor shipped with the official mainnet release (the one operators run); its
+      # sources no longer build as published: unreleased sc-api/thrift-api-client versions and
+      # Eclipse version ranges that now resolve to Java 17 jars
+      - name: Restore contract executor
+        if: inputs.contracts == '1'
+        id: cache-executor
+        uses: actions/cache@v4
+        with:
+          path: executor
+          key: contract-executor-mainnet-4.2.532.0-v2
+
+      - name: Fetch contract executor
+        if: inputs.contracts == '1' && steps.cache-executor.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL -o release.tar.gz \
+            https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
+          mkdir -p executor
+          tar -xzf release.tar.gz -C executor
+          rm -rf executor/csnode/javafx-sdk-13
+          rm release.tar.gz
+          ls -la executor/csnode | grep -v '\.log$' | head -40
+          grep -ihE 'executor|jdk|java' executor/csnode/config.ini executor/csnode/*.sh executor/csnode/settings.properties 2>/dev/null | head -20
+          unzip -p executor/csnode/contract-executor.jar META-INF/MANIFEST.MF | head -20
+
+      - name: Set up Java 11
+        if: inputs.contracts == '1'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Locate contract executor
+        if: inputs.contracts == '1'
+        run: |
+          jar=$(find "$PWD/executor" -type f -name '*contract-executor*.jar' | head -1)
+          test -n "$jar"
+          echo "EXECUTOR_JAR=$jar" >> "$GITHUB_ENV"
+          echo "executor jar: $jar"
+
       - name: Run private network
         timeout-minutes: 300
         env:
@@ -131,6 +173,7 @@ jobs:
           REWARD_ROUND: ${{ inputs.reward_round || '0' }}
           DELEGATE: ${{ inputs.delegate || '0' }}
           MIN_STAKE: ${{ inputs.min_stake || '0' }}
+          CONTRACTS: ${{ inputs.contracts || '0' }}
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
@@ -151,5 +194,7 @@ jobs:
           path: |
             testnet-run/n*/*.log
             testnet-run/fund.log
+            testnet-run/contracts.log
+            testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
           retention-days: 14
