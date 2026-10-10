@@ -66,6 +66,15 @@ if [ "$CONTRACTS" = "1" ]; then
     EXECUTOR_JDK=$(find "$(dirname "$EXECUTOR_JAR")" -maxdepth 2 -type d -name 'java-11-openjdk-*' | head -1)
     EXECUTOR_JDK=${EXECUTOR_JDK:-${JAVA_HOME:-/usr}}
     echo "contract executor $EXECUTOR_JAR on $EXECUTOR_JDK"
+    # the executor compiles contracts in-process with this JDK's javac and its own class path, but a
+    # compile error reaches the API only as a dropped connection, so compile them here first
+    mkdir -p "$WORK/contract-sources"
+    (cd "$HERE" && python3 -c "import contracts, sys; contracts.write_sources(sys.argv[1])" "$WORK/contract-sources")
+    if ! "$EXECUTOR_JDK/bin/javac" -parameters -cp "$EXECUTOR_JAR" -d "$WORK/contract-sources" "$WORK"/contract-sources/*.java; then
+        echo "FAIL: the test contracts do not compile against the executor's class path"
+        exit 1
+    fi
+    echo "test contracts compile against the executor's class path"
 fi
 
 # public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their

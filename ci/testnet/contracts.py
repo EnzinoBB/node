@@ -69,6 +69,15 @@ public class Caller extends SmartContract {
 """
 
 
+def write_sources(directory):
+    """Write the test contracts as Java files, for a compile check before the network starts."""
+    placeholder = "11111111111111111111111111111111"
+    with open(os.path.join(directory, "Callee.java"), "w") as f:
+        f.write(CALLEE)
+    with open(os.path.join(directory, "Caller.java"), "w") as f:
+        f.write(CALLER % (placeholder, placeholder))
+
+
 def invocation(method="", used=(), deploy=None):
     # every non-optional field set, so thriftpy2 writes the same bytes as the node's
     # cs::Serializer::serialize, which the signature covers (user field 0, deploy::Code)
