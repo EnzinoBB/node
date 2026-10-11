@@ -167,7 +167,7 @@ while :; do
                 for core in "$WORK"/core.*."${PIDS[$i]}"; do
                     [ -f "$core" ] || continue
                     echo "n$i core dump $core:"
-                    gdb -q -batch -ex "thread apply all bt 25" "$BIN" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 120
+                    gdb -q -batch -ex "bt 60" -ex "thread apply all bt 6" "$BIN" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 200
                     mv "$core" "$core.traced"
                 done
             fi
