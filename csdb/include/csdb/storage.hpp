@@ -316,6 +316,28 @@ public:
 
     csdb::PoolHash pool_hash(cs::Sequence sequence) const;
 
+    /**
+     * Pruned storage: removes an old pool, which the node no longer needs. Not meant for the last
+     * pools, whose bookkeeping (count, last hash, write queue) it leaves alone.
+     *
+     * @param   hash    The pool hash.
+     *
+     * @returns True if the pool was removed.
+     */
+    bool pool_prune(const PoolHash& hash);
+
+    /**
+     * Sequence of the oldest pool stored: 0 unless the storage was pruned.
+     *
+     * @returns The sequence, or std::numeric_limits<cs::Sequence>::max() if the storage is empty.
+     */
+    cs::Sequence first_sequence() const;
+
+    /**
+     * Returns the space of pruned pools to the file system.
+     */
+    bool compact();
+
 public signals:
     const ReadBlockSignal& readBlockEvent() const;
     const BlockReadingStartedSingal& readingStartedEvent() const;

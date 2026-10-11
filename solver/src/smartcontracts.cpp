@@ -3178,6 +3178,11 @@ size_t SmartContracts::validateRestoredStatesAgainstChain(BlockChain& blockchain
         const SmartContractRef& chain_ref = item.ref_state.is_valid() ? item.ref_state : item.ref_execute;
         if (!chain_ref.is_valid()) { ++unverifiable; continue; }
         csdb::Transaction t = get_transaction(chain_ref, abs_addr);
+        if (!t.is_valid() && chain_ref.sequence < blockchain.getFirstStoredSequence()) {
+            // pruned storage: the block is gone, the checkpoint is the only record of this state
+            ++unverifiable;
+            continue;
+        }
         if (!t.is_valid()) {
             cswarning() << kLogPrefix << to_base58(abs_addr)
                 << ": qs-restored new_state ref " << chain_ref

@@ -62,6 +62,7 @@ struct StorageData {
     size_t checkpointKeep = 5;              // retained periodic checkpoints (qs/0 always kept on top)
     size_t checkpointEvery = 500'000;       // blocks between periodic checkpoints (rolling history depth = checkpointEvery * checkpointKeep)
     size_t checkpointEveryMinutes = 0;      // wall-clock fallback: also save if this many minutes elapsed since last save (0 = disabled; opt-in for slow networks)
+    size_t pruneKeepBlocks = 0;             // pruned storage: blocks kept before the previous periodic checkpoint (0 = keep every block)
 };
 
 struct ApiData {
