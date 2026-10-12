@@ -21,6 +21,7 @@
 #include <csdb/address.hpp>
 #include <csdb/database.hpp>
 #include <csdb/database_berkeleydb.hpp>
+#include <csdb/database_lmdb.hpp>
 #include <csdb/internal/shared_data_ptr_implementation.hpp>
 #include <csdb/internal/utils.hpp>
 #include <csdb/pool.hpp>
@@ -506,15 +507,25 @@ bool Storage::open(
     const ::std::string& path_to_base,
     OpenCallback callback,
     cs::Sequence newBlockchainTop,
-    cs::Sequence startReadFrom
+    cs::Sequence startReadFrom,
+    Engine engine
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
         path = ::csdb::internal::app_data_path() + "/CREDITS";
     }
 
-    auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
-    db->open(path);
+    ::std::shared_ptr<Database> db;
+    if (engine == Engine::Lmdb) {
+        auto lmdb{::std::make_shared<::csdb::DatabaseLmdb>()};
+        lmdb->open(path + "/lmdb");
+        db = lmdb;
+    }
+    else {
+        auto berkeley{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
+        berkeley->open(path);
+        db = berkeley;
+    }
 
     //d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
 
