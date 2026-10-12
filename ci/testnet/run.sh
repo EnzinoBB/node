@@ -15,8 +15,8 @@
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
-#        PRUNE_NODE (default 0 = off): that node runs with pruned storage (a checkpoint every 1'000
-#        blocks, prune_keep_blocks=300); it must remove old blocks, survive the restart test if it is
+#        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
+#        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
@@ -94,7 +94,7 @@ port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)
 apiexec_port=0
 ajax_port=0
 diag_port=0
-$({ [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; } && printf '\n[storage]\ncheckpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\n')
+$({ [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; } && printf '\n[storage]\ncheckpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\nblock_db=lmdb\n')
 
 [Core]
 Filter="%Severity% >= info"

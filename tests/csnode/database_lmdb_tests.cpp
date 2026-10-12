@@ -100,3 +100,29 @@ TEST(DatabaseLmdb, ReusesTheSpaceOfRemovedBlocks) {
     EXPECT_LT(fileSize(), 2 * windowSize) << "window " << windowSize << " bytes";
     std::filesystem::remove_all(dir);
 }
+
+// pruning removes a whole step of blocks in one transaction; blocks already gone are skipped
+TEST(DatabaseLmdb, RemovesABatchSkippingMissingBlocks) {
+    const auto dir = std::filesystem::temp_directory_path() / "cs_lmdb_batch_test";
+    std::filesystem::remove_all(dir);
+    auto db = openAt(dir);
+    for (uint32_t seq = 0; seq < 100; ++seq) {
+        ASSERT_TRUE(db->put(hashOf(seq), seq, blockOf(seq)));
+    }
+    ASSERT_TRUE(db->remove(hashOf(10)));
+
+    std::vector<cs::Bytes> step;
+    for (uint32_t seq = 0; seq < 64; ++seq) {
+        step.push_back(hashOf(seq));
+    }
+    ASSERT_TRUE(db->remove_batch(step));
+
+    cs::Bytes value;
+    ASSERT_FALSE(db->get(uint32_t(0), &value));
+    ASSERT_FALSE(db->get(hashOf(63), nullptr));
+    ASSERT_TRUE(db->get(uint32_t(64), &value));
+    auto it = db->new_iterator();
+    it->seek_to_first();
+    ASSERT_EQ(it->key(), 64u);
+    std::filesystem::remove_all(dir);
+}

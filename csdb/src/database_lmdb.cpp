@@ -210,6 +210,47 @@ bool DatabaseLmdb::remove(const cs::Bytes& key) {
     return true;
 }
 
+// Pruning removes many old blocks in a row: one transaction for all of them instead of one each.
+// Every commit copies the changed tree path and frees the old pages, which LMDB can reuse only
+// once no later reader may see them; millions of tiny transactions build a backlog of such pages
+// and the file grows (seen on mainnet: a 1.7 GB file holding 360 MB of blocks).
+bool DatabaseLmdb::remove_batch(const std::vector<cs::Bytes>& keys) {
+    if (!is_open()) {
+        set_last_error(NotOpen);
+        return false;
+    }
+    Txn txn(env_, false);
+    if (txn.status() != 0) {
+        return fail(txn.status(), "txn_begin");
+    }
+    for (const auto& key : keys) {
+        MDB_val hash = toVal(key);
+        MDB_val found;
+        int status = mdb_get(txn.get(), seqNo_, &hash, &found);
+        if (status == MDB_NOTFOUND) {
+            continue;
+        }
+        if (status != 0) {
+            return fail(status, "remove_batch");
+        }
+        uint32_t seqNo = *static_cast<const uint32_t*>(found.mv_data);
+        MDB_val seq = toVal(seqNo);
+        status = mdb_del(txn.get(), seqNo_, &hash, nullptr);
+        if (status == 0) {
+            status = mdb_del(txn.get(), blocks_, &seq, nullptr);
+        }
+        if (status != 0 && status != MDB_NOTFOUND) {
+            return fail(status, "remove_batch");
+        }
+    }
+    int status = txn.commit();
+    if (status != 0) {
+        return fail(status, "remove_batch");
+    }
+    set_last_error();
+    return true;
+}
+
 bool DatabaseLmdb::seq_no(const cs::Bytes& key, uint32_t* value) {
     if (value == nullptr) {
         set_last_error(InvalidArgument);

@@ -335,6 +335,12 @@ public:
     bool pool_prune(const PoolHash& hash);
 
     /**
+     * Pruned storage: removes several old pools at once, in one database transaction where the
+     * engine allows it. Pools not stored are skipped.
+     */
+    bool pool_prune_batch(const std::vector<PoolHash>& hashes);
+
+    /**
      * Sequence of the oldest pool stored: 0 unless the storage was pruned.
      *
      * @returns The sequence, or std::numeric_limits<cs::Sequence>::max() if the storage is empty.

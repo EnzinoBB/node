@@ -1104,6 +1104,24 @@ bool Storage::pool_prune(const PoolHash& hash) {
     return true;
 }
 
+bool Storage::pool_prune_batch(const std::vector<PoolHash>& hashes) {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    std::vector<cs::Bytes> keys;
+    keys.reserve(hashes.size());
+    for (const auto& hash : hashes) {
+        keys.push_back(hash.to_binary());
+    }
+    // the pool cache is left alone, as in pool_prune
+    if (!d->db->remove_batch(keys)) {
+        d->set_last_error(DatabaseError, "%s: %s", funcName(), d->db->last_error_message().c_str());
+        return false;
+    }
+    return true;
+}
+
 cs::Sequence Storage::first_sequence() const {
     if (!isOpen()) {
         d->set_last_error(NotOpen);
