@@ -269,22 +269,30 @@ void BlockChain::pruneStep() {
         return;
     }
     const cs::Sequence end = std::min(pruneUpTo_, from + kBlocksPerStep);
-    for (; from < end; ++from) {
+    std::vector<csdb::PoolHash> hashes;
+    hashes.reserve(end - from);
+    for (cs::Sequence seq = from; seq < end; ++seq) {
         // the block itself tells which transaction index entries it owns
-        const csdb::Pool pool = storage_.pool_load(from);
-        csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(from);
+        const csdb::Pool pool = storage_.pool_load(seq);
+        csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(seq);
         if (pool.is_valid() && trxIndex_) {
             trxIndex_->onPruneBlock(pool);
         }
         if (hash.is_empty()) {
-            csdebug() << kLogPrefix << "pruned storage: block " << from << " not found";
+            csdebug() << kLogPrefix << "pruned storage: block " << seq << " not found";
         }
-        else if (!storage_.pool_prune(hash) && pool.is_valid()) {
-            // the block is there but could not be removed now (e.g. the storage is short of buffer
-            // cache during a fast sync): keep it and retry from here on the next step
-            cswarning() << kLogPrefix << "pruned storage: block " << from << " not removed yet, will retry";
-            break;
+        else {
+            hashes.push_back(hash);
         }
+    }
+    // the whole step in one storage transaction where the engine allows it (LMDB)
+    if (!hashes.empty() && !storage_.pool_prune_batch(hashes)) {
+        // the blocks are there but could not be removed now (e.g. the storage is short of buffer
+        // cache during a fast sync): keep them and retry this step with the next block
+        cswarning() << kLogPrefix << "pruned storage: blocks " << from << ".." << end - 1 << " not removed yet, will retry";
+        return;
+    }
+    for (; from < end; ++from) {
         // getHashBySequence() then answers an empty hash, as for any block not stored
         blockHashes_->remove(from);
     }

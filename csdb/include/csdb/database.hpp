@@ -53,6 +53,18 @@ public:
         return true;
     }
 
+    // removes several blocks by hash; keys not stored are skipped. One transaction where the engine
+    // allows it (LMDB), otherwise one remove() per key
+    virtual bool remove_batch(const std::vector<cs::Bytes>& keys) {
+        bool ok = true;
+        for (const auto& key : keys) {
+            if (get(key, nullptr) && !remove(key)) {
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
     class Iterator {
     protected:
         Iterator();
