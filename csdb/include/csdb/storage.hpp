@@ -137,10 +137,18 @@ public:
      * In case of fail the error info can be received with methods:  \ref last_error,
      * \ref last_error_message, \ref db_last_error() and \ref db_last_error_message()
      */
+    // block database engine: BerkeleyDB (every node so far), or LMDB in <path>/lmdb for pruned
+    // storage, whose removed blocks LMDB reuses the space of
+    enum class Engine {
+        BerkeleyDB,
+        Lmdb
+    };
+
     bool open(const ::std::string& path_to_base = ::std::string{},
               OpenCallback callback = nullptr,
               cs::Sequence newBlockchainTop = cs::kWrongSequence,
-              cs::Sequence startReadFrom = 0);
+              cs::Sequence startReadFrom = 0,
+              Engine engine = Engine::BerkeleyDB);
 
     /**
      * @brief Creating the storage using the parameters set.

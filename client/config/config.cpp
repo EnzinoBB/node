@@ -74,6 +74,7 @@ const std::string PARAM_NAME_STORAGE_CHECKPOINT_KEEP = "checkpoint_keep";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY = "checkpoint_every";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES = "checkpoint_every_minutes";
 const std::string PARAM_NAME_STORAGE_PRUNE_KEEP_BLOCKS = "prune_keep_blocks";
+const std::string PARAM_NAME_STORAGE_BLOCK_DB = "block_db";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -964,6 +965,15 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     }
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES, storageData_.checkpointEveryMinutes);
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_PRUNE_KEEP_BLOCKS, storageData_.pruneKeepBlocks);
+    if (data.count(PARAM_NAME_STORAGE_BLOCK_DB)) {
+        const auto engine = data.get<std::string>(PARAM_NAME_STORAGE_BLOCK_DB);
+        if (engine == "lmdb") {
+            storageData_.lmdbBlocks = true;
+        }
+        else if (engine != "berkeleydb") {
+            cswarning() << "config: unknown block_db=" << engine << ", using berkeleydb";
+        }
+    }
     if (storageData_.pruneKeepBlocks > 0) {
         // contracts refer to blocks up to 100 rounds back; keep a margin above that
         if (storageData_.pruneKeepBlocks < 200) {

@@ -181,7 +181,13 @@ bool BlockChain::init(
         return false;
     };
 
-    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase)) {
+    // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] block_db)
+    const bool lmdbBlocks = cs::ConfigHolder::instance().config()->getStorageSettings().lmdbBlocks;
+    if (lmdbBlocks) {
+        cslog() << kLogPrefix << "block database: LMDB in " << path << "/lmdb";
+    }
+    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
+                       lmdbBlocks ? csdb::Storage::Engine::Lmdb : csdb::Storage::Engine::BerkeleyDB)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
     }
