@@ -270,8 +270,14 @@ void BlockChain::pruneStep() {
         if (pool.is_valid() && trxIndex_) {
             trxIndex_->onPruneBlock(pool);
         }
-        if (hash.is_empty() || !storage_.pool_prune(hash)) {
+        if (hash.is_empty()) {
             csdebug() << kLogPrefix << "pruned storage: block " << from << " not found";
+        }
+        else if (!storage_.pool_prune(hash) && pool.is_valid()) {
+            // the block is there but could not be removed now (e.g. the storage is short of buffer
+            // cache during a fast sync): keep it and retry from here on the next step
+            cswarning() << kLogPrefix << "pruned storage: block " << from << " not removed yet, will retry";
+            break;
         }
         // getHashBySequence() then answers an empty hash, as for any block not stored
         blockHashes_->remove(from);

@@ -332,23 +332,31 @@ bool DatabaseBerkeleyDB::remove(const cs::Bytes &key) {
         return false;
     }
 
-    Dbt_copy<cs::Bytes> db_key(key);
-    Dbt_copy<uint32_t> db_seq_no;
-    int status = db_seq_no_->get(nullptr, &db_key, &db_seq_no, 0);
-    if (status != 0) {
-        set_last_error_from_berkeleydb(status);
-        return false;
-    }
+    // BerkeleyDB throws when its buffer cache is exhausted (BDB3017, seen on mainnet while a pruned
+    // node removed old blocks during a fast sync): report it, the caller may retry later
+    try {
+        Dbt_copy<cs::Bytes> db_key(key);
+        Dbt_copy<uint32_t> db_seq_no;
+        int status = db_seq_no_->get(nullptr, &db_key, &db_seq_no, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
 
-    status = db_seq_no_->del(nullptr, &db_key, 0);
-    if (status != 0) {
-        set_last_error_from_berkeleydb(status);
-        return false;
-    }
+        status = db_seq_no_->del(nullptr, &db_key, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
 
-    status = db_blocks_->del(nullptr, &db_seq_no, 0);
-    if (status != 0) {
-        set_last_error_from_berkeleydb(status);
+        status = db_blocks_->del(nullptr, &db_seq_no, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+    }
+    catch (const std::exception& e) {
+        set_last_error(UnknownError, "remove: %s", e.what());
         return false;
     }
 
