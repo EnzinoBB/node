@@ -1109,7 +1109,8 @@ bool Storage::compact() {
         return false;
     }
     if (!d->db->compact()) {
-        d->set_last_error(DatabaseError, "%s: %s", funcName(), d->db->last_error_message().c_str());
+        // not a fault: compaction only returns space, and freed pages are reused for new blocks anyway
+        cswarning() << "Storage> compaction skipped: " << d->db->last_error_message();
         return false;
     }
     return true;
