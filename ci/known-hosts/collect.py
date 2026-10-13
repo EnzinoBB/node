@@ -17,6 +17,7 @@ Writes to <out dir>:
 """
 import argparse
 import glob
+import ipaddress
 import json
 import os
 import re
@@ -101,11 +102,19 @@ def main():
     # The tip is the median of the heights peers report, one value per /24 so that many peers of one
     # party cannot move it; a peer claiming far more than that is as suspect as one far behind.
     def subnet_of(p):
-        return ".".join(p["address"].split(":")[0].split(".")[:3]) if p["address"] else p["key"]
+        """The /24 (IPv4) or /48 (IPv6) of the peer's address, None when it is not a plain IP:port."""
+        host, sep, port = p["address"].rpartition(":")
+        if not sep or not port.isdigit():
+            return None
+        try:
+            ip = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            return None
+        return str(ipaddress.ip_network(f"{ip}/{24 if ip.version == 4 else 48}", strict=False))
 
     by_subnet = {}
     for p in peers.values():
-        if p["connected"]:
+        if p["connected"] and subnet_of(p):
             by_subnet.setdefault(subnet_of(p), []).append(p["last_seq"])
     heights = sorted(sorted(seqs)[len(seqs) // 2] for seqs in by_subnet.values())
     tip = heights[len(heights) // 2] if heights else 0
@@ -113,7 +122,7 @@ def main():
         p["reply_ratio"] = round(p["replies"] / p["requests"], 3) if p["requests"] else None
         p["serves_history"] = p["requests"] > 0 and p["reply_ratio"] >= args.min_replies
         p["on_tip"] = abs(p["last_seq"] - tip) <= args.max_lag
-        p["listed"] = bool(p["address"]) and p["connected"] and p["on_tip"] and (p["serves_history"] or p["requests"] == 0)
+        p["listed"] = subnet_of(p) is not None and p["connected"] and p["on_tip"] and (p["serves_history"] or p["requests"] == 0)
         p["note"] = ""
 
     ordered = sorted(peers.values(), key=lambda p: (not p["listed"], -(p["reply_ratio"] or 0), -p["last_seq"]))
@@ -124,7 +133,7 @@ def main():
             per_subnet[subnet] = per_subnet.get(subnet, 0) + 1
             if per_subnet[subnet] > args.max_per_subnet:
                 p["listed"] = False
-                p["note"] = f"more than {args.max_per_subnet} peers in {subnet}.0/24"
+                p["note"] = f"more than {args.max_per_subnet} peers in {subnet}"
         elif p["connected"] and not p["on_tip"]:
             p["note"] = f"more than {args.max_lag} blocks from the median height {tip}"
     ordered.sort(key=lambda p: (not p["listed"], -(p["reply_ratio"] or 0), -p["last_seq"]))
