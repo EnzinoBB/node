@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Weekly verified known_hosts list, run on a host with working UDP (GitHub-hosted runners cannot
-# take part in mainnet: peers' UDP replies never reach them).
+# The weekly verified known_hosts list of .github/workflows/known-hosts.yml, run on any host with
+# Docker instead of GitHub Actions (for example when Actions is unavailable).
 #
 # The pruned package of the latest community release joins mainnet for MINUTES minutes from an
 # empty database with a throwaway key, in a CPU- and memory-limited container. collect.py lists the
 # peers that served the oldest blocks; the report goes to the rolling release "known-hosts" and the
 # list is proposed as a pull request updating packaging/mainnet/known_hosts.txt, for review.
 #
-# Usage: run-weekly.sh            (cron: 0 4 * * 5)
+# Usage: run-weekly.sh
 # Env:   WORK (default ~/Projects/credits/known-hosts-run), MINUTES (25), REPO (EnzinoBB/node),
 #        CPUS (1.0), MEMORY (3g), PUBLISH (1)
 # Needs: docker, gh (authenticated), python3 with base58 and pynacl.

@@ -1,16 +1,25 @@
 name: Known hosts
 
-# Manual check that the latest community package (pruned storage) starts on a clean machine:
-# node, contract executor and transport. It cannot verify peers here: the p2p transport is UDP and
-# the peers' replies never reach GitHub-hosted runners (recorded on 2026-10-13: requests sent to all
-# 40 known hosts, no packet back in 90 s). The weekly verified list is built on a host with working
-# UDP by ci/known-hosts/run-weekly.sh, which publishes the "known-hosts" release and the pull request.
+# Once a week, a node from the latest community package (pruned storage) joins mainnet for a short
+# while from an empty database, and the peers it meets are checked: a node syncing from block 0
+# asks its neighbours for the oldest blocks first, so a peer that answers keeps the chain's history.
+# The report is published in the rolling release "known-hosts" (known_hosts.txt, peers.md,
+# peers.json), and the list is proposed as a pull request updating packaging/mainnet/known_hosts.txt:
+# it reaches the packages only after someone reviews it, since peers that misbehave on purpose could
+# otherwise steer new nodes towards themselves.
+#
+# The node talks to untrusted peers, so it runs in a job with read-only permissions and no token in
+# its environment; a separate job publishes. It runs as an ordinary NORMAL node with a throwaway key,
+# outbound connections only. ci/known-hosts/run-weekly.sh does the same on any host with Docker.
 on:
+  schedule:
+    # Friday 04:00 in Italy during summer time, 03:00 in winter (GitHub's cron is UTC)
+    - cron: '0 2 * * 5'
   workflow_dispatch:
     inputs:
       minutes:
         description: 'How long the node runs'
-        default: '5'
+        default: '25'
       package_tag:
         description: 'Release of the package to run (empty = the latest community-v* release)'
         default: ''
@@ -29,7 +38,7 @@ jobs:
     permissions:
       contents: read
     env:
-      MINUTES: ${{ inputs.minutes || '5' }}
+      MINUTES: ${{ inputs.minutes || '25' }}
       PACKAGE_TAG: ${{ inputs.package_tag }}
 
     steps:
@@ -62,7 +71,8 @@ jobs:
           tar -xzf *-pruned.tar.gz
           echo "package $tag"
 
-      # start from every peer we know: the shipped list, the last published one and the official one
+      # start from every peer we know: the shipped list, the last published one and the repository's
+      # (the official 2023 list alone no longer reaches anybody)
       - name: Seed peers
         env:
           GH_TOKEN: ${{ github.token }}
@@ -74,7 +84,7 @@ jobs:
           echo "seed: $(wc -l < seed.txt) peers"
 
       # one executor per runner: skip the check for other executors, which runs jps and waits for it
-      # with no timeout (the first run stopped there before starting the executor)
+      # with no timeout
       - name: Single executor
         run: |
           sed -i 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
@@ -90,31 +100,92 @@ jobs:
           cd csnode
           ./node --db-path db --config-file config.ini </dev/null > stdout.log 2>&1 &
           pid=$!
-          sleep 120
-          if ! grep -aq 'Start contract executor' log/log_*.txt 2>/dev/null; then
-            echo "::warning::no executor start after 2 minutes, process tree:"
-            ps -ef --forest | grep -v grep | grep -A5 -E '[.]/node|jps|java' || true
-          fi
-          sleep $((MINUTES * 60 - 120))
+          sleep $((MINUTES * 60))
           kill -INT "$pid" 2>/dev/null || true
           for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
           kill -KILL "$pid" 2>/dev/null || true
           pkill -f '[c]ontract-executor[.]jar' 2>/dev/null || true  # the brackets keep this shell's own command line from matching
-          grep -ah 'Last written sequence' log/log_*.txt | tail -1 || true
-          du -sh db 2>/dev/null || true
+          grep -ah 'Start contract executor\|Node initialized\|Last written sequence' log/log_*.txt | tail -3 || true
 
-      - name: Check start
+      - name: Collect
         run: |
-          grep -a 'Start contract executor: success' csnode/log/log_*.txt
-          grep -a 'Node initialized successfully' csnode/log/log_*.txt
+          python3 ci/known-hosts/collect.py csnode out
+          cat out/peers.md
+          listed=$(wc -l < out/known_hosts.txt)
+          # a run that met almost nobody (network trouble on the runner) must not replace the list
+          if [ "$listed" -lt 5 ]; then
+            echo "only $listed peers verified, not publishing"
+            exit 1
+          fi
 
       - name: Upload
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: package-start-${{ github.run_id }}
+          name: known-hosts-${{ github.run_id }}
           path: |
+            out/
             csnode/log/
             csnode/stdout.log
             csnode/debug.log
           retention-days: 14
+
+  publish:
+    needs: collect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      # the list is proposed against the default branch, whatever branch the run came from
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          name: known-hosts-${{ github.run_id }}
+          path: run
+
+      - name: Report
+        run: |
+          {
+            echo "Peers verified on $(date -u +%Y-%m-%d) by a node that joined mainnet from an empty database"
+            echo "(run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
+            echo
+            cat run/out/peers.md
+          } > notes.md
+          if ! gh release view known-hosts --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create known-hosts --repo "$GITHUB_REPOSITORY" --target "$(git rev-parse HEAD)" \
+              --title "Known hosts" --notes-file notes.md --latest=false
+          else
+            gh release edit known-hosts --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+          fi
+          gh release upload known-hosts --repo "$GITHUB_REPOSITORY" --clobber \
+            run/out/known_hosts.txt run/out/peers.md run/out/peers.json
+
+      # the packages ship packaging/mainnet/known_hosts.txt: propose the new list for review
+      - name: Pull request
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          cp run/out/known_hosts.txt packaging/mainnet/known_hosts.txt
+          if git diff --quiet; then echo "known_hosts.txt unchanged"; exit 0; fi
+          branch=auto/known-hosts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git commit -qam "packaging: known hosts verified on $(date -u +%Y-%m-%d)"
+          git push -f origin "$branch"
+          if ! gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$DEFAULT_BRANCH" \
+              --title "packaging: update known hosts" --body-file notes.md
+          else
+            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --body-file notes.md
+          fi
