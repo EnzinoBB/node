@@ -1,0 +1,202 @@
+name: Release
+
+# Ready-to-run mainnet packages of the community node, in two variants that differ only in
+# config.ini: full storage (as the official release) and pruned storage on LMDB. Each holds the node
+# built here, the contract executor of an EnzinoBB/contract-executor release, the JDK the official
+# release ships, and the official configuration files kept in packaging/mainnet.
+#
+# A tag community-v<version> publishes a release; a manual run builds the packages as workflow
+# artifacts and publishes only when asked.
+on:
+  push:
+    tags: ['community-v*']
+  # a pull request that touches the packaging builds the packages as artifacts, never publishes
+  pull_request:
+    branches: [master]
+    paths: ['packaging/**', '.github/workflows/release.yml']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version, e.g. 4.2.532-community.1'
+        required: true
+      executor_tag:
+        description: 'Release tag of EnzinoBB/contract-executor holding contract-executor.jar and sc-api-support.jar'
+        required: true
+      publish:
+        description: 'Create the GitHub release community-v<version> (false = artifacts only)'
+        default: 'false'
+
+permissions:
+  contents: write
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  BOOST_PREFIX: /home/runner/boost
+  CCACHE_DIR: /home/runner/.ccache
+  # the JDK of the official release (ojdkbuild 11.0.4), mirrored here once so packages do not
+  # depend on the official release staying online
+  JDK_TAG: deps-ojdkbuild-11.0.4
+  JDK_ASSET: java-11-openjdk-11.0.4-linux-x64.tar.gz
+  OFFICIAL_RELEASE: https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
+
+jobs:
+  package:
+    name: Packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # inputs through env, never expanded into the script
+      - name: Version
+        env:
+          IN_VERSION: ${{ inputs.version }}
+          IN_EXECUTOR_TAG: ${{ inputs.executor_tag }}
+          IN_PUBLISH: ${{ inputs.publish }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            version="${GITHUB_REF_NAME#community-v}"
+            # a tagged release names its executor in packaging/executor-tag
+            executor_tag=$(tr -d '[:space:]' < packaging/executor-tag)
+            publish=true
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            version="pr-${GITHUB_SHA::8}"
+            executor_tag=$(tr -d '[:space:]' < packaging/executor-tag)
+            publish=false
+          else
+            version="$IN_VERSION"
+            executor_tag="$IN_EXECUTOR_TAG"
+            publish="$IN_PUBLISH"
+          fi
+          # names that end up in file names, URLs and tags
+          echo "$version" | grep -qE '^[0-9A-Za-z._-]+$' || { echo "bad version '$version'"; exit 1; }
+          echo "$executor_tag" | grep -qE '^[0-9A-Za-z._/-]+$' || { echo "bad executor tag '$executor_tag'"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          echo "EXECUTOR_TAG=$executor_tag" >> "$GITHUB_ENV"
+          echo "PUBLISH=$publish" >> "$GITHUB_ENV"
+          echo "version $version, executor $executor_tag, publish $publish"
+
+      # third-party/rocksdb is a gitlink with no .gitmodules entry: list the submodules explicitly
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build flex bison autoconf automake libtool pkg-config ccache
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-24.04-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | sha256sum -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(nproc)" -d0 variant=release link=static runtime-link=static threading=multi \
+            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-24.04-${{ github.sha }}
+          restore-keys: ccache-ubuntu-24.04-
+
+      # same configuration as build.yml; mainnet build, so no CREDITS_TESTNET
+      - name: Build node
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF
+          cmake --build build -j"$(nproc)" --target node
+          ls -la build/client/node
+
+      - name: Fetch contract executor
+        run: |
+          mkdir -p executor
+          for jar in contract-executor.jar sc-api-support.jar; do
+            curl -sSfL -o "executor/$jar" "https://github.com/EnzinoBB/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
+          done
+          unzip -p executor/contract-executor.jar git.properties | grep -E 'commit.id=|total.commit.count='
+
+      # mirrored once from the official release; later runs take it from the mirror
+      - name: Fetch JDK
+        run: |
+          if ! curl -sSfL -o jdk.tar.gz "https://github.com/${GITHUB_REPOSITORY}/releases/download/${JDK_TAG}/${JDK_ASSET}"; then
+            echo "mirroring the JDK of the official release"
+            curl -sSfL -o official.tar.gz "$OFFICIAL_RELEASE"
+            tar -xzf official.tar.gz csnode/ojdkbuild
+            tar -C csnode/ojdkbuild -czf jdk.tar.gz java-11-openjdk-11.0.4
+            # the asset takes the file's name (a "#label" suffix only sets the display label)
+            cp jdk.tar.gz "$JDK_ASSET"
+            gh release create "$JDK_TAG" "$JDK_ASSET" --repo "$GITHUB_REPOSITORY" \
+              --title "JDK of the official mainnet release (ojdkbuild 11.0.4)" \
+              --notes "java-11-openjdk-11.0.4 as shipped in Ubuntu20_Mainnet-4.2.532.0.tar.gz of CREDITSCOM/node, mirrored for the community packages. GPLv2 with the Classpath Exception." \
+              || true
+            rm -rf official.tar.gz csnode "$JDK_ASSET"
+          fi
+          mkdir -p jdk && tar -xzf jdk.tar.gz -C jdk
+          jdk/java-11-openjdk-11.0.4/bin/java -version
+
+      - name: Packages
+        run: |
+          for variant in full pruned; do
+            packaging/make-package.sh "$variant" "$VERSION" build/client/node executor \
+              jdk/java-11-openjdk-11.0.4 dist
+          done
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          ls -la dist
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: credits-node-${{ env.VERSION }}
+          path: dist/
+          retention-days: 30
+
+      - name: Publish release
+        if: env.PUBLISH == 'true'
+        run: |
+          tag="community-v${VERSION}"
+          cat > notes.md <<EOF
+          Community build of the Credits node, protocol version 532, compatible with mainnet release 4.2.532.
+
+          - node: ${GITHUB_REPOSITORY}@${GITHUB_SHA}
+          - contract executor: EnzinoBB/contract-executor release ${EXECUTOR_TAG}
+          - JDK: ojdkbuild 11.0.4, the one the official release ships
+
+          The two packages hold the same binaries and differ only in config.ini: full storage, or
+          pruned storage on LMDB. See README-COMMUNITY.txt inside each package. Verify with SHA256SUMS.
+          EOF
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title "Community node $VERSION" --notes-file notes.md
+          fi
