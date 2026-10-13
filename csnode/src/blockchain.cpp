@@ -181,9 +181,21 @@ bool BlockChain::init(
         return false;
     };
 
-    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase)) {
+    // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] block_db)
+    const bool lmdbBlocks = cs::ConfigHolder::instance().config()->getStorageSettings().lmdbBlocks;
+    if (lmdbBlocks) {
+        cslog() << kLogPrefix << "block database: LMDB in " << path << "/lmdb";
+    }
+    if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
+                       lmdbBlocks ? csdb::Storage::Engine::Lmdb : csdb::Storage::Engine::BerkeleyDB)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
+    }
+    if (const auto first = storage_.first_sequence(); first != std::numeric_limits<cs::Sequence>::max()) {
+        firstStoredSeq_ = first;
+        if (first > 0) {
+            cslog() << kLogPrefix << "pruned storage: oldest block stored is " << WithDelimiters(first);
+        }
     }
 
     if (newBlockchainTop != cs::kWrongSequence) {
@@ -231,6 +243,65 @@ void BlockChain::flushIndexes() {
 
 bool BlockChain::isTrxIndexReady() const {
     return !trxIndex_ || trxIndex_->isReady();
+}
+
+cs::Sequence BlockChain::getFirstStoredSequence() const {
+    return firstStoredSeq_;
+}
+
+void BlockChain::schedulePruning(cs::Sequence checkpointSeq) {
+    const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+    if (sto.pruneKeepBlocks == 0 || checkpointSeq < sto.checkpointEvery + sto.pruneKeepBlocks) {
+        return;
+    }
+    // the previous periodic checkpoint and the blocks just before it stay, should this one be unusable
+    const cs::Sequence target = checkpointSeq - sto.checkpointEvery - sto.pruneKeepBlocks;
+    if (target > pruneUpTo_) {
+        pruneUpTo_ = target;
+        cslog() << kLogPrefix << "pruned storage: blocks before " << WithDelimiters(target) << " will be removed";
+    }
+}
+
+void BlockChain::pruneStep() {
+    constexpr cs::Sequence kBlocksPerStep = 64;
+    cs::Sequence from = firstStoredSeq_;
+    if (from >= pruneUpTo_) {
+        return;
+    }
+    const cs::Sequence end = std::min(pruneUpTo_, from + kBlocksPerStep);
+    std::vector<csdb::PoolHash> hashes;
+    hashes.reserve(end - from);
+    for (cs::Sequence seq = from; seq < end; ++seq) {
+        // the block itself tells which transaction index entries it owns
+        const csdb::Pool pool = storage_.pool_load(seq);
+        csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(seq);
+        if (pool.is_valid() && trxIndex_) {
+            trxIndex_->onPruneBlock(pool);
+        }
+        if (hash.is_empty()) {
+            csdebug() << kLogPrefix << "pruned storage: block " << seq << " not found";
+        }
+        else {
+            hashes.push_back(hash);
+        }
+    }
+    // the whole step in one storage transaction where the engine allows it (LMDB)
+    if (!hashes.empty() && !storage_.pool_prune_batch(hashes)) {
+        // the blocks are there but could not be removed now (e.g. the storage is short of buffer
+        // cache during a fast sync): keep them and retry this step with the next block
+        cswarning() << kLogPrefix << "pruned storage: blocks " << from << ".." << end - 1 << " not removed yet, will retry";
+        return;
+    }
+    for (; from < end; ++from) {
+        // getHashBySequence() then answers an empty hash, as for any block not stored
+        blockHashes_->remove(from);
+    }
+    firstStoredSeq_ = from;
+    if (from == pruneUpTo_) {
+        const bool compacted = storage_.compact();
+        cslog() << kLogPrefix << "pruned storage: blocks before " << WithDelimiters(from) << " removed"
+                << (compacted ? ", storage compacted" : ", storage compaction failed");
+    }
 }
 
 uint64_t BlockChain::uuid() const {
@@ -292,6 +363,9 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
             if (serializationManPtr_->save(blockSeq, head)) {
                 serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
                 lastCheckpointWallClock_ = now;
+                if (byCount) {
+                    schedulePruning(blockSeq);  // carried out once blocks are applied live, not while the storage is read
+                }
             }
             else {
                 cserror() << kLogPrefix << "slow start: cannot save checkpoint at " << blockSeq;
@@ -869,12 +943,16 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
             if (serializationManPtr_->save(pool.sequence(), head)) {
                 serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
                 lastCheckpointWallClock_ = now;
+                if (byCount) {
+                    schedulePruning(pool.sequence());
+                }
             }
             else {
                 cserror() << "Cannot save caches with version " << pool.sequence();
             }
         }
     }
+    pruneStep();
 
     return true;
 }

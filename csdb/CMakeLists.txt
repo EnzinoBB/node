@@ -30,6 +30,7 @@ add_library(${PROJECT_NAME} STATIC
   src/priv_crypto.hpp
   src/database.cpp
   src/database_berkeleydb.cpp
+  src/database_lmdb.cpp
   src/user_field.cpp
   include/csdb/internal/shared_data.hpp
   include/csdb/internal/shared_data_ptr_implementation.hpp
@@ -79,6 +80,7 @@ target_link_libraries(
   Boost::filesystem
   Boost::disable_autolinking
   BerkeleyDB
+  lmdb
   lz4
   lib
 )

@@ -18,6 +18,12 @@
 #        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
 #        runs its own executor; contracts.py deploys a counter contract and calls it before and after
 #        the restart test, which waits for the first calls; all nodes must end with the same state
+#        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
+#        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
+#        the restarted node, and end with the same state digest
+#        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
+#        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
+#        with pruned storage like PRUNE_NODE and must end with the same state digest
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -42,6 +48,11 @@ REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
 CONTRACTS=${CONTRACTS:-0}
+PRUNE_NODE=${PRUNE_NODE:-0}
+JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
+# the joining node is node NODES + 1; it is in nobody's hosts or trusted list
+JOIN_NODE=$([ "$JOIN_PRUNED_AT" -gt 0 ] && echo $((NODES + 1)) || echo 0)
+ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -49,9 +60,9 @@ DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
 WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
-declare -a PIDS KEYS
+declare -a PIDS KEYS REPORTED_DOWN
 
-mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$NODES" "$WORK")
+mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
 
 if [ "$FUND" = "1" ]; then
     read -r MASTER_SEED MASTER_PUB < <(python3 -c "import base58, nacl.signing; k = nacl.signing.SigningKey.generate(); print(base58.b58encode(bytes(k)).decode(), base58.b58encode(bytes(k.verify_key)).decode())")
@@ -109,7 +120,7 @@ PROPS
     chmod +x "$WORK/n$i/executor.sh"
 }
 
-for i in $(seq 1 "$NODES"); do
+for i in $(seq 1 "$ALL_NODES"); do
     dir="$WORK/n$i"
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
@@ -135,6 +146,7 @@ port=$((BASE_PORT + i))
 $(api_settings "$i")
 ajax_port=0
 diag_port=0
+$({ [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; } && printf '\n[storage]\ncheckpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\nblock_db=lmdb\n')
 
 [Core]
 Filter="%Severity% >= info"
@@ -150,16 +162,17 @@ done
 
 start_node() {
     local i=$1
-    (cd "$WORK/n$i" && exec "$BIN" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
+    # core dumps (see core_pattern in the workflow) let a crash be traced afterwards
+    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$BIN" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
 }
 
 stop_all() {
-    for i in $(seq 1 "$NODES"); do
+    for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
     done
     sleep 15
-    for i in $(seq 1 "$NODES"); do
+    for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true
     done
     pkill -f "cs.testnet.node=" 2>/dev/null || true
@@ -199,10 +212,34 @@ while :; do
     for i in $(seq 1 "$NODES"); do
         s=$(seq_of "$i"); s=${s:-0}
         line+=" n$i=$s"
-        if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then line+="(down)"; fi
+        if ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            line+="(down)"
+            if [ -z "${REPORTED_DOWN[$i]:-}" ]; then
+                REPORTED_DOWN[$i]=1
+                status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
+                echo "n$i exited with status $status$([ "$status" -gt 128 ] && echo " (signal $((status - 128)))")"
+                # the run may end on its timeout later, so trace a crash right away
+                for core in "$WORK"/core.*."${PIDS[$i]}"; do
+                    [ -f "$core" ] || continue
+                    echo "n$i core dump $core:"
+                    gdb -q -batch -ex "bt 60" -ex "thread apply all bt 6" "$BIN" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 200
+                    mv "$core" "$core.traced"
+                done
+            fi
+        fi
         if [ "$min" -lt 0 ] || [ "$s" -lt "$min" ]; then min=$s; fi
     done
+    join_seq=-1
+    if [ "$JOIN_NODE" -gt 0 ] && [ -n "${PIDS[$JOIN_NODE]:-}" ]; then
+        join_seq=$(seq_of "$JOIN_NODE"); join_seq=${join_seq:-0}
+        line+=" n$JOIN_NODE=$join_seq(joined)"
+    fi
     echo "$line"
+
+    if [ "$JOIN_NODE" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
+        echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
+        start_node "$JOIN_NODE"
+    fi
 
     if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ] \
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
@@ -253,7 +290,8 @@ while :; do
         touch "$WORK/restart-done"
     fi
 
-    if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$CONTRACTS" != "1" ] || ! kill -0 "${CONTRACTS_PID:-0}" 2>/dev/null; }; then break; fi
+    if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
+        && { [ "$CONTRACTS" != "1" ] || ! kill -0 "${CONTRACTS_PID:-0}" 2>/dev/null; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
@@ -302,9 +340,32 @@ if [ "$MIN_STAKE" -gt 0 ] && [ "$RESTART_AT" -gt 0 ]; then
     fi
 fi
 
+# a crashed node left a core file: print where it stopped
+for core in "$WORK"/core.* "$WORK"/n*/core*; do
+    [ -f "$core" ] || continue
+    echo "core dump $core:"
+    gdb -q -batch -ex "bt 40" "$BIN" "$core" 2>/dev/null | grep -E '^#' | head -n 40
+done
+
+for p in "$PRUNE_NODE" "$JOIN_NODE"; do
+    [ "$p" -gt 0 ] || continue
+    echo "pruned storage: n$p logged:"
+    grep -ah "pruned storage" "$WORK/n$p"/node.log | sed 's/^/  /' | tail -n 8
+    # file by file, for the pruned node and a full one: block records, hash index, logs, environment
+    for i in 1 "$p"; do
+        echo "  n$i block DB $(du -sh "$WORK/n$i/db" 2>/dev/null | cut -f1): $(cd "$WORK/n$i/db" && du -k * 2>/dev/null | sort -k2 | awk '{printf "%s=%sK ", $2, $1}')"
+        # LMDB caches: block hashes (seqdb, hashdb) and the transaction index (indexdb)
+        echo "  n$i caches $(du -sh "$WORK/n$i/caches" 2>/dev/null | cut -f1): $(cd "$WORK/n$i/caches" 2>/dev/null && du -sk * 2>/dev/null | sort -k2 | awk '{printf "%s=%sK ", $2, $1}')"
+    done
+    if ! grep -aq "pruned storage: blocks before .* removed" "$WORK/n$p"/node.log; then
+        echo "FAIL: n$p never pruned its storage"
+        exit 1
+    fi
+done
+
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$NODES" "$FUND" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
 seen = collections.defaultdict(dict)
@@ -327,4 +388,4 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
-echo "PASS: $NODES nodes reached sequence $TARGET_SEQ with matching state digests"
+echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

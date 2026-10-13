@@ -137,10 +137,18 @@ public:
      * In case of fail the error info can be received with methods:  \ref last_error,
      * \ref last_error_message, \ref db_last_error() and \ref db_last_error_message()
      */
+    // block database engine: BerkeleyDB (every node so far), or LMDB in <path>/lmdb for pruned
+    // storage, whose removed blocks LMDB reuses the space of
+    enum class Engine {
+        BerkeleyDB,
+        Lmdb
+    };
+
     bool open(const ::std::string& path_to_base = ::std::string{},
               OpenCallback callback = nullptr,
               cs::Sequence newBlockchainTop = cs::kWrongSequence,
-              cs::Sequence startReadFrom = 0);
+              cs::Sequence startReadFrom = 0,
+              Engine engine = Engine::BerkeleyDB);
 
     /**
      * @brief Creating the storage using the parameters set.
@@ -315,6 +323,34 @@ public:
     cs::Sequence pool_sequence(const PoolHash& hash) const;
 
     csdb::PoolHash pool_hash(cs::Sequence sequence) const;
+
+    /**
+     * Pruned storage: removes an old pool, which the node no longer needs. Not meant for the last
+     * pools, whose bookkeeping (count, last hash, write queue) it leaves alone.
+     *
+     * @param   hash    The pool hash.
+     *
+     * @returns True if the pool was removed.
+     */
+    bool pool_prune(const PoolHash& hash);
+
+    /**
+     * Pruned storage: removes several old pools at once, in one database transaction where the
+     * engine allows it. Pools not stored are skipped.
+     */
+    bool pool_prune_batch(const std::vector<PoolHash>& hashes);
+
+    /**
+     * Sequence of the oldest pool stored: 0 unless the storage was pruned.
+     *
+     * @returns The sequence, or std::numeric_limits<cs::Sequence>::max() if the storage is empty.
+     */
+    cs::Sequence first_sequence() const;
+
+    /**
+     * Returns the space of pruned pools to the file system.
+     */
+    bool compact();
 
 public signals:
     const ReadBlockSignal& readBlockEvent() const;

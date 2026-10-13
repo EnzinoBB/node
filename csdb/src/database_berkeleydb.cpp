@@ -332,23 +332,75 @@ bool DatabaseBerkeleyDB::remove(const cs::Bytes &key) {
         return false;
     }
 
-    Dbt_copy<cs::Bytes> db_key(key);
-    Dbt_copy<uint32_t> db_seq_no;
-    int status = db_seq_no_->get(nullptr, &db_key, &db_seq_no, 0);
-    if (status != 0) {
-        set_last_error_from_berkeleydb(status);
+    // BerkeleyDB throws when its buffer cache is exhausted (BDB3017, seen on mainnet while a pruned
+    // node removed old blocks during a fast sync): report it, the caller may retry later
+    try {
+        Dbt_copy<cs::Bytes> db_key(key);
+        Dbt_copy<uint32_t> db_seq_no;
+        int status = db_seq_no_->get(nullptr, &db_key, &db_seq_no, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+
+        status = db_seq_no_->del(nullptr, &db_key, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+
+        status = db_blocks_->del(nullptr, &db_seq_no, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+    }
+    catch (const std::exception& e) {
+        set_last_error(UnknownError, "remove: %s", e.what());
         return false;
     }
 
-    status = db_seq_no_->del(nullptr, &db_key, 0);
-    if (status != 0) {
-        set_last_error_from_berkeleydb(status);
+    set_last_error();
+    return true;
+}
+
+bool DatabaseBerkeleyDB::compact() {
+    if (!db_blocks_) {
+        set_last_error(NotOpen);
         return false;
     }
 
-    status = db_blocks_->del(nullptr, &db_seq_no, 0);
-    if (status != 0) {
-        set_last_error_from_berkeleydb(status);
+    // DB_FREE_SPACE gives emptied pages back to the file system. Compacting a large file in one call
+    // pins more pages than the environment's buffer cache holds (BDB3017, "Db::compact: Cannot
+    // allocate memory"), so it goes in bounded steps, each resuming where the previous one stopped.
+    // Compaction only returns space (BerkeleyDB reuses freed pages anyway): a failure is reported
+    // and never lets an exception terminate the node.
+    constexpr u_int32_t kPagesPerStep = 64;
+    constexpr int kMaxSteps = 1'000'000;
+    try {
+        for (Db* db : { db_blocks_.get(), db_seq_no_.get() }) {
+            cs::Bytes resume;
+            for (int step = 0; step < kMaxSteps; ++step) {
+                DB_COMPACT progress{};
+                progress.compact_pages = kPagesPerStep;
+                Dbt from(resume.data(), static_cast<u_int32_t>(resume.size()));
+                Dbt_safe stopped;
+                int status = db->compact(nullptr, resume.empty() ? nullptr : &from, nullptr, &progress, DB_FREE_SPACE, &stopped);
+                if (status != 0) {
+                    set_last_error_from_berkeleydb(status);
+                    return false;
+                }
+                // pages left over in the budget: the pass reached the end of the database
+                if (progress.compact_pages > 0 || stopped.get_size() == 0) {
+                    break;
+                }
+                auto begin = static_cast<uint8_t*>(stopped.get_data());
+                resume.assign(begin, begin + stopped.get_size());
+            }
+        }
+    }
+    catch (const std::exception& e) {
+        set_last_error(UnknownError, "compact: %s", e.what());
         return false;
     }
 
