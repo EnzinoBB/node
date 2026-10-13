@@ -404,6 +404,7 @@ public slots:
     void onNeighbourRemoved(const cs::PublicKey& neighbour);
 
     bool canSaveSmartStages(cs::Sequence seq, cs::PublicKey key);
+    void storeSmartStageOne(const cs::StageOneSmarts& stage);
 
 private:
     bool init();
