@@ -10,6 +10,10 @@ name: Release
 on:
   push:
     tags: ['community-v*']
+  # a pull request that touches the packaging builds the packages as artifacts, never publishes
+  pull_request:
+    branches: [master]
+    paths: ['packaging/**', '.github/workflows/release.yml']
   workflow_dispatch:
     inputs:
       version:
@@ -60,6 +64,10 @@ jobs:
             # a tagged release names its executor in packaging/executor-tag
             executor_tag=$(tr -d '[:space:]' < packaging/executor-tag)
             publish=true
+          elif [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            version="pr-${GITHUB_SHA::8}"
+            executor_tag=$(tr -d '[:space:]' < packaging/executor-tag)
+            publish=false
           else
             version="$IN_VERSION"
             executor_tag="$IN_EXECUTOR_TAG"
