@@ -81,6 +81,13 @@ jobs:
           cp seed.txt csnode/known_hosts.txt
           echo "seed: $(wc -l < seed.txt) peers"
 
+      # one executor per runner: skip the check for other executors, which runs jps and waits for it
+      # with no timeout (the first run stopped there before starting the executor)
+      - name: Single executor
+        run: |
+          sed -i 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
+          grep -n '^executor_multi_instance' csnode/config.ini
+
       - name: Node key
         run: |
           python3 ci/testnet/gen_keys.py 1 keys
@@ -91,7 +98,12 @@ jobs:
           cd csnode
           ./node --db-path db --config-file config.ini </dev/null > stdout.log 2>&1 &
           pid=$!
-          sleep $((MINUTES * 60))
+          sleep 120
+          if ! grep -aq 'Start contract executor' log/log_*.txt 2>/dev/null; then
+            echo "::warning::no executor start after 2 minutes, process tree:"
+            ps -ef --forest | grep -v grep | grep -A5 -E '[.]/node|jps|java' || true
+          fi
+          sleep $((MINUTES * 60 - 120))
           kill -INT "$pid" 2>/dev/null || true
           for _ in $(seq 1 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
           kill -KILL "$pid" 2>/dev/null || true
