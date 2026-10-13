@@ -108,9 +108,12 @@ jobs:
       - name: Run node
         run: |
           cd csnode
+          sudo timeout 90 tcpdump -ni eth0 -c 400 udp and not port 53 > ../node-udp.txt 2>&1 &
           ./node --db-path db --config-file config.ini </dev/null > stdout.log 2>&1 &
           pid=$!
           sleep 120
+          echo "UDP in the first 90 s: $(grep -c ' > ' ../node-udp.txt) packets, from peers: $(grep -c '\.9510 > 10\.' ../node-udp.txt)"
+          grep ' IP ' ../node-udp.txt | head -12 || true
           if ! grep -aq 'Start contract executor' log/log_*.txt 2>/dev/null; then
             echo "::warning::no executor start after 2 minutes, process tree:"
             ps -ef --forest | grep -v grep | grep -A5 -E '[.]/node|jps|java' || true
