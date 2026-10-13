@@ -58,6 +58,49 @@ public class Counter extends SmartContract {
 }
 """
 
+# API v3, as current contracts are written: payable() is mandatory, and the state holds instances of
+# an inner class in a map, so deserializing the state and running the call both go through classes
+# other than the contract's root class
+LEDGER = """import com.credits.scapi.v3.SmartContract;
+
+import java.math.BigDecimal;
+import java.util.HashMap;
+import java.util.Map;
+
+public class Ledger extends SmartContract {
+    private final Map<String, Entry> entries = new HashMap<>();
+    private int total;
+
+    public static class Entry implements java.io.Serializable {
+        private int count;
+
+        int add() {
+            count += 1;
+            return count;
+        }
+    }
+
+    public Ledger() {
+        super();
+    }
+
+    public int record() {
+        entries.computeIfAbsent("k" + (total % 3), k -> new Entry()).add();
+        total += 1;
+        return total;
+    }
+
+    public int entries() {
+        return entries.values().stream().mapToInt(e -> e.count).sum();
+    }
+
+    @Override
+    public String payable(BigDecimal amount, byte[] userData) {
+        return "ok";
+    }
+}
+"""
+
 # no @UsingContract: the node refuses any call to a method that declares one (Violations::SubsequentCall,
 # checked by the API and by IterValidator), so the call is a plain invokeExternalContract
 CALLER = """import com.credits.scapi.v0.SmartContract;
@@ -86,6 +129,8 @@ def write_sources(directory):
         f.write(COUNTER)
     with open(os.path.join(directory, "Caller.java"), "w") as f:
         f.write(CALLER % placeholder)
+    with open(os.path.join(directory, "Ledger.java"), "w") as f:
+        f.write(LEDGER)
 
 
 def invocation(method="", used=(), deploy=None):
@@ -179,6 +224,7 @@ def main():
 
     master = Account(base58.b58decode(args.master_seed))
     counter = deploy(client_for(1), master, "Counter", COUNTER)
+    ledger = deploy(client_for(1), master, "Ledger", LEDGER)
     caller = deploy(client_for(1), master, "Caller", CALLER % base58.b58encode(counter).decode())
     call(client_for(1), master, caller, "callCounter", "contract-to-contract call (known not to work)")
 
@@ -187,6 +233,7 @@ def main():
     for n in range(args.calls_before):
         calls += 1
         failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} before restart", calls) else 1
+        failures += 0 if call(client_for(1), master, ledger, "record", f"Ledger call {calls} before restart", calls) else 1
     if args.ready_file:
         open(args.ready_file, "w").close()
     if args.wait_file:
@@ -197,19 +244,22 @@ def main():
     for n in range(args.calls_after):
         calls += 1
         failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} after restart", calls) else 1
+        failures += 0 if call(client_for(1), master, ledger, "record", f"Ledger call {calls} after restart", calls) else 1
+    failures += 0 if call(client_for(1), master, ledger, "entries", "Ledger entries", calls) else 1
 
     time.sleep(60)  # let the last state reach every node
-    states = {}
-    for i in range(1, args.nodes + 1):
-        try:
-            got = client_for(i).SmartContractGet(counter)
-            states[i] = hashlib.sha256(got.smartContract.objectState).hexdigest()[:16] if got.status.code == 0 else "error"
-        except Exception as e:  # a node without a reachable API counts as a mismatch
-            states[i] = f"unreachable ({type(e).__name__})"
-    print(f"Counter state per node: {states}", flush=True)
-    if len(set(states.values())) != 1:
-        print("FAIL: nodes disagree on the Counter state", flush=True)
-        failures += 1
+    for name, contract in (("Counter", counter), ("Ledger", ledger)):
+        states = {}
+        for i in range(1, args.nodes + 1):
+            try:
+                got = client_for(i).SmartContractGet(contract)
+                states[i] = hashlib.sha256(got.smartContract.objectState).hexdigest()[:16] if got.status.code == 0 else "error"
+            except Exception as e:  # a node without a reachable API counts as a mismatch
+                states[i] = f"unreachable ({type(e).__name__})"
+        print(f"{name} state per node: {states}", flush=True)
+        if len(set(states.values())) != 1:
+            print(f"FAIL: nodes disagree on the {name} state", flush=True)
+            failures += 1
     sys.exit(1 if failures else 0)
 
 

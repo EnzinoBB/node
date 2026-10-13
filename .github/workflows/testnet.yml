@@ -40,6 +40,9 @@ on:
       contracts:
         description: 'Run a contract executor per node and call a contract across the restart test (0 = off)'
         default: '0'
+      executor_ref:
+        description: 'With contracts: branch or commit of EnzinoBB/contract-executor built and run by the even nodes, the odd nodes keep the release executor (empty = all release)'
+        default: ''
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -166,6 +169,48 @@ jobs:
           test -n "$jar"
           echo "EXECUTOR_JAR=$jar" >> "$GITHUB_ENV"
           echo "executor jar: $jar"
+
+      # mixed executors: the even nodes run an executor built from EnzinoBB/contract-executor, so a
+      # result that differs from the release executor's shows up as a failed contract consensus
+      - name: Checkout contract executor under test
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        uses: actions/checkout@v4
+        with:
+          repository: EnzinoBB/contract-executor
+          ref: ${{ inputs.executor_ref }}
+          path: ce
+          fetch-depth: 0  # the build reads the commit count the node checks
+
+      - name: Checkout executor dependencies
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        run: |
+          git clone -q https://github.com/CREDITSCOM/smart-contract-api.git ce-deps/smart-contract-api
+          git -C ce-deps/smart-contract-api checkout -q 677c567f308972224232023b18de531d22db2b8b
+          git clone -q -b build/reproducible-1518 https://github.com/EnzinoBB/thrift-api-client.git ce-deps/thrift-api-client
+
+      # build 1518 was compiled with JDK 11.0.3, as in the executor's own build workflow
+      - name: Set up Java 11.0.3
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '11.0.3'
+          cache: maven
+
+      - name: Build contract executor under test
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        run: |
+          (cd ce-deps/thrift-api-client && mvn -B -q -DskipTests install)
+          (cd ce-deps/smart-contract-api && mvn -B -q -DskipTests install)
+          (cd ce && mvn -B -q -DskipTests package)
+          # laid out like the release: its manifest loads sc-api-support.jar and logback.xml from its directory
+          mkdir -p executor-alt
+          cp "$(ls -S ce/contract-executor/target/contract-executor-*.jar | head -1)" executor-alt/contract-executor.jar
+          cp "$(ls -S ce/sc-api-support/target/sc-api-support-*.jar | head -1)" executor-alt/sc-api-support.jar
+          cp "$(dirname "$EXECUTOR_JAR")/logback.xml" executor-alt/ 2>/dev/null || true
+          ls -la executor-alt
+          echo "EXECUTOR_JAR_ALT=$PWD/executor-alt/contract-executor.jar" >> "$GITHUB_ENV"
+          echo "executor under test: commit $(git -C ce rev-parse --short HEAD), $(git -C ce rev-list --count HEAD) commits"
 
       - name: Enable core dumps
         run: |

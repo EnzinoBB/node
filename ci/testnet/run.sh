@@ -18,6 +18,8 @@
 #        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
 #        runs its own executor; contracts.py deploys a counter contract and calls it before and after
 #        the restart test, which waits for the first calls; all nodes must end with the same state
+#        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
+#        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -81,11 +83,14 @@ if [ "$CONTRACTS" = "1" ]; then
     # compile error reaches the API only as a dropped connection, so compile them here first
     mkdir -p "$WORK/contract-sources"
     (cd "$HERE" && python3 -c "import contracts, sys; contracts.write_sources(sys.argv[1])" "$WORK/contract-sources")
-    if ! "$EXECUTOR_JDK/bin/javac" -parameters -cp "$EXECUTOR_JAR" -d "$WORK/contract-sources" "$WORK"/contract-sources/*.java; then
-        echo "FAIL: the test contracts do not compile against the executor's class path"
-        exit 1
-    fi
+    for jar in "$EXECUTOR_JAR" ${EXECUTOR_JAR_ALT:+"$EXECUTOR_JAR_ALT"}; do
+        if ! "$EXECUTOR_JDK/bin/javac" -parameters -cp "$jar" -d "$WORK/contract-sources" "$WORK"/contract-sources/*.java; then
+            echo "FAIL: the test contracts do not compile against the class path of $jar"
+            exit 1
+        fi
+    done
     echo "test contracts compile against the executor's class path"
+    [ -z "${EXECUTOR_JAR_ALT:-}" ] || echo "mixed executors: even nodes run $EXECUTOR_JAR_ALT"
 fi
 
 # public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their
@@ -114,9 +119,11 @@ contract.executor.node.api.host=127.0.0.1
 contract.executor.read.client.timeout=0
 jdk.path=$EXECUTOR_JDK
 PROPS
+    local jar=$EXECUTOR_JAR
+    if [ -n "${EXECUTOR_JAR_ALT:-}" ] && [ $((i % 2)) -eq 0 ]; then jar=$EXECUTOR_JAR_ALT; fi
     # the marker lets run.sh stop the executor of a stopped node
     printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec "%s" -Xmx384m -XX:MaxMetaspaceSize=256m -Dcs.testnet.node=n%s -jar "%s" >> executor.log 2>&1\n' \
-        "$EXECUTOR_JDK/bin/java" "$i" "$EXECUTOR_JAR" > "$WORK/n$i/executor.sh"
+        "$EXECUTOR_JDK/bin/java" "$i" "$jar" > "$WORK/n$i/executor.sh"
     chmod +x "$WORK/n$i/executor.sh"
 }
 
