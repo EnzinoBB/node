@@ -42,7 +42,7 @@ def main():
     parser.add_argument("--max-per-subnet", type=int, default=3,
                         help="peers listed per /24, so a single operator cannot fill the list")
     parser.add_argument("--max-lag", type=int, default=1000,
-                        help="blocks a peer may be behind the highest last sequence seen")
+                        help="blocks a peer may be away from the median height reported by the others")
     args = parser.parse_args()
 
     addresses = {}  # hex key -> "ip:port", from the node's own known_hosts.txt and the shipped one
@@ -98,11 +98,21 @@ def main():
     # The list is advice for new nodes, so it must not be easy to fill with one party's peers (eclipse):
     # only peers on the tip of the chain everybody else reports, and a few per /24 at most. It still
     # reaches the packages only through a reviewed pull request.
-    tip = max((p["last_seq"] for p in peers.values()), default=0)
+    # The tip is the median of the heights peers report, one value per /24 so that many peers of one
+    # party cannot move it; a peer claiming far more than that is as suspect as one far behind.
+    def subnet_of(p):
+        return ".".join(p["address"].split(":")[0].split(".")[:3]) if p["address"] else p["key"]
+
+    by_subnet = {}
+    for p in peers.values():
+        if p["connected"]:
+            by_subnet.setdefault(subnet_of(p), []).append(p["last_seq"])
+    heights = sorted(sorted(seqs)[len(seqs) // 2] for seqs in by_subnet.values())
+    tip = heights[len(heights) // 2] if heights else 0
     for p in peers.values():
         p["reply_ratio"] = round(p["replies"] / p["requests"], 3) if p["requests"] else None
         p["serves_history"] = p["requests"] > 0 and p["reply_ratio"] >= args.min_replies
-        p["on_tip"] = p["last_seq"] >= tip - args.max_lag
+        p["on_tip"] = abs(p["last_seq"] - tip) <= args.max_lag
         p["listed"] = bool(p["address"]) and p["connected"] and p["on_tip"] and (p["serves_history"] or p["requests"] == 0)
         p["note"] = ""
 
@@ -110,13 +120,13 @@ def main():
     per_subnet = {}
     for p in ordered:
         if p["listed"]:
-            subnet = ".".join(p["address"].split(":")[0].split(".")[:3])
+            subnet = subnet_of(p)
             per_subnet[subnet] = per_subnet.get(subnet, 0) + 1
             if per_subnet[subnet] > args.max_per_subnet:
                 p["listed"] = False
                 p["note"] = f"more than {args.max_per_subnet} peers in {subnet}.0/24"
         elif p["connected"] and not p["on_tip"]:
-            p["note"] = f"behind the tip by more than {args.max_lag} blocks"
+            p["note"] = f"more than {args.max_lag} blocks from the median height {tip}"
     ordered.sort(key=lambda p: (not p["listed"], -(p["reply_ratio"] or 0), -p["last_seq"]))
     os.makedirs(args.out_dir, exist_ok=True)
     with open(os.path.join(args.out_dir, "known_hosts.txt"), "w") as f:
