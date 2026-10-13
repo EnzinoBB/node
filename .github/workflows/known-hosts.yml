@@ -41,10 +41,15 @@ jobs:
       PACKAGE_TAG: ${{ inputs.package_tag }}
 
     steps:
+      # persist-credentials: false would make the action run `git submodule foreach`, which fails on
+      # the orphan third-party/rocksdb gitlink: drop the stored token right after instead
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          persist-credentials: false
+
+      - name: Drop git credentials
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          ! git config --local --get-regexp '^http\..*extraheader'
 
       - name: Python packages
         run: pip install --quiet base58 pynacl
