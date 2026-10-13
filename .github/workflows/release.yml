@@ -153,11 +153,13 @@ jobs:
             curl -sSfL -o official.tar.gz "$OFFICIAL_RELEASE"
             tar -xzf official.tar.gz csnode/ojdkbuild
             tar -C csnode/ojdkbuild -czf jdk.tar.gz java-11-openjdk-11.0.4
-            gh release create "$JDK_TAG" jdk.tar.gz#"$JDK_ASSET" --repo "$GITHUB_REPOSITORY" \
+            # the asset takes the file's name (a "#label" suffix only sets the display label)
+            cp jdk.tar.gz "$JDK_ASSET"
+            gh release create "$JDK_TAG" "$JDK_ASSET" --repo "$GITHUB_REPOSITORY" \
               --title "JDK of the official mainnet release (ojdkbuild 11.0.4)" \
               --notes "java-11-openjdk-11.0.4 as shipped in Ubuntu20_Mainnet-4.2.532.0.tar.gz of CREDITSCOM/node, mirrored for the community packages. GPLv2 with the Classpath Exception." \
               || true
-            rm -rf official.tar.gz csnode
+            rm -rf official.tar.gz csnode "$JDK_ASSET"
           fi
           mkdir -p jdk && tar -xzf jdk.tar.gz -C jdk
           jdk/java-11-openjdk-11.0.4/bin/java -version
