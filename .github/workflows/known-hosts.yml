@@ -88,6 +88,18 @@ jobs:
           sed -i 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
           grep -n '^executor_multi_instance' csnode/config.ini
 
+      # the p2p transport is UDP: record whether peers answer at all from this runner
+      - name: Network check
+        run: |
+          ip -4 addr show | grep inet || true
+          head -3 csnode/known_hosts.txt
+          sudo timeout 20 tcpdump -ni any -c 40 udp and not port 53 > udp.txt 2>&1 &
+          sleep 1
+          host=$(head -1 csnode/known_hosts.txt | cut -d' ' -f1)
+          echo probe | timeout 3 nc -u -w1 "${host%:*}" "${host#*:}" || true
+          wait || true
+          cat udp.txt | head -20
+
       - name: Node key
         run: |
           python3 ci/testnet/gen_keys.py 1 keys
@@ -131,6 +143,7 @@ jobs:
             out/
             csnode/log/
             csnode/stdout.log
+            csnode/debug.log
           retention-days: 14
 
   publish:
