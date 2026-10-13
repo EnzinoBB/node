@@ -9,9 +9,10 @@ block 0 asks its neighbours for the oldest blocks first, so a peer that answers 
 keeps the chain's history; one that ignores them does not, or is unreachable for blocks.
 
 Writes to <out dir>:
-- known_hosts.txt: "ip:port key" for the peers that connected and answered at least --min-replies
-  of the block requests sent to them, best first; peers that never got a request (the run ended
-  before) are kept when they connected;
+- known_hosts.txt: "ip:port key" for the peers that connected, report a height close to the median
+  of the others and answered at least --min-replies of the block requests sent to them, at most
+  --max-per-subnet per /24 (/48 for IPv6), best first. This limits, but cannot prevent, a party with
+  many peers on many networks from filling the list, so the list is reviewed before it is shipped;
 - peers.json and peers.md: every peer seen, with its address, last sequence, requests, replies
   and the range of blocks asked from it.
 """
@@ -122,7 +123,8 @@ def main():
         p["reply_ratio"] = round(p["replies"] / p["requests"], 3) if p["requests"] else None
         p["serves_history"] = p["requests"] > 0 and p["reply_ratio"] >= args.min_replies
         p["on_tip"] = abs(p["last_seq"] - tip) <= args.max_lag
-        p["listed"] = subnet_of(p) is not None and p["connected"] and p["on_tip"] and (p["serves_history"] or p["requests"] == 0)
+        # only peers that actually served blocks: one that connected too late to be asked proved nothing
+        p["listed"] = subnet_of(p) is not None and p["connected"] and p["on_tip"] and p["serves_history"]
         p["note"] = ""
 
     ordered = sorted(peers.values(), key=lambda p: (not p["listed"], -(p["reply_ratio"] or 0), -p["last_seq"]))
