@@ -153,7 +153,9 @@ def main():
         f.write("| --- | --- | --- | --- | --- | --- | --- | --- |\n")
         for p in ordered:
             asked = f"{p['first_block']}–{p['last_block']}" if p["requests"] else ""
-            f.write(f"| {p['key']} | {p['address'] or 'unknown'} | {'yes' if p['listed'] else 'no'} | {p['last_seq']} "
+            # the report is published: print an address only when it parses as IP:port
+            shown = p["address"] if subnet_of(p) else ("invalid" if p["address"] else "unknown")
+            f.write(f"| {p['key']} | {shown} | {'yes' if p['listed'] else 'no'} | {p['last_seq']} "
                     f"| {p['requests']} | {p['replies']} | {asked} | {p['note']} |\n")
     print(f"{sum(p['listed'] for p in ordered)} peers listed of {len(ordered)} seen, synced to {synced}")
 

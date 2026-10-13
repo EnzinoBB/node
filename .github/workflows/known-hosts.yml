@@ -126,6 +126,7 @@ jobs:
           path: |
             out/
             csnode/log/
+            csnode/known_hosts.txt
             csnode/stdout.log
             csnode/debug.log
           retention-days: 14
@@ -152,6 +153,18 @@ jobs:
         with:
           name: known-hosts-${{ github.run_id }}
           path: run
+
+      # the artifact comes from the job that talked to untrusted peers: do not trust its out/, rebuild
+      # the list here from the node's logs with the repository's collect.py
+      - name: Rebuild list
+        run: |
+          pip install --quiet base58
+          rm -rf run/out
+          python3 ci/known-hosts/collect.py run/csnode run/out
+          grep -qvE '^[0-9.]+:[0-9]+ [1-9A-HJ-NP-Za-km-z]{32,44}$' run/out/known_hosts.txt \
+            && { echo "unexpected line in known_hosts.txt"; exit 1; } || true
+          listed=$(wc -l < run/out/known_hosts.txt)
+          [ "$listed" -ge 5 ] || { echo "only $listed peers verified, not publishing"; exit 1; }
 
       - name: Report
         run: |
