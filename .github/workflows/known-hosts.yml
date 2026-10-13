@@ -3,10 +3,14 @@ name: Known hosts
 # Once a week, a node from the latest community package (pruned storage) joins mainnet for a short
 # while from an empty database, and the peers it meets are checked: a node syncing from block 0
 # asks its neighbours for the oldest blocks first, so a peer that answers keeps the chain's history.
-# The verified list is published in the rolling release "known-hosts" (known_hosts.txt, peers.md,
-# peers.json), which the release workflow ships in the next packages.
+# The report is published in the rolling release "known-hosts" (known_hosts.txt, peers.md,
+# peers.json), and the list is proposed as a pull request updating packaging/mainnet/known_hosts.txt:
+# it reaches the packages only after someone reviews it, since peers that misbehave on purpose could
+# otherwise steer new nodes towards themselves.
 #
-# The node runs as an ordinary NORMAL node with a throwaway key, outbound connections only.
+# The node talks to untrusted peers, so it runs in a job with read-only permissions and no token in
+# its environment; a separate job publishes. It runs as an ordinary NORMAL node with a throwaway key,
+# outbound connections only.
 on:
   schedule:
     - cron: '47 5 * * 1'
@@ -20,7 +24,7 @@ on:
         default: ''
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: known-hosts
@@ -30,19 +34,24 @@ jobs:
   collect:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
       MINUTES: ${{ inputs.minutes || '25' }}
       PACKAGE_TAG: ${{ inputs.package_tag }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Python packages
         run: pip install --quiet base58 pynacl
 
       - name: Fetch package
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo "$MINUTES" | grep -qE '^[0-9]+$' || { echo "bad minutes '$MINUTES'"; exit 1; }
           tag=$PACKAGE_TAG
@@ -58,6 +67,8 @@ jobs:
 
       # start from every peer we know: the shipped list, the last published one and the official one
       - name: Seed peers
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release download known-hosts --repo "$GITHUB_REPOSITORY" --pattern known_hosts.txt --output previous.txt 2>/dev/null || : > previous.txt
           cat csnode/known_hosts.txt previous.txt packaging/mainnet/known_hosts.txt \
@@ -105,13 +116,33 @@ jobs:
             csnode/stdout.log
           retention-days: 14
 
-      - name: Publish
+  publish:
+    needs: collect
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          name: known-hosts-${{ github.run_id }}
+          path: run
+
+      - name: Report
         run: |
           {
             echo "Peers verified on $(date -u +%Y-%m-%d) by a node that joined mainnet from an empty database"
             echo "(run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})."
             echo
-            cat out/peers.md
+            cat run/out/peers.md
           } > notes.md
           if ! gh release view known-hosts --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create known-hosts --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
@@ -120,4 +151,22 @@ jobs:
             gh release edit known-hosts --repo "$GITHUB_REPOSITORY" --notes-file notes.md
           fi
           gh release upload known-hosts --repo "$GITHUB_REPOSITORY" --clobber \
-            out/known_hosts.txt out/peers.md out/peers.json
+            run/out/known_hosts.txt run/out/peers.md run/out/peers.json
+
+      # the packages ship packaging/mainnet/known_hosts.txt: propose the new list for review
+      - name: Pull request
+        run: |
+          cp run/out/known_hosts.txt packaging/mainnet/known_hosts.txt
+          if git diff --quiet; then echo "known_hosts.txt unchanged"; exit 0; fi
+          branch=auto/known-hosts
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$branch"
+          git commit -qam "packaging: known hosts verified on $(date -u +%Y-%m-%d)"
+          git push -f origin "$branch"
+          if ! gh pr view "$branch" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base "$GITHUB_REF_NAME" \
+              --title "packaging: update known hosts" --body-file notes.md
+          else
+            gh pr edit "$branch" --repo "$GITHUB_REPOSITORY" --body-file notes.md
+          fi

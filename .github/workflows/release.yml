@@ -154,22 +154,11 @@ jobs:
           mkdir -p jdk && tar -xzf jdk.tar.gz -C jdk
           jdk/java-11-openjdk-11.0.4/bin/java -version
 
-      # the latest list published by the known-hosts workflow, if any
-      - name: Fetch known hosts
-        run: |
-          if curl -sSfL -o known_hosts.txt "https://github.com/${GITHUB_REPOSITORY}/releases/download/known-hosts/known_hosts.txt" \
-              && [ -s known_hosts.txt ]; then
-            echo "KNOWN_HOSTS=$PWD/known_hosts.txt" >> "$GITHUB_ENV"
-            echo "known hosts: $(wc -l < known_hosts.txt) from the known-hosts release"
-          else
-            echo "known hosts: packaging/mainnet/known_hosts.txt"
-          fi
-
       - name: Packages
         run: |
           for variant in full pruned; do
             packaging/make-package.sh "$variant" "$VERSION" build/client/node executor \
-              jdk/java-11-openjdk-11.0.4 dist "${KNOWN_HOSTS:-}"
+              jdk/java-11-openjdk-11.0.4 dist
           done
           (cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
           ls -la dist
