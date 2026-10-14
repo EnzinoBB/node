@@ -582,6 +582,7 @@ private:
     static constexpr size_t kQuickStartSaveCachesInterval = 500'000;
     std::chrono::steady_clock::time_point lastCheckpointWallClock_ = std::chrono::steady_clock::now();
 
+    void saveLiveCheckpoint(const csdb::Pool& pool);
     // pruned storage: after the periodic checkpoint C, the blocks before C - checkpoint_every -
     // prune_keep_blocks go; they are removed a few at a time as new blocks are applied
     void schedulePruning(cs::Sequence checkpointSeq);

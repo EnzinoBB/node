@@ -99,6 +99,9 @@ public:
         ::std::shared_ptr<Database> db;
         ::cs::Sequence newBlockchainTop = ::cs::kWrongSequence;
         ::cs::Sequence startSequence = 0;
+        // 0 = leave Storage defaults (5000 / 100) untouched.
+        size_t asyncWriteQueueMax = 0;
+        size_t writeBatchSize = 0;
     };
 
     struct OpenProgress {
@@ -137,18 +140,17 @@ public:
      * In case of fail the error info can be received with methods:  \ref last_error,
      * \ref last_error_message, \ref db_last_error() and \ref db_last_error_message()
      */
-    // block database engine: BerkeleyDB (every node so far), or LMDB in <path>/lmdb for pruned
-    // storage, whose removed blocks LMDB reuses the space of
-    enum class Engine {
-        BerkeleyDB,
-        Lmdb
-    };
-
+    // dbBackend: "berkeleydb" (default), "rocksdb", or "lmdb" in <path>/lmdb, whose removed blocks
+    // LMDB reuses the space of (pruned storage)
     bool open(const ::std::string& path_to_base = ::std::string{},
               OpenCallback callback = nullptr,
               cs::Sequence newBlockchainTop = cs::kWrongSequence,
               cs::Sequence startReadFrom = 0,
-              Engine engine = Engine::BerkeleyDB);
+              size_t asyncWriteQueueMax = 5000,
+              size_t writeBatchSize = 100,
+              uint64_t rocksDbBlockCacheBytes = 0,
+              uint64_t rocksDbMemtableBytes = 0,
+              const std::string& dbBackend = std::string{});
 
     /**
      * @brief Creating the storage using the parameters set.
@@ -177,6 +179,9 @@ public:
      * After using this method every reading or saving info methods leads to error \ref NotOpen.
      */
     void close();
+
+    // Anchor buffered writes to disk (RocksDB SyncWAL; BerkeleyDB no-op). Call at checkpoint boundaries.
+    bool flush();
 
     /**
      * @brief Last block hash

@@ -21,6 +21,13 @@
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
 #        with pruned storage like PRUNE_NODE and must end with the same state digest
+#        DB_BACKEND (default empty = the node's default, berkeleydb): db_backend of every node, or
+#        "mixed" for berkeleydb, lmdb and rocksdb in turn; pruned nodes use lmdb unless it names one
+#        CRASH_NODE (default 0 = off): that node is killed with SIGKILL CRASH_TIMES times (default 6)
+#        from sequence CRASH_FROM (default 150) and restarted each time; it saves a checkpoint every
+#        minute, and every other kill lands right after one; it must end with the same state digests
+#        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
+#        network restarted, as after a power cut; the nodes must agree again
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -45,6 +52,11 @@ REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
 PRUNE_NODE=${PRUNE_NODE:-0}
+DB_BACKEND=${DB_BACKEND:-}
+CRASH_NODE=${CRASH_NODE:-0}
+CRASH_TIMES=${CRASH_TIMES:-6}
+CRASH_FROM=${CRASH_FROM:-150}
+CRASH_ALL_AT=${CRASH_ALL_AT:-0}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 JOIN_NODE=$([ "$JOIN_PRUNED_AT" -gt 0 ] && echo $((NODES + 1)) || echo 0)
@@ -66,6 +78,29 @@ if [ "$FUND" = "1" ]; then
     export CS_TESTNET_GENESIS_KEY=$MASTER_PUB CS_TESTNET_STARTER_KEY=$MASTER_PUB
     echo "testnet master key $MASTER_PUB"
 fi
+
+# the [storage] section of node i: pruning, backend and checkpoint frequency
+storage_section() {
+    local i=$1 backend="" lines=""
+    case "$DB_BACKEND" in
+        "") ;;
+        mixed) backend=$(echo berkeleydb lmdb rocksdb | cut -d' ' -f$(( (i - 1) % 3 + 1 ))) ;;
+        *) backend=$DB_BACKEND ;;
+    esac
+    if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; then
+        { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
+        # pruning follows the periodic checkpoints only: it starts at #2000; a checkpoint a minute as
+        # well, so that kills of a pruned node land right after one
+        lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
+    elif [ "$i" -eq "$CRASH_NODE" ]; then
+        # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so
+        # that the kills hit the moments right after one
+        lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
+    fi
+    [ -n "$backend" ] && lines="${lines}db_backend=$backend\n"
+    [ -n "$lines" ] && printf "\n[storage]\n$lines"
+    return 0
+}
 
 for i in $(seq 1 "$ALL_NODES"); do
     dir="$WORK/n$i"
@@ -94,7 +129,7 @@ port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)
 apiexec_port=0
 ajax_port=0
 diag_port=0
-$({ [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; } && printf '\n[storage]\ncheckpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\nblock_db=lmdb\n')
+$(storage_section "$i")
 
 [Core]
 Filter="%Severity% >= info"
@@ -147,6 +182,10 @@ echo "started $NODES nodes in $WORK"
 
 deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 restarted=0
+crashes=0
+crash_wait_qs=""
+crash_next=0
+crashed_all=0
 FUND_PID=
 disk_filled_at=0
 disk_freed=0
@@ -184,6 +223,41 @@ while :; do
     if [ "$JOIN_NODE" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
         echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
         start_node "$JOIN_NODE"
+    fi
+
+    # repeated SIGKILL of one node: odd kills right after it saves a checkpoint, even ones at any moment
+    if [ "$CRASH_NODE" -gt 0 ] && [ "$crashes" -lt "$CRASH_TIMES" ] && [ "$min" -ge "$CRASH_FROM" ] \
+        && [ "$(date +%s)" -ge "$crash_next" ]; then
+        newest=$(ls -t "$WORK/n$CRASH_NODE/qs" 2>/dev/null | head -1)
+        if [ $((crashes % 2)) -eq 1 ] && [ -z "$crash_wait_qs" ]; then
+            crash_wait_qs=${newest:-none}
+        fi
+        if [ $((crashes % 2)) -eq 0 ] || { [ -n "$newest" ] && [ "$newest" != "$crash_wait_qs" ]; }; then
+            [ $((crashes % 2)) -eq 1 ] && sleep $((RANDOM % 3))
+            crashes=$((crashes + 1))
+            echo "crash test: SIGKILL n$CRASH_NODE (kill $crashes of $CRASH_TIMES) at sequence $(seq_of "$CRASH_NODE"), newest checkpoint ${newest:-none}"
+            kill -KILL "${PIDS[$CRASH_NODE]}" 2>/dev/null || true
+            wait "${PIDS[$CRASH_NODE]}" 2>/dev/null || true
+            sleep 5
+            start_node "$CRASH_NODE"
+            crash_wait_qs=""
+            crash_next=$(( $(date +%s) + 40 + RANDOM % 60 ))
+        fi
+    fi
+
+    # the whole network killed at once, as after a power cut
+    if [ "$CRASH_ALL_AT" -gt 0 ] && [ "$crashed_all" -eq 0 ] && [ "$min" -ge "$CRASH_ALL_AT" ]; then
+        echo "crash test: SIGKILL every node at sequence $min"
+        for i in $(seq 1 "$ALL_NODES"); do
+            [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true
+        done
+        for i in $(seq 1 "$ALL_NODES"); do
+            [ -n "${PIDS[$i]:-}" ] && wait "${PIDS[$i]}" 2>/dev/null || true
+        done
+        sleep 10
+        for i in $(seq 1 "$NODES"); do start_node "$i"; done
+        crashed_all=1
+        echo "crash test: network restarted"
     fi
 
     if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ]; then
@@ -238,6 +312,19 @@ if [ -n "$FUND_PID" ]; then
     fi
 fi
 
+if [ "$CRASH_NODE" -gt 0 ]; then
+    echo "crash test: n$CRASH_NODE was killed $crashes time(s); it skipped $(grep -ah 'is not on this chain' "$WORK/n$CRASH_NODE"/*.log | wc -l) checkpoint(s) as not on the chain and logged $(grep -ah "Couldn't save block" "$WORK/n$CRASH_NODE"/*.log | wc -l) failed block saves"
+    if [ "$crashes" -lt "$CRASH_TIMES" ]; then
+        echo "FAIL: only $crashes of $CRASH_TIMES kills happened before the target sequence"
+        exit 1
+    fi
+fi
+if [ -n "$DB_BACKEND" ]; then
+    for i in $(seq 1 "$ALL_NODES"); do
+        echo "n$i block database: $(grep -ah 'block database: ' "$WORK/n$i"/*.log | tail -1 | sed 's/.*block database: //')"
+    done
+fi
+
 if [ "$DISK_FULL_NODE" -gt 0 ]; then
     echo "disk-full test: n$DISK_FULL_NODE logged $(grep -ah "Couldn't save block" "$WORK/n$DISK_FULL_NODE"/*.log | wc -l) failed block saves"
 fi
@@ -262,7 +349,7 @@ done
 for p in "$PRUNE_NODE" "$JOIN_NODE"; do
     [ "$p" -gt 0 ] || continue
     echo "pruned storage: n$p logged:"
-    grep -ah "pruned storage" "$WORK/n$p"/node.log | sed 's/^/  /' | tail -n 8
+    { grep -ah "pruned storage" "$WORK/n$p"/node.log || true; } | sed 's/^/  /' | tail -n 8
     # file by file, for the pruned node and a full one: block records, hash index, logs, environment
     for i in 1 "$p"; do
         echo "  n$i block DB $(du -sh "$WORK/n$i/db" 2>/dev/null | cut -f1): $(cd "$WORK/n$i/db" && du -k * 2>/dev/null | sort -k2 | awk '{printf "%s=%sK ", $2, $1}')"
@@ -273,6 +360,17 @@ for p in "$PRUNE_NODE" "$JOIN_NODE"; do
         echo "FAIL: n$p never pruned its storage"
         exit 1
     fi
+done
+
+# checkpoints of this build hold their last sequence: the correction for earlier builds stays unused
+for i in $(seq 1 "$ALL_NODES"); do
+    n=$(cat "$WORK/n$i"/*.log | grep -ac "but its caches already hold block" || true)
+    if [ "${n:-0}" -gt 0 ]; then echo "n$i loaded $n checkpoint(s) one block behind their caches"; fi
+done
+# the round statistics of a node that applied a block twice no longer match its blockchain
+for i in $(seq 1 "$ALL_NODES"); do
+    n=$(cat "$WORK/n$i"/*.log | grep -ac "counted transactions is different" || true)
+    if [ "${n:-0}" -gt 0 ]; then echo "n$i logged \"counted transactions is different\" $n time(s)"; fi
 done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
