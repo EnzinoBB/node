@@ -159,6 +159,10 @@ private:
 
     // Async write pipeline. Bounded; full queue back-pressures producers.
     // Defaults overridable via Storage::open(...).
+    // Used with RocksDB only: BerkeleyDB and LMDB write each block synchronously, as before the
+    // RocksDB backend, so the blocks on disk never lag behind the caches and pruning never writes
+    // concurrently with a writer thread.
+    bool async_writes = false;
     size_t asyncWriteQueueMax_ = 5000;
     size_t writeBatchSize_ = 100;        // pools coalesced into one db->put_batch
     std::deque<Pool> write_queue;
@@ -479,7 +483,7 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     }
 
     // Start async writer (idempotent: re-opens won't spawn a second thread).
-    if (!d->write_thread.joinable()) {
+    if (d->async_writes && !d->write_thread.joinable()) {
         d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
     }
 
@@ -586,6 +590,7 @@ bool Storage::open(
 #if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
     // Default berkeleydb; rocksdb is opt-in via [storage] db_backend = rocksdb.
     if (dbBackend == "rocksdb" || dbBackend == "rocks") {
+        d->async_writes = true;
         auto rocks = std::make_shared<DatabaseRocksDB>();
         rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
         rocks->open(path);
@@ -596,6 +601,7 @@ bool Storage::open(
         db = bdb;
     }
 #elif defined(CSDB_USE_ROCKSDB)
+    d->async_writes = true;
     auto rocks = std::make_shared<DatabaseRocksDB>();
     rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
     rocks->open(path);
@@ -669,8 +675,11 @@ bool Storage::pool_save(Pool pool) {
         return false;
     }
 
-    // Hand off to write_routine; backpressure if queue full.
-    {
+    if (!d->async_writes) {
+        d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary());
+    }
+    else {
+        // Hand off to write_routine; backpressure if queue full.
         std::unique_lock<std::mutex> lock(d->write_lock);
         d->queue_space_cond.wait(lock, [this] {
             return d->write_queue.size() < d->asyncWriteQueueMax_;
