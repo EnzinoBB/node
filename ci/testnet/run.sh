@@ -362,6 +362,11 @@ for p in "$PRUNE_NODE" "$JOIN_NODE"; do
     fi
 done
 
+# checkpoints of this build hold their last sequence: the correction for earlier builds stays unused
+for i in $(seq 1 "$ALL_NODES"); do
+    n=$(cat "$WORK/n$i"/*.log | grep -ac "but its caches already hold block" || true)
+    if [ "${n:-0}" -gt 0 ]; then echo "n$i loaded $n checkpoint(s) one block behind their caches"; fi
+done
 # the round statistics of a node that applied a block twice no longer match its blockchain
 for i in $(seq 1 "$ALL_NODES"); do
     n=$(cat "$WORK/n$i"/*.log | grep -ac "counted transactions is different" || true)
