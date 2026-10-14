@@ -6,7 +6,8 @@ name: Robustness
 # - mixed block databases (BerkeleyDB, LMDB, RocksDB in the same network);
 # - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
 # - the whole network killed at once and restarted, as after a power cut;
-# - a full disk on a RocksDB or LMDB node; pruned storage on RocksDB with a node joining from block 0.
+# - a full disk on a RocksDB or LMDB node; pruned storage on RocksDB with a node joining from block 0;
+# - a pruned node killed while it prunes.
 # All scenarios run funded transfers and the usual restart test.
 on:
   # a robustness-* tag runs it on the tagged commit (a manual run needs the workflow on the default branch)
@@ -118,8 +119,14 @@ jobs:
             env: DB_BACKEND=rocksdb DISK_FULL_NODE=6
           - name: lmdb-disk-full
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6
+          # pruning starts at the first checkpoint past block 1300
           - name: rocksdb-pruned-join
-            env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500
+            env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=1500
+          # kills that land while the node prunes, or right after a checkpoint it prunes from
+          - name: rocksdb-pruned-crash
+            env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=1300 CRASH_TIMES=3 TARGET_SEQ=1800
+          - name: lmdb-pruned-crash
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=1300 CRASH_TIMES=3 TARGET_SEQ=1800
     name: ${{ matrix.name }}
     steps:
       - name: Checkout
@@ -147,7 +154,7 @@ jobs:
         env:
           SCENARIO: ${{ matrix.env }}
           NODES: '7'
-          TARGET_SEQ: '1100'
+          TARGET_SEQ: '1100'  # a scenario can raise it
           TIMEOUT_MIN: '75'
           RESTART_AT: '300'
           FUND: '1'

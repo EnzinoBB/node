@@ -34,7 +34,7 @@ import nacl.signing
 import thriftpy2
 from thriftpy2.protocol import TBinaryProtocolFactory
 from thriftpy2.rpc import make_client
-from thriftpy2.transport import TBufferedTransportFactory
+from thriftpy2.transport import TBufferedTransportFactory, TTransportException
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDL = os.path.abspath(os.path.join(HERE, "..", "..", "third-party", "thrift-interface-definitions"))
@@ -122,11 +122,63 @@ def transfer(src, dst_pk, amount_int, amount_frac=0, managing=None, delegated=No
     return t
 
 
+class Client:
+    """The API of one node, reopened when the node restarts (crash and power-cut scenarios).
+
+    A read waits for the node to come back (up to --reconnect-seconds). A transfer is not repeated:
+    if the node went away while it was sent it may or may not have been accepted, so the sender's
+    inner id is read again before its next transfer and the attempt reports the node unreachable.
+    """
+
+    def __init__(self, port, reconnect_seconds):
+        self.port = port
+        self.reconnect_seconds = reconnect_seconds
+        self.conn = None
+
+    def _open(self):
+        if self.conn is None:
+            self.conn = make_client(api.API, host="127.0.0.1", port=self.port, proto_factory=TBinaryProtocolFactory(),
+                                    trans_factory=TBufferedTransportFactory(), timeout=120000)
+        return self.conn
+
+    def _drop(self):
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+        self.conn = None
+
+    def call(self, name, *args, retry=True):
+        give_up = time.time() + self.reconnect_seconds
+        while True:
+            try:
+                return getattr(self._open(), name)(*args)
+            except (TTransportException, ConnectionError, OSError) as e:
+                self._drop()
+                if not retry or time.time() >= give_up:
+                    raise
+                print(f"API {name}: {e}, retrying", flush=True)
+                time.sleep(5)
+
+    def __getattr__(self, name):
+        return lambda *args: self.call(name, *args)
+
+
+class Unreachable(Exception):
+    pass
+
+
 def send(client, src, dst_pk, amount_int, amount_frac=0, managing=None, delegated=None):
     if src.next_inner_id is None:
         last = client.WalletTransactionsCountGet(src.pk).lastTransactionInnerId or 0
         src.next_inner_id = int(last) + 1
-    result = client.TransactionFlow(transfer(src, dst_pk, amount_int, amount_frac, managing, delegated))
+    try:
+        result = client.call("TransactionFlow", transfer(src, dst_pk, amount_int, amount_frac, managing, delegated),
+                             retry=False)
+    except (TTransportException, ConnectionError, OSError) as e:
+        src.next_inner_id = None
+        raise Unreachable(str(e))
     ok = result.status.code == 0
     if ok:
         src.next_inner_id += 1
@@ -156,10 +208,10 @@ def main():
     parser.add_argument("--min-stake", type=int, default=0)
     parser.add_argument("--delegations", action="store_true")
     parser.add_argument("--delegation-seconds", type=int, default=240)
+    parser.add_argument("--reconnect-seconds", type=int, default=600)
     args = parser.parse_args()
 
-    client = make_client(api.API, host="127.0.0.1", port=args.port, proto_factory=TBinaryProtocolFactory(),
-                         trans_factory=TBufferedTransportFactory(), timeout=120000)
+    client = Client(args.port, args.reconnect_seconds)
     master = Account(base58.b58decode(args.master_seed))
     nodes = [node_account(args.work, i) for i in range(1, args.nodes + 1)]
     print(f"master balance before funding: {balance(client, master.pk):.4f}", flush=True)
@@ -205,6 +257,7 @@ def main():
                                  src, dst, 500, expiry)
 
     sent = 0
+    unreachable = 0
     start = time.time()
     deadline = start + args.load_seconds
     withdrawn = not args.delegations
@@ -215,13 +268,20 @@ def main():
                 failures += delegate(f"n{i} withdraws 1000 from n{i % len(nodes) + 1}",
                                      src, dst, 1000, DELEGATE_WITHDRAW)
         src, dst = random.sample(nodes, 2)
-        ok, message = send(client, src, dst.pk, random.randint(1, 50))
+        try:
+            ok, message = send(client, src, dst.pk, random.randint(1, 50))
+        except Unreachable as e:
+            # the node is down (a crash or power-cut scenario): not a rejected transfer
+            unreachable += 1
+            print(f"load transfer not sent, node unreachable: {e}", flush=True)
+            time.sleep(5)
+            continue
         sent += 1 if ok else 0
         if not ok:
             print(f"load transfer failed: {message}", flush=True)
             failures += 1
         time.sleep(1)
-    print(f"load transfers sent: {sent}", flush=True)
+    print(f"load transfers sent: {sent}, not sent while the node was unreachable: {unreachable}", flush=True)
 
     for i, node in enumerate(nodes, 1):
         print(f"balance n{i}: {balance(client, node.pk):.4f}", flush=True)

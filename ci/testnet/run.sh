@@ -89,7 +89,9 @@ storage_section() {
     esac
     if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; then
         { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
-        lines="checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
+        # a checkpoint a minute as well: pruning starts at the first checkpoint past block 1300
+        # (checkpoint_every + prune_keep_blocks) and then runs again after every checkpoint
+        lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
     elif [ "$i" -eq "$CRASH_NODE" ]; then
         # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so
         # that the kills hit the moments right after one
@@ -347,7 +349,7 @@ done
 for p in "$PRUNE_NODE" "$JOIN_NODE"; do
     [ "$p" -gt 0 ] || continue
     echo "pruned storage: n$p logged:"
-    grep -ah "pruned storage" "$WORK/n$p"/node.log | sed 's/^/  /' | tail -n 8
+    { grep -ah "pruned storage" "$WORK/n$p"/node.log || true; } | sed 's/^/  /' | tail -n 8
     # file by file, for the pruned node and a full one: block records, hash index, logs, environment
     for i in 1 "$p"; do
         echo "  n$i block DB $(du -sh "$WORK/n$i/db" 2>/dev/null | cut -f1): $(cd "$WORK/n$i/db" && du -k * 2>/dev/null | sort -k2 | awk '{printf "%s=%sK ", $2, $1}')"
@@ -358,6 +360,12 @@ for p in "$PRUNE_NODE" "$JOIN_NODE"; do
         echo "FAIL: n$p never pruned its storage"
         exit 1
     fi
+done
+
+# the round statistics of a node that applied a block twice no longer match its blockchain
+for i in $(seq 1 "$ALL_NODES"); do
+    n=$(cat "$WORK/n$i"/*.log | grep -ac "counted transactions is different" || true)
+    if [ "${n:-0}" -gt 0 ]; then echo "n$i logged \"counted transactions is different\" $n time(s)"; fi
 done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
