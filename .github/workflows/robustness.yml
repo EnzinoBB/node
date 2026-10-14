@@ -6,7 +6,7 @@ name: Robustness
 # - mixed block databases (BerkeleyDB, LMDB, RocksDB in the same network);
 # - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
 # - the whole network killed at once and restarted, as after a power cut;
-# - a full disk on a RocksDB or LMDB node; pruned storage on RocksDB with a node joining from block 0;
+# - a full disk on a RocksDB, LMDB or BerkeleyDB node; pruned storage on RocksDB with a node joining from block 0;
 # - a pruned node killed while it prunes.
 # All scenarios run funded transfers and the usual restart test.
 on:
@@ -119,6 +119,10 @@ jobs:
             env: DB_BACKEND=rocksdb DISK_FULL_NODE=6
           - name: lmdb-disk-full
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6
+          - name: berkeleydb-disk-full
+            env: DB_BACKEND=berkeleydb DISK_FULL_NODE=6
+          - name: lmdb-disk-full-late
+            env: DB_BACKEND=lmdb DISK_FULL_NODE=6 DISK_FULL_AT=700
           # pruning starts at the periodic checkpoint #2000 (checkpoint_every + prune_keep_blocks <= 2000)
           - name: rocksdb-pruned-join
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=2300
