@@ -30,6 +30,8 @@ private:
     bool get(const uint32_t seq_no, cs::Bytes* value) final;
     bool remove(const cs::Bytes& key) final;
     bool remove_batch(const std::vector<cs::Bytes>& keys) final;
+    // the environment runs with MDB_NOSYNC: write the data to disk now
+    bool flush() final;
     bool seq_no(const cs::Bytes& key, uint32_t* value) final;
     bool write_batch(const ItemList&) final;
     IteratorPtr new_iterator() final;

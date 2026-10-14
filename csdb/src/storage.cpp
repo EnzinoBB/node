@@ -9,6 +9,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <chrono>
 #include <thread>
 
 #include <boost/multi_index_container.hpp>
@@ -391,9 +392,16 @@ void Storage::priv::write_routine() {
             });
         }
 
-        db->put_batch(requests);
+        const bool written = db->put_batch(requests);
 
         lock.lock();
+        if (!written) {
+            // keep the blocks queued and try again: dropping them would leave a hole behind the caches,
+            // and a queue that stays full stops the node instead
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
         for (size_t i = 0; i < pools.size(); ++i) {
             write_queue.pop_front();
         }
@@ -621,6 +629,11 @@ bool Storage::open(
 
 bool Storage::flush() {
     if (!d || !d->db) return false;
+    if (d->async_writes) {
+        // every block handed to the writer must be in the database before the caller relies on it
+        std::unique_lock<std::mutex> lock(d->write_lock);
+        d->queue_space_cond.wait(lock, [this] { return d->write_queue.empty() || !d->write_thread.joinable(); });
+    }
     return d->db->flush();
 }
 
@@ -676,7 +689,12 @@ bool Storage::pool_save(Pool pool) {
     }
 
     if (!d->async_writes) {
-        d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary());
+        if (!d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary())) {
+            // not stored: do not count it, so the next block cannot be saved on top of a hole
+            d->set_last_error(DatabaseError, "%s: cannot write pool %llu: %s", funcName(),
+                              static_cast<unsigned long long>(pool.sequence()), d->db->last_error_message().c_str());
+            return false;
+        }
     }
     else {
         // Hand off to write_routine; backpressure if queue full.
