@@ -92,8 +92,10 @@ bool BlockChain::tryQuickStart(
         reserveConf.insert(it);
     }
     // trust the caches only if their head is still the block this node has at that sequence
-    bool ok = serializationManPtr_->load([this](const cs::CheckpointHead& head) {
+    cs::Sequence loadedHead = 0;
+    bool ok = serializationManPtr_->load([this, &loadedHead](const cs::CheckpointHead& head) {
         if (cs::isCheckpointOnChain(head, [this](cs::Sequence seq) { return blockHashes_->find(seq).to_binary(); })) {
+            loadedHead = head.sequence;
             return true;
         }
         cswarning() << "QUICK START: checkpoint head #" << head.sequence << " is not on this chain, skip it";
@@ -102,6 +104,14 @@ bool BlockChain::tryQuickStart(
 
     if (ok) {
         cslog() << "Caches for QUICK START loaded successfully!";
+        // The caches hold the head block. A checkpoint saved while blocks are applied live records
+        // lastSequence_ before recordBlock advances it to that block, so it reads one less: reading the
+        // database from there would apply the head block a second time and change the balances.
+        if (loadedHead != 0 && loadedHead == lastSequence_ + 1) {
+            cswarning() << "QUICK START: checkpoint #" << loadedHead << " recorded last sequence " << lastSequence_.load()
+                        << ", but its caches already hold block " << loadedHead << ": continue after it";
+            lastSequence_ = loadedHead;
+        }
     } else {
         cswarning() << "Could not load caches for QUICK START, continue with slow start :(";
         for (auto it : reserveConf) {
