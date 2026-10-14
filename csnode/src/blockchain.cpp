@@ -1508,20 +1508,16 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         }
     }
 
-    if (finalizeBlock(pool, isTrusted, lastConfidants)) {
-        csdebug() << kLogPrefix << "The block is correct";
-        if (!applyBlockToCaches(pool)) {
-            csdebug() << kLogPrefix << "failed to apply block to caches";
-            return std::nullopt;
-        }
-    }
-    else {
+    if (!finalizeBlock(pool, isTrusted, lastConfidants)) {
         csdebug() << kLogPrefix << "the signatures of the block are insufficient or incorrect";
         setBlocksToBeRemoved(1U);
         return std::nullopt;
     }
-    //========================================
+    csdebug() << kLogPrefix << "The block is correct";
 
+    // The deferred block goes to disk before this block changes the caches: if it cannot be saved
+    // (e.g. the disk is full) the block is offered again later, and had the caches already taken it,
+    // it would be applied to them a second time and the balances would diverge from the network.
     {
         cs::Lock lock(dbLock_);
 
@@ -1545,6 +1541,12 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
             }
         }
     }
+
+    if (!applyBlockToCaches(pool)) {
+        csdebug() << kLogPrefix << "failed to apply block to caches";
+        return std::nullopt;
+    }
+    //========================================
 
     if (flushed_block_seq != NoSequence) {
         csdebug() << "---------------------------- Flush block #" << flushed_block_seq << " to disk ---------------------------";
