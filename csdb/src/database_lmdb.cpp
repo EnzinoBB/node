@@ -214,6 +214,14 @@ bool DatabaseLmdb::remove(const cs::Bytes& key) {
 // Every commit copies the changed tree path and frees the old pages, which LMDB can reuse only
 // once no later reader may see them; millions of tiny transactions build a backlog of such pages
 // and the file grows (seen on mainnet: a 1.7 GB file holding 360 MB of blocks).
+bool DatabaseLmdb::flush() {
+    if (env_ == nullptr) {
+        return false;
+    }
+    const int status = mdb_env_sync(env_, 1);
+    return status == MDB_SUCCESS || fail(status, "env_sync");
+}
+
 bool DatabaseLmdb::remove_batch(const std::vector<cs::Bytes>& keys) {
     if (!is_open()) {
         set_last_error(NotOpen);

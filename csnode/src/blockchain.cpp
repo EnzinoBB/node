@@ -92,8 +92,10 @@ bool BlockChain::tryQuickStart(
         reserveConf.insert(it);
     }
     // trust the caches only if their head is still the block this node has at that sequence
-    bool ok = serializationManPtr_->load([this](const cs::CheckpointHead& head) {
+    cs::Sequence loadedHead = 0;
+    bool ok = serializationManPtr_->load([this, &loadedHead](const cs::CheckpointHead& head) {
         if (cs::isCheckpointOnChain(head, [this](cs::Sequence seq) { return blockHashes_->find(seq).to_binary(); })) {
+            loadedHead = head.sequence;
             return true;
         }
         cswarning() << "QUICK START: checkpoint head #" << head.sequence << " is not on this chain, skip it";
@@ -102,6 +104,14 @@ bool BlockChain::tryQuickStart(
 
     if (ok) {
         cslog() << "Caches for QUICK START loaded successfully!";
+        // The caches hold the head block. A live checkpoint of an earlier build was saved before
+        // recordBlock advanced lastSequence_ to that block, so it reads one less: reading the database
+        // from there would apply the head block a second time and change the balances.
+        if (loadedHead != 0 && loadedHead == lastSequence_ + 1) {
+            cswarning() << "QUICK START: checkpoint #" << loadedHead << " recorded last sequence " << lastSequence_.load()
+                        << ", but its caches already hold block " << loadedHead << ": continue after it";
+            lastSequence_ = loadedHead;
+        }
     } else {
         cswarning() << "Could not load caches for QUICK START, continue with slow start :(";
         for (auto it : reserveConf) {
@@ -181,13 +191,15 @@ bool BlockChain::init(
         return false;
     };
 
-    // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] block_db)
-    const bool lmdbBlocks = cs::ConfigHolder::instance().config()->getStorageSettings().lmdbBlocks;
-    if (lmdbBlocks) {
-        cslog() << kLogPrefix << "block database: LMDB in " << path << "/lmdb";
-    }
+    const auto& storageCfg = cs::ConfigHolder::instance().config()->getStorageSettings();
+    // LMDB reuses the space of pruned blocks; BerkeleyDB's Recno never does ([storage] db_backend)
+    cslog() << kLogPrefix << "block database: " << storageCfg.dbBackend
+            << (storageCfg.dbBackend == "lmdb" ? " in " + path + "/lmdb" : std::string{});
     if (!storage_.open(path, progress, newBlockchainTop, firstBlockToReadInDatabase,
-                       lmdbBlocks ? csdb::Storage::Engine::Lmdb : csdb::Storage::Engine::BerkeleyDB)) {
+                       storageCfg.asyncWriteQueueSize, storageCfg.writeBatchSize,
+                       static_cast<uint64_t>(storageCfg.rocksdbBlockCacheMb) << 20,
+                       static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
+                       storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
         return false;
     }
@@ -356,6 +368,8 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
         if (byCount || byTime) {
             cslog() << kLogPrefix << "slow start: saving checkpoint at block " << WithDelimiters(blockSeq);
             trxIndex_->flush();
+            // the checkpoint must not get ahead of the blocks on disk
+            storage_.flush();
             cs::CheckpointHead head;
             head.sequence = blockSeq;
             head.head_hash = block.hash().to_binary();
@@ -927,34 +941,46 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
         return false;
     }
 
-    if (serializationManPtr_ && pool.sequence()) {
-        const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
-        const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
-        const auto now = std::chrono::steady_clock::now();
-        const bool byCount = (every > 0 && pool.sequence() % every == 0);
-        const bool byTime = (sto.checkpointEveryMinutes > 0
-            && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
-        if (byCount || byTime) {
-            trxIndex_->flush();
-            cs::CheckpointHead head;
-            head.sequence = pool.sequence();
-            head.head_hash = pool.hash().to_binary();
-            head.prev_hash = pool.previous_hash().to_binary();
-            if (serializationManPtr_->save(pool.sequence(), head)) {
-                serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
-                lastCheckpointWallClock_ = now;
-                if (byCount) {
-                    schedulePruning(pool.sequence());
-                }
-            }
-            else {
-                cserror() << "Cannot save caches with version " << pool.sequence();
-            }
-        }
-    }
     pruneStep();
 
     return true;
+}
+
+// A live checkpoint is taken once the block is on disk, before the next block reaches the caches:
+// then the caches, lastSequence_, the handlers of storeBlockEvent and the database all hold exactly
+// this block, and a quick start from it continues with the next block in the database.
+void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
+    if (!serializationManPtr_ || !pool.sequence()) {
+        return;
+    }
+    const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+    const auto every = sto.checkpointEvery > 0 ? sto.checkpointEvery : kQuickStartSaveCachesInterval;
+    const auto now = std::chrono::steady_clock::now();
+    const bool byCount = (every > 0 && pool.sequence() % every == 0);
+    const bool byTime = (sto.checkpointEveryMinutes > 0
+        && now - lastCheckpointWallClock_ >= std::chrono::minutes(sto.checkpointEveryMinutes));
+    if (byCount || byTime) {
+        trxIndex_->flush();
+        // the checkpoint must not get ahead of the blocks on disk (RocksDB writes them asynchronously)
+        if (!storage_.flush()) {
+            cswarning() << kLogPrefix << "storage flush failed, no checkpoint at " << pool.sequence();
+            return;
+        }
+        cs::CheckpointHead head;
+        head.sequence = pool.sequence();
+        head.head_hash = pool.hash().to_binary();
+        head.prev_hash = pool.previous_hash().to_binary();
+        if (serializationManPtr_->save(pool.sequence(), head)) {
+            serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
+            lastCheckpointWallClock_ = now;
+            if (byCount) {
+                schedulePruning(pool.sequence());
+            }
+        }
+        else {
+            cserror() << "Cannot save caches with version " << pool.sequence();
+        }
+    }
 }
 
 csdb::PoolHash BlockChain::getHashBySequence(cs::Sequence seq) const {
@@ -1490,20 +1516,16 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         }
     }
 
-    if (finalizeBlock(pool, isTrusted, lastConfidants)) {
-        csdebug() << kLogPrefix << "The block is correct";
-        if (!applyBlockToCaches(pool)) {
-            csdebug() << kLogPrefix << "failed to apply block to caches";
-            return std::nullopt;
-        }
-    }
-    else {
+    if (!finalizeBlock(pool, isTrusted, lastConfidants)) {
         csdebug() << kLogPrefix << "the signatures of the block are insufficient or incorrect";
         setBlocksToBeRemoved(1U);
         return std::nullopt;
     }
-    //========================================
+    csdebug() << kLogPrefix << "The block is correct";
 
+    // The deferred block goes to disk before this block changes the caches: if it cannot be saved
+    // (e.g. the disk is full) the block is offered again later, and had the caches already taken it,
+    // it would be applied to them a second time and the balances would diverge from the network.
     {
         cs::Lock lock(dbLock_);
 
@@ -1527,6 +1549,16 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
             }
         }
     }
+
+    if (flushed_block_seq != NoSequence) {
+        saveLiveCheckpoint(deferredBlock_);
+    }
+
+    if (!applyBlockToCaches(pool)) {
+        csdebug() << kLogPrefix << "failed to apply block to caches";
+        return std::nullopt;
+    }
+    //========================================
 
     if (flushed_block_seq != NoSequence) {
         csdebug() << "---------------------------- Flush block #" << flushed_block_seq << " to disk ---------------------------";
