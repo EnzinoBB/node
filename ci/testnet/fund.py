@@ -262,6 +262,7 @@ def main():
     sent = 0
     unreachable = 0
     pending = 0
+    unsynced = 0
     start = time.time()
     deadline = start + args.load_seconds
     withdrawn = not args.delegations
@@ -285,12 +286,16 @@ def main():
             # the API stopped waiting for consensus (a node was just killed): the outcome is unknown
             pending += 1
             print(f"load transfer still in progress: {message}", flush=True)
+        elif not ok and "not syncronized" in message:
+            # the node refuses transfers while it catches up after a restart (power-cut scenario)
+            unsynced += 1
+            print(f"load transfer refused while the node catches up: {message}", flush=True)
         elif not ok:
             print(f"load transfer failed: {message}", flush=True)
             failures += 1
         time.sleep(1)
     print(f"load transfers sent: {sent}, not sent while the node was unreachable: {unreachable}, "
-          f"still in progress when the API stopped waiting: {pending}", flush=True)
+          f"still in progress when the API stopped waiting: {pending}, refused while catching up: {unsynced}", flush=True)
 
     for i, node in enumerate(nodes, 1):
         print(f"balance n{i}: {balance(client, node.pk):.4f}", flush=True)
