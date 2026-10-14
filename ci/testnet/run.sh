@@ -15,6 +15,11 @@
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
+#        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
+#        runs its own executor; contracts.py deploys a counter contract and calls it before and after
+#        the restart test, which waits for the first calls; all nodes must end with the same state
+#        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
+#        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -51,6 +56,7 @@ DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+CONTRACTS=${CONTRACTS:-0}
 PRUNE_NODE=${PRUNE_NODE:-0}
 DB_BACKEND=${DB_BACKEND:-}
 CRASH_NODE=${CRASH_NODE:-0}
@@ -78,6 +84,60 @@ if [ "$FUND" = "1" ]; then
     export CS_TESTNET_GENESIS_KEY=$MASTER_PUB CS_TESTNET_STARTER_KEY=$MASTER_PUB
     echo "testnet master key $MASTER_PUB"
 fi
+
+# the release ships its executor with the JDK it runs on (ojdkbuild 11.0.4); jdk.path must be a JDK,
+# the executor compiles contracts with it
+if [ "$CONTRACTS" = "1" ]; then
+    EXECUTOR_JDK=$(find "$(dirname "$EXECUTOR_JAR")" -maxdepth 2 -type d -name 'java-11-openjdk-*' | head -1)
+    EXECUTOR_JDK=${EXECUTOR_JDK:-${JAVA_HOME:-/usr}}
+    echo "contract executor $EXECUTOR_JAR on $EXECUTOR_JDK"
+    # the executor compiles contracts in-process with this JDK's javac and its own class path, but a
+    # compile error reaches the API only as a dropped connection, so compile them here first
+    mkdir -p "$WORK/contract-sources"
+    (cd "$HERE" && python3 -c "import contracts, sys; contracts.write_sources(sys.argv[1])" "$WORK/contract-sources")
+    for jar in "$EXECUTOR_JAR" ${EXECUTOR_JAR_ALT:+"$EXECUTOR_JAR_ALT"}; do
+        if ! "$EXECUTOR_JDK/bin/javac" -parameters -cp "$jar" -d "$WORK/contract-sources" "$WORK"/contract-sources/*.java; then
+            echo "FAIL: the test contracts do not compile against the class path of $jar"
+            exit 1
+        fi
+    done
+    echo "test contracts compile against the executor's class path"
+    [ -z "${EXECUTOR_JAR_ALT:-}" ] || echo "mixed executors: even nodes run $EXECUTOR_JAR_ALT"
+fi
+
+# public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their
+# contract states) and its own executor, started by the node through executor.sh
+api_settings() {
+    local i=$1
+    if [ "$CONTRACTS" != "1" ]; then
+        echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
+        echo "apiexec_port=0"
+        return
+    fi
+    echo "port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))"
+    echo "apiexec_port=$((9200 + i))"
+    echo "executor_port=$((9300 + i))"
+    echo "executor_command=$WORK/n$i/executor.sh"
+    echo "executor_multi_instance=true"
+    # the first contract compile in a fresh JVM takes longer than the 4 s default
+    echo "executor_send_timeout=60000"
+    echo "executor_receive_timeout=60000"
+    cat > "$WORK/n$i/settings.properties" <<PROPS
+node.api.host=127.0.0.1
+node.api.port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))
+contract.executor.port=$((9300 + i))
+contract.executor.node.api.port=$((9200 + i))
+contract.executor.node.api.host=127.0.0.1
+contract.executor.read.client.timeout=0
+jdk.path=$EXECUTOR_JDK
+PROPS
+    local jar=$EXECUTOR_JAR
+    if [ -n "${EXECUTOR_JAR_ALT:-}" ] && [ $((i % 2)) -eq 0 ]; then jar=$EXECUTOR_JAR_ALT; fi
+    # the marker lets run.sh stop the executor of a stopped node
+    printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec "%s" -Xmx384m -XX:MaxMetaspaceSize=256m -Dcs.testnet.node=n%s -jar "%s" >> executor.log 2>&1\n' \
+        "$EXECUTOR_JDK/bin/java" "$i" "$jar" > "$WORK/n$i/executor.sh"
+    chmod +x "$WORK/n$i/executor.sh"
+}
 
 # the [storage] section of node i: pruning, backend and checkpoint frequency
 storage_section() {
@@ -125,8 +185,7 @@ ip=127.0.0.1
 port=$((BASE_PORT + i))
 
 [api]
-port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)
-apiexec_port=0
+$(api_settings "$i")
 ajax_port=0
 diag_port=0
 $(storage_section "$i")
@@ -158,6 +217,7 @@ stop_all() {
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true
     done
+    pkill -f "cs.testnet.node=" 2>/dev/null || true
     if [ "$DISK_FULL_NODE" -gt 0 ]; then
         sudo umount "$WORK/n$DISK_FULL_NODE/db" 2>/dev/null || true
     fi
@@ -182,11 +242,13 @@ echo "started $NODES nodes in $WORK"
 
 deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 restarted=0
+stopped_at=0
 crashes=0
 crash_wait_qs=""
 crash_next=0
 crashed_all=0
 FUND_PID=
+CONTRACTS_PID=
 disk_filled_at=0
 disk_freed=0
 while :; do
@@ -260,10 +322,13 @@ while :; do
         echo "crash test: network restarted"
     fi
 
-    if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ]; then
+    if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ] \
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
         echo "restart test: stopping n$NODES at sequence $min"
+        stopped_at=$min
         kill -TERM "${PIDS[$NODES]}"
         wait "${PIDS[$NODES]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$NODES " 2>/dev/null || true
         sleep 30
         start_node "$NODES"
         restarted=1
@@ -295,12 +360,42 @@ while :; do
         FUND_PID=$!
     fi
 
-    if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; }; then break; fi
+    if [ "$CONTRACTS" = "1" ] && [ -z "$CONTRACTS_PID" ] && grep -q "master transactions done" "$WORK/fund.log" 2>/dev/null; then
+        echo "contracts: deploying and calling them through node 1"
+        (cd "$HERE" && python3 contracts.py "$WORK" "$NODES" "$MASTER_SEED" \
+            --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done") > "$WORK/contracts.log" 2>&1 &
+        CONTRACTS_PID=$!
+    fi
+    # the calls after the restart must run on the restarted node too, so let it catch up first
+    if [ "$restarted" -eq 1 ] && [ ! -e "$WORK/restart-done" ] && [ "$(seq_of "$NODES")" -ge $((stopped_at + 30)) ] 2>/dev/null; then
+        touch "$WORK/restart-done"
+    fi
+
+    if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
+        && { [ "$CONTRACTS" != "1" ] || ! kill -0 "${CONTRACTS_PID:-0}" 2>/dev/null; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
     fi
 done
+
+if [ -n "$CONTRACTS_PID" ]; then
+    contracts_status=0
+    wait "$CONTRACTS_PID" || contracts_status=$?
+    cat "$WORK/contracts.log"
+    for i in $(seq 1 "$NODES"); do
+        echo "n$i executor: $(cat "$WORK/n$i"/log/*.txt 2>/dev/null | grep -ac . || true) log lines, $(grep -aci "SmartContractGet\|exception" "$WORK/n$i/node.log" 2>/dev/null || true) node log lines on SmartContractGet/exceptions"
+    done
+    if [ "$contracts_status" -ne 0 ]; then
+        # the executor logs to log/executor-log-<day>.txt in its working directory (its logback.xml)
+        tail -n 40 "$WORK"/n1/log/*.txt 2>/dev/null || true
+        echo "FAIL: contract deploys or calls failed"
+        exit 1
+    fi
+elif [ "$CONTRACTS" = "1" ]; then
+    echo "FAIL: contracts.py never started"
+    exit 1
+fi
 
 if [ -n "$FUND_PID" ]; then
     fund_status=0
