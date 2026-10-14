@@ -182,6 +182,9 @@ def send(client, src, dst_pk, amount_int, amount_frac=0, managing=None, delegate
     ok = result.status.code == 0
     if ok:
         src.next_inner_id += 1
+    else:
+        # a transfer still in progress may land later with this inner id: read the next one again
+        src.next_inner_id = None
     return ok, result.status.message
 
 
@@ -258,6 +261,7 @@ def main():
 
     sent = 0
     unreachable = 0
+    pending = 0
     start = time.time()
     deadline = start + args.load_seconds
     withdrawn = not args.delegations
@@ -277,11 +281,16 @@ def main():
             time.sleep(5)
             continue
         sent += 1 if ok else 0
-        if not ok:
+        if not ok and message.startswith("Transaction in progress"):
+            # the API stopped waiting for consensus (a node was just killed): the outcome is unknown
+            pending += 1
+            print(f"load transfer still in progress: {message}", flush=True)
+        elif not ok:
             print(f"load transfer failed: {message}", flush=True)
             failures += 1
         time.sleep(1)
-    print(f"load transfers sent: {sent}, not sent while the node was unreachable: {unreachable}", flush=True)
+    print(f"load transfers sent: {sent}, not sent while the node was unreachable: {unreachable}, "
+          f"still in progress when the API stopped waiting: {pending}", flush=True)
 
     for i, node in enumerate(nodes, 1):
         print(f"balance n{i}: {balance(client, node.pk):.4f}", flush=True)

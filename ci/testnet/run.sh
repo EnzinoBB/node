@@ -89,8 +89,8 @@ storage_section() {
     esac
     if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; then
         { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
-        # a checkpoint a minute as well: pruning starts at the first checkpoint past block 1300
-        # (checkpoint_every + prune_keep_blocks) and then runs again after every checkpoint
+        # pruning follows the periodic checkpoints only: it starts at #2000; a checkpoint a minute as
+        # well, so that kills of a pruned node land right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
     elif [ "$i" -eq "$CRASH_NODE" ]; then
         # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so

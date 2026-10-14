@@ -104,13 +104,13 @@ jobs:
       matrix:
         include:
           - name: rocksdb-crash
-            env: DB_BACKEND=rocksdb CRASH_NODE=6
+            env: DB_BACKEND=rocksdb CRASH_NODE=6 TARGET_SEQ=1600
           - name: mixed-crash-berkeleydb
-            env: DB_BACKEND=mixed CRASH_NODE=4
+            env: DB_BACKEND=mixed CRASH_NODE=4 TARGET_SEQ=1600
           - name: mixed-crash-lmdb
-            env: DB_BACKEND=mixed CRASH_NODE=5
+            env: DB_BACKEND=mixed CRASH_NODE=5 TARGET_SEQ=1600
           - name: mixed-crash-rocksdb
-            env: DB_BACKEND=mixed CRASH_NODE=6
+            env: DB_BACKEND=mixed CRASH_NODE=6 TARGET_SEQ=1600
           - name: mixed-power-cut
             env: DB_BACKEND=mixed CRASH_ALL_AT=600
           - name: rocksdb-power-cut
@@ -119,14 +119,14 @@ jobs:
             env: DB_BACKEND=rocksdb DISK_FULL_NODE=6
           - name: lmdb-disk-full
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6
-          # pruning starts at the first checkpoint past block 1300
+          # pruning starts at the periodic checkpoint #2000 (checkpoint_every + prune_keep_blocks <= 2000)
           - name: rocksdb-pruned-join
-            env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=1500
+            env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=2300
           # kills that land while the node prunes, or right after a checkpoint it prunes from
           - name: rocksdb-pruned-crash
-            env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=1300 CRASH_TIMES=3 TARGET_SEQ=1800
+            env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2400
           - name: lmdb-pruned-crash
-            env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=1300 CRASH_TIMES=3 TARGET_SEQ=1800
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2400
     name: ${{ matrix.name }}
     steps:
       - name: Checkout
