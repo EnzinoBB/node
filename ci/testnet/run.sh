@@ -24,8 +24,8 @@
 #        DB_BACKEND (default empty = the node's default, berkeleydb): db_backend of every node, or
 #        "mixed" for berkeleydb, lmdb and rocksdb in turn; pruned nodes use lmdb unless it names one
 #        CRASH_NODE (default 0 = off): that node is killed with SIGKILL CRASH_TIMES times (default 6)
-#        from sequence CRASH_FROM (default 150) and restarted each time; it saves a checkpoint every 50
-#        blocks, and every other kill lands right after one; it must end with the same state digests
+#        from sequence CRASH_FROM (default 150) and restarted each time; it saves a checkpoint every
+#        minute, and every other kill lands right after one; it must end with the same state digests
 #        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
 #        network restarted, as after a power cut; the nodes must agree again
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
@@ -91,8 +91,9 @@ storage_section() {
         { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
         lines="checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
     elif [ "$i" -eq "$CRASH_NODE" ]; then
-        # frequent checkpoints, so that the kills hit the moments right after one
-        lines="checkpoint_every=50\ncheckpoint_keep=3\n"
+        # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so
+        # that the kills hit the moments right after one
+        lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
     fi
     [ -n "$backend" ] && lines="${lines}db_backend=$backend\n"
     [ -n "$lines" ] && printf "\n[storage]\n$lines"

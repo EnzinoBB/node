@@ -125,6 +125,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # fund.py reads the node API definitions from it
+      - name: Checkout API definitions
+        run: git submodule update --init -- third-party/thrift-interface-definitions
+
       - name: Install tools
         run: |
           sudo apt-get update -qq
