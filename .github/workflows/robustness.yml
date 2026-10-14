@@ -1,0 +1,171 @@
+name: Robustness
+
+# Fork hunting: the private 7-node network of testnet.yml under conditions that could make honest
+# nodes disagree, each scenario on its own runner. Every node reports a state digest every block,
+# and a scenario passes only if all nodes report the same digests and reach the target sequence:
+# - mixed block databases (BerkeleyDB, LMDB, RocksDB in the same network);
+# - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
+# - the whole network killed at once and restarted, as after a power cut;
+# - a full disk on a RocksDB or LMDB node; pruned storage on RocksDB with a node joining from block 0.
+# All scenarios run funded transfers and the usual restart test.
+on:
+  # a robustness-* tag runs it on the tagged commit (a manual run needs the workflow on the default branch)
+  push:
+    tags: ['robustness-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  BOOST_PREFIX: /home/runner/boost
+  CCACHE_DIR: /home/runner/.ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build flex bison autoconf automake libtool pkg-config ccache
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-24.04-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | sha256sum -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(nproc)" -d0 variant=release link=static runtime-link=static threading=multi \
+            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-24.04-${{ github.sha }}
+          restore-keys: ccache-ubuntu-24.04-
+
+      # the test-network build of testnet.yml
+      - name: Build node
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF \
+            -DCREDITS_TESTNET=ON
+          ccache --max-size=2G
+          cmake --build build -j"$(nproc)" --target node
+
+      - name: Upload node
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-node-${{ github.sha }}
+          path: build/client/node
+          retention-days: 7
+
+  scenario:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: rocksdb-crash
+            env: DB_BACKEND=rocksdb CRASH_NODE=6
+          - name: mixed-crash-berkeleydb
+            env: DB_BACKEND=mixed CRASH_NODE=4
+          - name: mixed-crash-lmdb
+            env: DB_BACKEND=mixed CRASH_NODE=5
+          - name: mixed-crash-rocksdb
+            env: DB_BACKEND=mixed CRASH_NODE=6
+          - name: mixed-power-cut
+            env: DB_BACKEND=mixed CRASH_ALL_AT=600
+          - name: rocksdb-power-cut
+            env: DB_BACKEND=rocksdb CRASH_ALL_AT=600
+          - name: rocksdb-disk-full
+            env: DB_BACKEND=rocksdb DISK_FULL_NODE=6
+          - name: lmdb-disk-full
+            env: DB_BACKEND=lmdb DISK_FULL_NODE=6
+          - name: rocksdb-pruned-join
+            env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500
+    name: ${{ matrix.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq python3-nacl python3-base58 gdb
+          python3 -m pip install --user --quiet --break-system-packages thriftpy2
+          sudo sysctl -w kernel.core_pattern="${{ github.workspace }}/testnet-run/core.%e.%p"
+
+      - name: Download node
+        uses: actions/download-artifact@v4
+        with:
+          name: testnet-node-${{ github.sha }}
+          path: build
+
+      - name: Run private network
+        timeout-minutes: 100
+        env:
+          SCENARIO: ${{ matrix.env }}
+          NODES: '7'
+          TARGET_SEQ: '1100'
+          TIMEOUT_MIN: '75'
+          RESTART_AT: '300'
+          FUND: '1'
+          LOAD_SECONDS: '300'
+          WORK: ${{ github.workspace }}/testnet-run
+        run: |
+          chmod +x build/node
+          # the scenario's variables come from the matrix above, NAME=value pairs only
+          for kv in $SCENARIO; do
+            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9]+$' || { echo "bad scenario entry $kv"; exit 1; }
+            export "$kv"
+          done
+          echo "scenario: $SCENARIO"
+          ci/testnet/run.sh build/node
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.name }}
+          path: |
+            testnet-run/n*/*.log
+            testnet-run/fund.log
+            testnet-run/n*/config.ini
+          retention-days: 14
