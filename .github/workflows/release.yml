@@ -81,12 +81,12 @@ jobs:
           echo "PUBLISH=$publish" >> "$GITHUB_ENV"
           echo "version $version, executor $executor_tag, publish $publish"
 
-      # third-party/rocksdb is a gitlink with no .gitmodules entry: list the submodules explicitly
+      # the submodules the build needs, listed explicitly
       - name: Checkout submodules
         run: |
           git submodule update --init -- cscrypto p2p \
             third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
-            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
 

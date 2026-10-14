@@ -30,13 +30,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # third-party/rocksdb is a gitlink with no .gitmodules entry, so a plain
-      # `git submodule update --init --recursive` fails: list the submodules explicitly.
+      # the submodules the build needs, listed explicitly (third-party/rocksdb is declared since the
+      # RocksDB backend; it used to be a gitlink with no .gitmodules entry)
       - name: Checkout submodules
         run: |
           git submodule update --init -- cscrypto p2p \
             third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
-            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
 
