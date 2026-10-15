@@ -23,6 +23,13 @@
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
 #        RESTART_NODES (default: the last node): the nodes the restart test stops and restarts together
+#        NET_FAULT (default off): loss, corrupt, delay, reorder, duplicate or partition, applied with
+#        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
+#        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
+#        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up
+#        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
+#        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
+#        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -79,6 +86,30 @@ DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
 DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
+NET_FAULT=${NET_FAULT:-}
+NET_FAULT_NODES=${NET_FAULT_NODES:-}
+NET_FAULT_AT=${NET_FAULT_AT:-150}
+NET_FAULT_SECONDS=${NET_FAULT_SECONDS:-0}
+NET_FAULT_PCT=${NET_FAULT_PCT:-10}
+SLOW_NODES=${SLOW_NODES:-}
+SLOW_CPU=${SLOW_CPU:-20}
+GARBAGE_AT=${GARBAGE_AT:-0}
+GARBAGE_SECONDS=${GARBAGE_SECONDS:-300}
+GARBAGE_RATE=${GARBAGE_RATE:-200}
+for v in "$NET_FAULT_NODES" "$SLOW_NODES"; do
+    echo "$v" | grep -qE '^([0-9]+(,[0-9]+)*)?$' || { echo "bad node list '$v'"; exit 1; }
+done
+case "$NET_FAULT" in
+    "") NETEM="" ;;
+    loss) NETEM="loss ${NET_FAULT_PCT}%" ;;
+    corrupt) NETEM="corrupt ${NET_FAULT_PCT}%" ;;
+    delay) NETEM="delay 250ms 150ms distribution normal" ;;
+    reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50%" ;;
+    duplicate) NETEM="duplicate ${NET_FAULT_PCT}%" ;;
+    partition) NETEM="loss 100%" ;;
+    *) echo "bad NET_FAULT '$NET_FAULT'"; exit 1 ;;
+esac
+[ -z "$NET_FAULT" ] || [ -n "$NET_FAULT_NODES" ] || { echo "NET_FAULT needs NET_FAULT_NODES"; exit 1; }
 WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
@@ -217,6 +248,38 @@ start_node() {
     if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then bin=$BIN_ALT; fi
     (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
+    # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
+    # marked for the network fault (its executor, started later, inherits the cgroup)
+    if [[ ",$SLOW_NODES,$NET_FAULT_NODES," == *",$i,"* ]]; then
+        sudo mkdir -p "/sys/fs/cgroup/cstest-$i"
+        if [[ ",$SLOW_NODES," == *",$i,"* ]]; then
+            echo "$((SLOW_CPU * 1000)) 100000" | sudo tee "/sys/fs/cgroup/cstest-$i/cpu.max" > /dev/null
+        fi
+        echo "${PIDS[$i]}" | sudo tee "/sys/fs/cgroup/cstest-$i/cgroup.procs" > /dev/null \
+            || echo "could not move n$i to its cgroup"
+    fi
+}
+
+# tc netem on the loopback: a 4th band of a prio qdisc holds the fault. Everything a faulty node
+# sends (marked by its cgroup) goes there, and so does everything sent to its p2p port (UDP and the
+# TCP connections other nodes open to it)
+net_fault_on() {
+    sudo tc qdisc add dev lo root handle 1: prio bands 4 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+    sudo tc qdisc add dev lo parent 1:4 handle 40: netem $NETEM
+    sudo tc filter add dev lo parent 1:0 protocol ip prio 1 handle 0x40 fw flowid 1:4
+    for i in ${NET_FAULT_NODES//,/ }; do
+        sudo iptables -t mangle -A OUTPUT -m cgroup --path "cstest-$i" -j MARK --set-mark 0x40 \
+            || echo "net fault: cannot mark the packets of n$i (no xt_cgroup), only those sent to it"
+        sudo tc filter add dev lo parent 1:0 protocol ip prio 2 u32 \
+            match ip dport $((BASE_PORT + i)) 0xffff flowid 1:4
+    done
+}
+net_fault_off() {
+    sudo tc qdisc del dev lo root 2>/dev/null || true
+    sudo iptables -t mangle -F OUTPUT 2>/dev/null || true
+}
+net_fault_stats() {
+    sudo tc -s qdisc show dev lo 2>/dev/null | grep -A1 netem | tail -1 | sed 's/^ *//'
 }
 
 stop_all() {
@@ -231,6 +294,11 @@ stop_all() {
     if [ "$DISK_FULL_NODE" -gt 0 ]; then
         sudo umount "$WORK/n$DISK_FULL_NODE/db" 2>/dev/null || true
     fi
+    if [ "${net_fault_at:-0}" -gt 0 ] && [ "${net_fault_done:-1}" -eq 0 ]; then
+        echo "net fault: until the end ($(net_fault_stats))"
+    fi
+    [ -z "$NET_FAULT" ] || net_fault_off
+    [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
 }
 trap stop_all EXIT
 
@@ -271,6 +339,12 @@ FUND_PID=
 CONTRACTS_PID=
 disk_filled_at=0
 disk_freed=0
+net_fault_at=0
+net_fault_done=0
+GARBAGE_PID=
+if [ -n "$SLOW_NODES" ]; then
+    echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
+fi
 while :; do
     sleep 20
     line="t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) ))s"
@@ -355,6 +429,23 @@ while :; do
         for i in $RESTART_NODES; do start_node "$i"; done
         restarted=1
         echo "restart test: $(printf 'n%s ' $RESTART_NODES)started again"
+    fi
+
+    if [ -n "$NET_FAULT" ] && [ "$net_fault_at" -eq 0 ] && [ "$min" -ge "$NET_FAULT_AT" ]; then
+        net_fault_on
+        net_fault_at=$(date +%s)
+        echo "net fault: $NETEM on the p2p traffic of n${NET_FAULT_NODES//,/ n} from sequence $min"
+    fi
+    if [ "$net_fault_at" -gt 0 ] && [ "$net_fault_done" -eq 0 ] && [ "$NET_FAULT_SECONDS" -gt 0 ] \
+        && [ "$(date +%s)" -ge $((net_fault_at + NET_FAULT_SECONDS)) ]; then
+        echo "net fault: lifted at sequence $min ($(net_fault_stats))"
+        net_fault_off
+        net_fault_done=1
+    fi
+    if [ "$GARBAGE_AT" -gt 0 ] && [ -z "$GARBAGE_PID" ] && [ "$min" -ge "$GARBAGE_AT" ]; then
+        echo "garbage: $GARBAGE_RATE random datagrams a second to every node for $GARBAGE_SECONDS s, from sequence $min"
+        python3 "$HERE/garbage.py" "$BASE_PORT" "$ALL_NODES" "$GARBAGE_SECONDS" "$GARBAGE_RATE" > "$WORK/garbage.log" 2>&1 &
+        GARBAGE_PID=$!
     fi
 
     if [ "$DISK_FULL_NODE" -gt 0 ] && [ "$disk_filled_at" -eq 0 ] && [ "$min" -ge "$DISK_FULL_AT" ]; then

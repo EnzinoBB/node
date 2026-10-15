@@ -7,7 +7,9 @@ name: Robustness
 # - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
 # - the whole network killed at once and restarted, as after a power cut;
 # - a full disk on a RocksDB, LMDB or BerkeleyDB node; pruned storage on RocksDB with a node joining from block 0;
-# - a pruned node killed while it prunes.
+# - a pruned node killed while it prunes;
+# - packet loss, corruption, delay, reordering and a partition on some nodes, slow nodes, random
+#   datagrams, and all of them at once.
 # All scenarios run funded transfers and the usual restart test.
 on:
   # a robustness-* tag runs it on the tagged commit (a manual run needs the workflow on the default branch)
@@ -131,6 +133,26 @@ jobs:
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           - name: lmdb-pruned-crash
             env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
+          # network faults on two nodes (tc netem on everything they send and on what is sent to them)
+          - name: net-loss
+            env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5
+          - name: net-corrupt
+            env: NET_FAULT=corrupt NET_FAULT_PCT=5 NET_FAULT_NODES=3,5
+          - name: net-delay
+            env: NET_FAULT=delay NET_FAULT_NODES=3,5
+          - name: net-reorder-duplicate
+            env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=2,6
+          - name: net-partition
+            env: NET_FAULT=partition NET_FAULT_NODES=5,6 NET_FAULT_AT=300 NET_FAULT_SECONDS=120
+          # slow nodes: a fifth of one CPU for two trusted nodes
+          - name: slow-nodes
+            env: SLOW_NODES=3,6 SLOW_CPU=20
+          # random datagrams to every node's p2p port
+          - name: garbage-datagrams
+            env: GARBAGE_AT=150 GARBAGE_RATE=300
+          # all at once, on a mixed-backend network
+          - name: chaos-mixed
+            env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
     name: ${{ matrix.name }}
     steps:
       - name: Checkout
@@ -168,7 +190,7 @@ jobs:
           chmod +x build/node
           # the scenario's variables come from the matrix above, NAME=value pairs only
           for kv in $SCENARIO; do
-            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9]+$' || { echo "bad scenario entry $kv"; exit 1; }
+            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9,]+$' || { echo "bad scenario entry $kv"; exit 1; }
             export "$kv"
           done
           echo "scenario: $SCENARIO"
