@@ -540,6 +540,18 @@ csdb::Transaction SmartContracts::get_contract_deploy(const csdb::Address& addr)
     return get_deploy_transaction(abs_addr);
 }
 
+std::map<csdb::Address, csdb::Transaction> SmartContracts::get_deploy_transactions() const {
+    cs::Lock lock(public_access_lock);
+
+    std::map<csdb::Address, csdb::Transaction> deploys;
+    for (const auto& [abs_addr, item] : known_contracts) {
+        if (item.deploy.is_valid()) {
+            deploys.emplace(abs_addr, item.deploy);
+        }
+    }
+    return deploys;
+}
+
 csdb::Transaction SmartContracts::get_transaction(const SmartContractRef& contract, const csdb::Address& abs_addr) const {
     //csdebug() << kLogPrefix << __func__;
     queue_const_iterator it_queue = find_in_queue(contract);

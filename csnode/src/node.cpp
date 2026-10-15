@@ -398,6 +398,9 @@ void Node::onSuccessQS(csdb::Amount blockReward, csdb::Amount miningCoeff, bool 
     csinfo() << "Number of contracts: " << solver_->smart_contracts().contracts_count();
     //csinfo() << "Test value = " << solver_->smart_contracts().getTestValue();
     restorePendingConsensusSettings();
+    // the blocks of contracts deployed before the checkpoint are not read again, so contract-to-contract
+    // calls take their deploy transactions from the restored contract caches
+    cs::Executor::instance().setRestoredDeploys(solver_->smart_contracts().get_deploy_transactions());
 }
 
 void Node::restorePendingConsensusSettings() {
