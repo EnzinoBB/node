@@ -147,12 +147,15 @@ jobs:
         run: |
           git fetch -q origin -- "$NODE_ALT_REF"
           git worktree add -q node-alt FETCH_HEAD
+          # the submodules are copied from this run's checkout, which must point to the same commits
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
-            git -C node-alt submodule update --init --reference "$PWD/$m" -- "$m"
+            if [ "$(git ls-tree HEAD -- "$m")" != "$(git -C node-alt ls-tree HEAD -- "$m")" ]; then
+              echo "$NODE_ALT_REF points $m to another commit than this run"; exit 1
+            fi
+            rm -rf "node-alt/$m"
+            cp -a "$m" "node-alt/$m"
           done
-          git -C node-alt/cscrypto submodule update --init
-          git -C node-alt/p2p submodule update --init
           cmake -S node-alt -B build-alt -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DENABLE_TESTS=OFF \
