@@ -173,6 +173,7 @@ def send(client, src, dst_pk, amount_int, amount_frac=0, managing=None, delegate
     if src.next_inner_id is None:
         last = client.WalletTransactionsCountGet(src.pk).lastTransactionInnerId or 0
         src.next_inner_id = int(last) + 1
+    src.last_sent_id = src.next_inner_id
     try:
         result = client.call("TransactionFlow", transfer(src, dst_pk, amount_int, amount_frac, managing, delegated),
                              retry=False)
@@ -275,6 +276,15 @@ def main():
                 failures += delegate(f"n{i} withdraws 1000 from n{i % len(nodes) + 1}",
                                      src, dst, 1000, DELEGATE_WITHDRAW)
         src, dst = random.sample(nodes, 2)
+        if getattr(src, "wait_for", None) is not None:
+            # a transfer of this sender is still in progress: until it is recorded (or 60 s pass),
+            # its inner id is not known, and reusing it would get the next transfer rejected
+            last = int(client.WalletTransactionsCountGet(src.pk).lastTransactionInnerId or 0)
+            if last < src.wait_for and time.time() < src.wait_until:
+                time.sleep(1)
+                continue
+            src.wait_for = None
+            src.next_inner_id = None
         try:
             ok, message = send(client, src, dst.pk, random.randint(1, 50))
         except Unreachable as e:
@@ -287,6 +297,7 @@ def main():
         if not ok and message.startswith("Transaction in progress"):
             # the API stopped waiting for consensus (a node was just killed): the outcome is unknown
             pending += 1
+            src.wait_for, src.wait_until = src.last_sent_id, time.time() + 60
             print(f"load transfer still in progress: {message}", flush=True)
         elif not ok and "not syncronized" in message:
             # the node refuses transfers while it catches up after a restart (power-cut scenario)
