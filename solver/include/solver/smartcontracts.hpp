@@ -18,6 +18,7 @@
 #include <optional>
 #include <vector>
 #include <unordered_map>
+#include <atomic>
 #include <unordered_set>
 
 //#define DEBUG_SMARTS
@@ -261,6 +262,12 @@ struct SmartExecutionData {
     std::string error;
     std::string explicit_last_state;
     csdb::Address abs_addr;
+    // resolved under the lock by execute_async, so the worker thread does not read the queue and the
+    // known contracts while the main thread changes them; synchronous callers leave it unresolved
+    bool resolved = false;
+    csdb::Transaction transaction;
+    csdb::Transaction deploy;
+    cs::Executor::MethodNameConvention convention = cs::Executor::MethodNameConvention::Default;
 
     void setError(int8_t code, const char* message) {
         if (!result.smartsRes.empty()) {
@@ -344,6 +351,9 @@ public:
     static bool is_start(const csdb::Transaction&);
     // new state of contract, result of invocation of executable transaction
     static bool is_new_state(const csdb::Transaction&);
+
+    // locked contracts that are neither executed now nor used by an executed contract
+    static std::vector<csdb::Address> stale_locks(const std::unordered_set<csdb::Address>& locked, const std::vector<csdb::Address>& in_use);
 
     /* Assuming deployer.is_public_key(), not a WalletId */
     static csdb::Address get_valid_smart_address(const csdb::Address& deployer, const uint64_t trId, const api::SmartContractDeploy&);
@@ -577,7 +587,8 @@ private:
     csconnector::connector::ApiExecHandlerPtr exec_handler_ptr;
 
     // flag to allow execution, currently depends on executor presence
-    bool executor_ready;
+    // written by the worker thread of execute_async too
+    std::atomic<bool> executor_ready;
 
     // max block sequence read from DB
     cs::Sequence max_read_sequence;
@@ -624,6 +635,9 @@ private:
     std::unordered_set<csdb::Address> blacklistedContracts_;
 
     std::unordered_set<csdb::Address> locked_contracts;
+    // contracts whose state this node asked the confidants for, with the round of the last request;
+    // a StateReply for any other contract is not an answer to this node
+    std::unordered_map<csdb::Address, cs::RoundNumber> pending_state_requests;
 
     //uint64_t testValue = 0;
 
@@ -828,6 +842,8 @@ private:
     csdb::Transaction get_transaction(const SmartContractRef& contract, const csdb::Address& abs_addr) const;
 
     csdb::Transaction get_deploy_transaction(const csdb::Address& abs_addr) const;
+
+    cs::Executor::MethodNameConvention method_convention(const csdb::Transaction& transaction) const;
 
     void enqueue(const csdb::Pool& block, size_t trx_idx, bool skip_log);
 

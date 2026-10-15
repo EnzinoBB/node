@@ -369,6 +369,20 @@ void TransactionsIndex::setPrevTransBlock(const PublicKey& _pubKey, cs::Sequence
     db_->insert(getTrxIndexKey(_pubKey, _curr), _prev);
 }
 
+void TransactionsIndex::onPruneBlock(const csdb::Pool& _pool) {
+    std::set<csdb::Address> removed;
+    auto lbd = [&removed, &_pool, this](const csdb::Address& _addr) {
+        auto key = bc_.getAddressByType(_addr, BlockChain::AddressType::PublicKey);
+        if (removed.insert(key).second) {
+            removeLastTransBlock(key.public_key(), _pool.sequence());
+        }
+    };
+    for (auto& tr : _pool.transactions()) {
+        lbd(tr.source());
+        lbd(tr.target());
+    }
+}
+
 void TransactionsIndex::removeLastTransBlock(const PublicKey& _pubKey, cs::Sequence _curr) {
     db_->remove(getTrxIndexKey(_pubKey, _curr));
 }

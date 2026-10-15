@@ -73,6 +73,8 @@ const std::string PARAM_NAME_POOL_SYNC_SEQ_VERIF_FREQ = "sequences_verification_
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_KEEP = "checkpoint_keep";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY = "checkpoint_every";
 const std::string PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES = "checkpoint_every_minutes";
+const std::string PARAM_NAME_STORAGE_PRUNE_KEEP_BLOCKS = "prune_keep_blocks";
+const std::string PARAM_NAME_STORAGE_BLOCK_DB = "block_db";
 
 const std::string PARAM_NAME_API_PORT = "port";
 const std::string PARAM_NAME_AJAX_PORT = "ajax_port";
@@ -962,6 +964,39 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
         storageData_.checkpointEvery = 1000;
     }
     checkAndSaveValue(data, block, PARAM_NAME_STORAGE_CHECKPOINT_EVERY_MINUTES, storageData_.checkpointEveryMinutes);
+    checkAndSaveValue(data, block, PARAM_NAME_STORAGE_PRUNE_KEEP_BLOCKS, storageData_.pruneKeepBlocks);
+    checkAndSaveValue(data, block, "async_write_queue_size", storageData_.asyncWriteQueueSize);
+    checkAndSaveValue(data, block, "write_batch_size",       storageData_.writeBatchSize);
+    checkAndSaveValue(data, block, "db_backend",             storageData_.dbBackend);
+    checkAndSaveValue(data, block, "rocksdb_block_cache_mb", storageData_.rocksdbBlockCacheMb);
+    checkAndSaveValue(data, block, "rocksdb_memtable_mb",    storageData_.rocksdbMemtableMb);
+    // block_db=lmdb (community releases before RocksDB) means db_backend=lmdb, unless db_backend is set
+    if (data.count(PARAM_NAME_STORAGE_BLOCK_DB) && !data.count("db_backend")) {
+        storageData_.dbBackend = data.get<std::string>(PARAM_NAME_STORAGE_BLOCK_DB);
+    }
+    if (storageData_.dbBackend == "rocks") {
+        storageData_.dbBackend = "rocksdb";
+    }
+    if (storageData_.dbBackend != "berkeleydb" && storageData_.dbBackend != "rocksdb" && storageData_.dbBackend != "lmdb") {
+        cswarning() << "config: unknown db_backend=" << storageData_.dbBackend << ", using berkeleydb";
+        storageData_.dbBackend = "berkeleydb";
+    }
+    if (storageData_.pruneKeepBlocks > 0) {
+        // contracts refer to blocks up to 100 rounds back; keep a margin above that
+        if (storageData_.pruneKeepBlocks < 200) {
+            cswarning() << "config: prune_keep_blocks=" << storageData_.pruneKeepBlocks << " is too low, raising to 200";
+            storageData_.pruneKeepBlocks = 200;
+        }
+        // pruning follows the periodic checkpoints and keeps the previous one usable
+        if (storageData_.checkpointEvery == 0) {
+            cswarning() << "config: prune_keep_blocks needs checkpoint_every, pruning is off";
+            storageData_.pruneKeepBlocks = 0;
+        }
+        if (storageData_.checkpointKeep < 2) {
+            cswarning() << "config: prune_keep_blocks keeps at least 2 checkpoints, raising checkpoint_keep to 2";
+            storageData_.checkpointKeep = 2;
+        }
+    }
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {

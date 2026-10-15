@@ -99,6 +99,9 @@ public:
         ::std::shared_ptr<Database> db;
         ::cs::Sequence newBlockchainTop = ::cs::kWrongSequence;
         ::cs::Sequence startSequence = 0;
+        // 0 = leave Storage defaults (5000 / 100) untouched.
+        size_t asyncWriteQueueMax = 0;
+        size_t writeBatchSize = 0;
     };
 
     struct OpenProgress {
@@ -137,10 +140,17 @@ public:
      * In case of fail the error info can be received with methods:  \ref last_error,
      * \ref last_error_message, \ref db_last_error() and \ref db_last_error_message()
      */
+    // dbBackend: "berkeleydb" (default), "rocksdb", or "lmdb" in <path>/lmdb, whose removed blocks
+    // LMDB reuses the space of (pruned storage)
     bool open(const ::std::string& path_to_base = ::std::string{},
               OpenCallback callback = nullptr,
               cs::Sequence newBlockchainTop = cs::kWrongSequence,
-              cs::Sequence startReadFrom = 0);
+              cs::Sequence startReadFrom = 0,
+              size_t asyncWriteQueueMax = 5000,
+              size_t writeBatchSize = 100,
+              uint64_t rocksDbBlockCacheBytes = 0,
+              uint64_t rocksDbMemtableBytes = 0,
+              const std::string& dbBackend = std::string{});
 
     /**
      * @brief Creating the storage using the parameters set.
@@ -169,6 +179,9 @@ public:
      * After using this method every reading or saving info methods leads to error \ref NotOpen.
      */
     void close();
+
+    // Anchor buffered writes to disk (RocksDB SyncWAL; BerkeleyDB no-op). Call at checkpoint boundaries.
+    bool flush();
 
     /**
      * @brief Last block hash
@@ -315,6 +328,34 @@ public:
     cs::Sequence pool_sequence(const PoolHash& hash) const;
 
     csdb::PoolHash pool_hash(cs::Sequence sequence) const;
+
+    /**
+     * Pruned storage: removes an old pool, which the node no longer needs. Not meant for the last
+     * pools, whose bookkeeping (count, last hash, write queue) it leaves alone.
+     *
+     * @param   hash    The pool hash.
+     *
+     * @returns True if the pool was removed.
+     */
+    bool pool_prune(const PoolHash& hash);
+
+    /**
+     * Pruned storage: removes several old pools at once, in one database transaction where the
+     * engine allows it. Pools not stored are skipped.
+     */
+    bool pool_prune_batch(const std::vector<PoolHash>& hashes);
+
+    /**
+     * Sequence of the oldest pool stored: 0 unless the storage was pruned.
+     *
+     * @returns The sequence, or std::numeric_limits<cs::Sequence>::max() if the storage is empty.
+     */
+    cs::Sequence first_sequence() const;
+
+    /**
+     * Returns the space of pruned pools to the file system.
+     */
+    bool compact();
 
 public signals:
     const ReadBlockSignal& readBlockEvent() const;

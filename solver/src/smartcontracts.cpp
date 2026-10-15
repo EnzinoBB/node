@@ -576,6 +576,23 @@ csdb::Transaction SmartContracts::get_transaction(const SmartContractRef& contra
     return SmartContracts::get_transaction(bc, contract);
 }
 
+cs::Executor::MethodNameConvention SmartContracts::method_convention(const csdb::Transaction& transaction) const {
+    if (!is_smart(transaction)) {
+        // the most frequent fast test
+        auto item = known_contracts.find(absolute_address(transaction.target()));
+        if (item != known_contracts.end()) {
+            const StateItem& state = item->second;
+            if (state.payable == PayableStatus::Implemented) {
+                return cs::Executor::MethodNameConvention::PayableLegacy;
+            }
+            if (state.payable == PayableStatus::ImplementedVer1) {
+                return cs::Executor::MethodNameConvention::Payable;
+            }
+        }
+    }
+    return cs::Executor::MethodNameConvention::Default;
+}
+
 csdb::Transaction SmartContracts::get_deploy_transaction(const csdb::Address& abs_addr) const {
     //csdebug() << kLogPrefix << __func__;
     auto it_state = known_contracts.find(abs_addr);
@@ -791,6 +808,11 @@ void SmartContracts::test_exe_queue(bool reading_db) {
         if (!reading_db) {
             // call to executor only if is trusted relatively to this contract
             if (it->is_executor || cs::ConfigHolder::instance().config()->alwaysExecuteContracts()) {
+                // executor_ready drops only after a failed call: a connection already lost is known now, so
+                // take the silent path below instead of executing into it and voting an empty result
+                if (executor_ready && exec_handler_ptr && !exec_handler_ptr->getExecutor().isConnected()) {
+                    executor_ready = false;
+                }
                 // final decision to execute contract is here, based on executor availability
                 if (it->is_executor && !executor_ready && !test_executor_availability()) {
                     cslog() << kLogPrefix << "skip " << FormatRef(it->seq_enqueue) << ", execution is not allowed (executor is not connected)";
@@ -1903,7 +1925,7 @@ bool SmartContracts::execute(SmartExecutionData& data, bool validationMode) {
         data.setError(error::ExecuteTransaction, "contract executor is unavailable");
         return false;
     }
-    csdb::Transaction transaction = get_transaction(data.contract_ref, data.abs_addr);
+    csdb::Transaction transaction = data.resolved ? data.transaction : get_transaction(data.contract_ref, data.abs_addr);
     if (!transaction.is_valid()) {
         data.setError(error::InternalBug, "load starter transaction failed");
         return false;
@@ -1918,25 +1940,12 @@ bool SmartContracts::execute(SmartExecutionData& data, bool validationMode) {
     std::vector<cs::Executor::ExecuteTransactionInfo> smarts;
     auto& info = smarts.emplace_back(cs::Executor::ExecuteTransactionInfo{});
     info.transaction = transaction;
-    info.deploy = get_deploy_transaction(data.abs_addr);
+    info.deploy = data.resolved ? data.deploy : get_deploy_transaction(data.abs_addr);
     info.sequence = data.contract_ref.sequence;
     // data.executor_fee bring all available fee for future execution:
     info.feeLimit = data.executor_fee;
     data.executor_fee = csdb::Amount(0);
-    info.convention = cs::Executor::MethodNameConvention::Default;
-    if (!is_smart(transaction)) {
-        // the most frequent fast test
-        auto item = known_contracts.find(absolute_address(transaction.target()));
-        if (item != known_contracts.end()) {
-            StateItem& state = item->second;
-            if (state.payable == PayableStatus::Implemented) {
-                info.convention = cs::Executor::MethodNameConvention::PayableLegacy;
-            }
-            else if (state.payable == PayableStatus::ImplementedVer1) {
-                info.convention = cs::Executor::MethodNameConvention::Payable;
-            }
-        }
-    }
+    info.convention = data.resolved ? data.convention : method_convention(transaction);
     std::optional<cs::Executor::ExecuteResult> maybe_result;
     if (validationMode) {
         // for now smarts always contains a one item:
@@ -2037,6 +2046,12 @@ bool SmartContracts::execute_async(const std::vector<ExecutionItem>& executions)
         execution_data.contract_ref = execution.ref_start;
         execution_data.abs_addr = absolute_address(start_tr.target());
         execution_data.executor_fee = execution.avail_fee;
+        // execute_async runs under public_access_lock (checkExeQueue): resolve here what execute() would
+        // otherwise read from exe_queue and known_contracts on the worker thread
+        execution_data.transaction = get_transaction(execution_data.contract_ref, execution_data.abs_addr);
+        execution_data.deploy = get_deploy_transaction(execution_data.abs_addr);
+        execution_data.convention = method_convention(execution_data.transaction);
+        execution_data.resolved = true;
         bool replenish_only = false;  // means indirect call to payable()
         if (!is_executable(start_tr)) {
             replenish_only = is_payable_target(start_tr);
@@ -3031,23 +3046,22 @@ void SmartContracts::test_contracts_locks() {
             if (exe_item.status == SmartContractStatus::Running || exe_item.status == SmartContractStatus::Finished) {
                 //return;
                 couldBeLocked.push_back(exe_item.abs_addr);
+                // a running item also locks the contracts it uses, see update_lock_status(QueueItem)
+                for (const auto& execution : exe_item.executions) {
+                    for (const auto& u : execution.uses) {
+                        couldBeLocked.push_back(absolute_address(u));
+                    }
+                }
             }
         }
     }
     // no running items, ensure no locked contracts
-    std::vector<csdb::Address> toErase;
 
     if (!locked_contracts.empty()) {
         if (!couldBeLocked.empty()) {
-            for (auto it : locked_contracts) {
-                auto foundIt = std::find(couldBeLocked.begin(), couldBeLocked.end(), it);
-                if(foundIt == couldBeLocked.end()) {
-                    toErase.push_back(*foundIt);
-                }
-            }
-            for (auto it : toErase) {
-                auto foundIt = std::find(locked_contracts.begin(), locked_contracts.end(), it);
-                locked_contracts.erase(foundIt);
+            for (const auto& addr : stale_locks(locked_contracts, couldBeLocked)) {
+                csdebug() << kLogPrefix << "unlock " << to_base58(addr) << " which is not executed now";
+                locked_contracts.erase(addr);
             }
         }
         else {
@@ -3056,6 +3070,17 @@ void SmartContracts::test_contracts_locks() {
         }
 
     }
+}
+
+/*static*/
+std::vector<csdb::Address> SmartContracts::stale_locks(const std::unordered_set<csdb::Address>& locked, const std::vector<csdb::Address>& in_use) {
+    std::vector<csdb::Address> stale;
+    for (const auto& addr : locked) {
+        if (std::find(in_use.cbegin(), in_use.cend(), addr) == in_use.cend()) {
+            stale.push_back(addr);
+        }
+    }
+    return stale;
 }
 
 void SmartContracts::update_lock_status(const csdb::Address& abs_addr, bool value, bool skip_log) {
@@ -3190,6 +3215,11 @@ size_t SmartContracts::validateRestoredStatesAgainstChain(BlockChain& blockchain
         const SmartContractRef& chain_ref = item.ref_state.is_valid() ? item.ref_state : item.ref_execute;
         if (!chain_ref.is_valid()) { ++unverifiable; continue; }
         csdb::Transaction t = get_transaction(chain_ref, abs_addr);
+        if (!t.is_valid() && chain_ref.sequence < blockchain.getFirstStoredSequence()) {
+            // pruned storage: the block is gone, the checkpoint is the only record of this state
+            ++unverifiable;
+            continue;
+        }
         if (!t.is_valid()) {
             cswarning() << kLogPrefix << to_base58(abs_addr)
                 << ": qs-restored new_state ref " << chain_ref
@@ -3274,6 +3304,7 @@ bool SmartContracts::wait_until_executor(unsigned int test_freq, unsigned int ma
 }
 
 void SmartContracts::net_request_contract_state(const csdb::Address& abs_addr) {
+    pending_state_requests[abs_addr] = cs::Conveyer::instance().currentRoundNumber();
     pnode->sendStateRequest(abs_addr, cs::Conveyer::instance().confidants());
 }
 
@@ -3288,6 +3319,23 @@ void SmartContracts::net_update_contract_state(const csdb::Address& contract_abs
     stream >> ref.sequence >> ref.transaction >> state;
 
     if (stream.isValid() && !stream.isAvailable(1)) {
+        // several confidants answer one request, so the entry stays until it expires
+        constexpr cs::RoundNumber kStateRequestRounds = 1000;
+        const cs::RoundNumber round = cs::Conveyer::instance().currentRoundNumber();
+        const auto pending = pending_state_requests.find(contract_abs_addr);
+        if (pending == pending_state_requests.end() || pending->second + kStateRequestRounds < round) {
+            if (pending != pending_state_requests.end()) {
+                pending_state_requests.erase(pending);
+            }
+            cswarning() << kLogPrefix << "ignore " << cs::SmartContracts::to_base58(contract_abs_addr) << " state, it was not requested";
+            return;
+        }
+        // a state cannot refer to a block later than the current round, and caching one would make every
+        // real update look outdated
+        if (ref.sequence > round) {
+            cswarning() << kLogPrefix << "ignore " << cs::SmartContracts::to_base58(contract_abs_addr) << " state of future " << ref;
+            return;
+        }
 
         if (in_known_contracts(contract_abs_addr)) {
             auto& item = known_contracts[contract_abs_addr];
@@ -3489,6 +3537,7 @@ void SmartContracts::clear() {
     exe_queue.clear();
     blacklistedContracts_.clear();
     locked_contracts.clear();
+    pending_state_requests.clear();
 }
 
 

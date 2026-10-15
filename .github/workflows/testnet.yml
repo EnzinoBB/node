@@ -16,6 +16,12 @@ on:
       disk_full_node:
         description: 'Node whose block DB disk fills up for a while (0 = off)'
         default: '0'
+      prune_node:
+        description: 'Node running with pruned storage (0 = off)'
+        default: '0'
+      join_pruned_at:
+        description: 'Sequence at which one more node joins from block 0 with pruned storage (0 = off)'
+        default: '0'
       restart_at:
         description: 'Sequence at which the last node is restarted (0 = off)'
         default: '300'
@@ -31,6 +37,12 @@ on:
       delegate:
         description: 'Nodes delegate to each other, with and without a time limit (0 = off)'
         default: '0'
+      contracts:
+        description: 'Run a contract executor per node and call a contract across the restart test (0 = off)'
+        default: '0'
+      executor_ref:
+        description: 'With contracts: branch or commit of EnzinoBB/contract-executor built and run by the even nodes, the odd nodes keep the release executor (empty = all release)'
+        default: ''
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -65,7 +77,7 @@ jobs:
         run: |
           git submodule update --init -- cscrypto p2p \
             third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
-            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
 
@@ -119,6 +131,92 @@ jobs:
           ccache --max-size=2G
           cmake --build build -j"$(nproc)" --target node
 
+      # the contract executor shipped with the official mainnet release (the one operators run); its
+      # sources no longer build as published: unreleased sc-api/thrift-api-client versions and
+      # Eclipse version ranges that now resolve to Java 17 jars
+      - name: Restore contract executor
+        if: inputs.contracts == '1'
+        id: cache-executor
+        uses: actions/cache@v4
+        with:
+          path: executor
+          key: contract-executor-mainnet-4.2.532.0-v2
+
+      - name: Fetch contract executor
+        if: inputs.contracts == '1' && steps.cache-executor.outputs.cache-hit != 'true'
+        run: |
+          curl -sSfL -o release.tar.gz \
+            https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
+          mkdir -p executor
+          tar -xzf release.tar.gz -C executor
+          rm -rf executor/csnode/javafx-sdk-13
+          rm release.tar.gz
+          ls -la executor/csnode | grep -v '\.log$' | head -40
+          grep -ihE 'executor|jdk|java' executor/csnode/config.ini executor/csnode/*.sh executor/csnode/settings.properties 2>/dev/null | head -20
+          unzip -p executor/csnode/contract-executor.jar META-INF/MANIFEST.MF | head -20
+
+      - name: Set up Java 11
+        if: inputs.contracts == '1'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Locate contract executor
+        if: inputs.contracts == '1'
+        run: |
+          jar=$(find "$PWD/executor" -type f -name '*contract-executor*.jar' | head -1)
+          test -n "$jar"
+          echo "EXECUTOR_JAR=$jar" >> "$GITHUB_ENV"
+          echo "executor jar: $jar"
+
+      # mixed executors: the even nodes run an executor built from EnzinoBB/contract-executor, so a
+      # result that differs from the release executor's shows up as a failed contract consensus
+      - name: Checkout contract executor under test
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        uses: actions/checkout@v4
+        with:
+          repository: EnzinoBB/contract-executor
+          ref: ${{ inputs.executor_ref }}
+          path: ce
+          fetch-depth: 0  # the build reads the commit count the node checks
+
+      - name: Checkout executor dependencies
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        run: |
+          git clone -q https://github.com/CREDITSCOM/smart-contract-api.git ce-deps/smart-contract-api
+          git -C ce-deps/smart-contract-api checkout -q 677c567f308972224232023b18de531d22db2b8b
+          git clone -q -b build/reproducible-1518 https://github.com/EnzinoBB/thrift-api-client.git ce-deps/thrift-api-client
+
+      # build 1518 was compiled with JDK 11.0.3, as in the executor's own build workflow
+      - name: Set up Java 11.0.3
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: '11.0.3'
+          cache: maven
+
+      - name: Build contract executor under test
+        if: inputs.contracts == '1' && inputs.executor_ref != ''
+        run: |
+          (cd ce-deps/thrift-api-client && mvn -B -q -DskipTests install)
+          (cd ce-deps/smart-contract-api && mvn -B -q -DskipTests install)
+          (cd ce && mvn -B -q -DskipTests package)
+          # laid out like the release: its manifest loads sc-api-support.jar and logback.xml from its directory
+          mkdir -p executor-alt
+          cp "$(ls -S ce/contract-executor/target/contract-executor-*.jar | head -1)" executor-alt/contract-executor.jar
+          cp "$(ls -S ce/sc-api-support/target/sc-api-support-*.jar | head -1)" executor-alt/sc-api-support.jar
+          cp "$(dirname "$EXECUTOR_JAR")/logback.xml" executor-alt/ 2>/dev/null || true
+          ls -la executor-alt
+          echo "EXECUTOR_JAR_ALT=$PWD/executor-alt/contract-executor.jar" >> "$GITHUB_ENV"
+          echo "executor under test: commit $(git -C ce rev-parse --short HEAD), $(git -C ce rev-list --count HEAD) commits"
+
+      - name: Enable core dumps
+        run: |
+          sudo apt-get install -y -qq gdb
+          sudo sysctl -w kernel.core_pattern="${{ github.workspace }}/testnet-run/core.%e.%p"
+
       - name: Run private network
         timeout-minutes: 300
         env:
@@ -127,10 +225,13 @@ jobs:
           TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
           DISK_FULL_NODE: ${{ inputs.disk_full_node || '0' }}
           RESTART_AT: ${{ inputs.restart_at || '300' }}
+          PRUNE_NODE: ${{ inputs.prune_node || '0' }}
+          JOIN_PRUNED_AT: ${{ inputs.join_pruned_at || '0' }}
           DPOS_AT: ${{ inputs.dpos_at || '0' }}
           REWARD_ROUND: ${{ inputs.reward_round || '0' }}
           DELEGATE: ${{ inputs.delegate || '0' }}
           MIN_STAKE: ${{ inputs.min_stake || '0' }}
+          CONTRACTS: ${{ inputs.contracts || '0' }}
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
@@ -151,5 +252,7 @@ jobs:
           path: |
             testnet-run/n*/*.log
             testnet-run/fund.log
+            testnet-run/contracts.log
+            testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
           retention-days: 14

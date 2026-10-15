@@ -9,6 +9,7 @@
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <chrono>
 #include <thread>
 
 #include <boost/multi_index_container.hpp>
@@ -20,7 +21,15 @@
 
 #include <csdb/address.hpp>
 #include <csdb/database.hpp>
+#if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
 #include <csdb/database_berkeleydb.hpp>
+#include <csdb/database_rocksdb.hpp>
+#elif defined(CSDB_USE_ROCKSDB)
+#include <csdb/database_rocksdb.hpp>
+#else
+#include <csdb/database_berkeleydb.hpp>
+#endif
+#include <csdb/database_lmdb.hpp>
 #include <csdb/internal/shared_data_ptr_implementation.hpp>
 #include <csdb/internal/utils.hpp>
 #include <csdb/pool.hpp>
@@ -122,8 +131,12 @@ public:
 
     ~priv() {
         if (write_thread.joinable()) {
-            quit = true;
-            write_cond_var.notify_one();
+            // writer drains write_queue before honoring quit.
+            {
+                std::unique_lock<std::mutex> lock(write_lock);
+                quit = true;
+            }
+            write_cond_var.notify_all();
             write_thread.join();
         }
     }
@@ -145,9 +158,18 @@ private:
 
     std::mutex data_lock;
 
+    // Async write pipeline. Bounded; full queue back-pressures producers.
+    // Defaults overridable via Storage::open(...).
+    // Used with RocksDB only: BerkeleyDB and LMDB write each block synchronously, as before the
+    // RocksDB backend, so the blocks on disk never lag behind the caches and pruning never writes
+    // concurrently with a writer thread.
+    bool async_writes = false;
+    size_t asyncWriteQueueMax_ = 5000;
+    size_t writeBatchSize_ = 100;        // pools coalesced into one db->put_batch
     std::deque<Pool> write_queue;
     std::mutex write_lock;
-    std::condition_variable write_cond_var;
+    std::condition_variable write_cond_var;     // queue non-empty
+    std::condition_variable queue_space_cond;   // queue has space
 
     struct PoolElement {
         cs::Sequence seq; struct bySequence {};
@@ -272,6 +294,16 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
         csinfo() << "Storage: slow start";
         it->seek_to_first();
         slowStart = true;
+        // a pruned storage starts after block 0: replaying it onto empty caches would build a wrong
+        // state, so such a node can only start from a quick-start checkpoint
+        if (it->is_valid() && it->key() != 0) {
+            set_last_error(Storage::DataIntegrityError,
+                           "Pruned storage starts at block %u: it needs a quick-start checkpoint, a slow start is not possible",
+                           it->key());
+            cserror() << "Storage: pruned storage starts at block " << it->key()
+                      << ", no quick-start checkpoint covers it; restore one in qs/ or resync from scratch";
+            return false;
+        }
     }
 
     if (count_pool == last_seq_in_db && !slowStart) {
@@ -330,22 +362,50 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
 }
 
 void Storage::priv::write_routine() {
-    std::unique_lock<std::mutex> lock(write_lock);
-    while (!quit) {
-        write_cond_var.wait(lock);
-        while (!write_queue.empty()) {
-            Pool& pool = write_queue.front();
-            if (!pool.is_read_only()) {
-                if (!pool.compose()) {
-                    set_last_error(Storage::DataIntegrityError, "Pool passed to storage is not composed and failed to compose now");
-                }
-            }
-            const PoolHash hash = pool.hash();
+    while (true) {
+        std::unique_lock<std::mutex> lock(write_lock);
+        write_cond_var.wait(lock, [this] { return quit || !write_queue.empty(); });
 
-            db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary());
+        if (write_queue.empty() && quit) {
+            return;
+        }
 
+        // Peek (don't pop) up to writeBatchSize_ pools; write_queue_search needs them until I/O completes.
+        std::vector<Pool> pools;
+        const size_t take = std::min(writeBatchSize_, write_queue.size());
+        pools.reserve(take);
+        auto it = write_queue.begin();
+        for (size_t i = 0; i < take; ++i, ++it) {
+            pools.push_back(*it);
+        }
+
+        // Build payloads outside the lock; one put_batch coalesces 2*N puts into a single WriteBatch.
+        lock.unlock();
+
+        std::vector<Database::PendingWrite> requests;
+        requests.reserve(pools.size());
+        for (auto& pool : pools) {
+            requests.push_back(Database::PendingWrite{
+                pool.hash().to_binary(),
+                static_cast<uint32_t>(pool.sequence()),
+                pool.to_binary()
+            });
+        }
+
+        const bool written = db->put_batch(requests);
+
+        lock.lock();
+        if (!written) {
+            // keep the blocks queued and try again: dropping them would leave a hole behind the caches,
+            // and a queue that stays full stops the node instead
+            lock.unlock();
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            continue;
+        }
+        for (size_t i = 0; i < pools.size(); ++i) {
             write_queue.pop_front();
         }
+        queue_space_cond.notify_all();
     }
 }
 
@@ -423,6 +483,18 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
         return false;
     }
 
+    if (opt.asyncWriteQueueMax > 0) {
+        d->asyncWriteQueueMax_ = opt.asyncWriteQueueMax;
+    }
+    if (opt.writeBatchSize > 0) {
+        d->writeBatchSize_ = opt.writeBatchSize;
+    }
+
+    // Start async writer (idempotent: re-opens won't spawn a second thread).
+    if (d->async_writes && !d->write_thread.joinable()) {
+        d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
+    }
+
     if (opt.newBlockchainTop != cs::kWrongSequence) {
         auto seqToRemove = static_cast<uint32_t>(opt.newBlockchainTop + 1);
         auto seqLast = seqToRemove;
@@ -496,22 +568,85 @@ bool Storage::open(
     const ::std::string& path_to_base,
     OpenCallback callback,
     cs::Sequence newBlockchainTop,
-    cs::Sequence startReadFrom
+    cs::Sequence startReadFrom,
+    size_t asyncWriteQueueMax,
+    size_t writeBatchSize,
+    uint64_t rocksDbBlockCacheBytes,
+    uint64_t rocksDbMemtableBytes,
+    const std::string& dbBackend
 ) {
     ::std::string path{path_to_base};
     if (path.empty()) {
         path = ::csdb::internal::app_data_path() + "/CREDITS";
     }
 
-    auto db{::std::make_shared<::csdb::DatabaseBerkeleyDB>()};
-    db->open(path);
+    if (asyncWriteQueueMax > 0) {
+        d->asyncWriteQueueMax_ = asyncWriteQueueMax;
+    }
+    if (writeBatchSize > 0) {
+        d->writeBatchSize_ = writeBatchSize;
+    }
 
-    //d->write_thread = std::thread(&Storage::priv::write_routine, d.get());
+    std::shared_ptr<Database> db;
+    if (dbBackend == "lmdb") {
+        // LMDB reuses the space of removed blocks, which suits pruned storage
+        auto lmdb = std::make_shared<DatabaseLmdb>();
+        lmdb->open(path + "/lmdb");
+        OpenOptions opt{lmdb, newBlockchainTop, startReadFrom};
+        return open(opt, callback);
+    }
+#if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
+    // Default berkeleydb; rocksdb is opt-in via [storage] db_backend = rocksdb.
+    if (dbBackend == "rocksdb" || dbBackend == "rocks") {
+        d->async_writes = true;
+        auto rocks = std::make_shared<DatabaseRocksDB>();
+        rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
+        rocks->open(path);
+        db = rocks;
+    } else {
+        auto bdb = std::make_shared<DatabaseBerkeleyDB>();
+        bdb->open(path);
+        db = bdb;
+    }
+#elif defined(CSDB_USE_ROCKSDB)
+    d->async_writes = true;
+    auto rocks = std::make_shared<DatabaseRocksDB>();
+    rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
+    rocks->open(path);
+    db = rocks;
+    (void)dbBackend;
+#else
+    auto bdb = std::make_shared<DatabaseBerkeleyDB>();
+    bdb->open(path);
+    db = bdb;
+    (void)rocksDbBlockCacheBytes;
+    (void)rocksDbMemtableBytes;
+    (void)dbBackend;
+#endif
+    OpenOptions opt{db, newBlockchainTop, startReadFrom};
+    return open(opt, callback);
+}
 
-    return open(OpenOptions{db, newBlockchainTop, startReadFrom}, callback);
+bool Storage::flush() {
+    if (!d || !d->db) return false;
+    if (d->async_writes) {
+        // every block handed to the writer must be in the database before the caller relies on it
+        std::unique_lock<std::mutex> lock(d->write_lock);
+        d->queue_space_cond.wait(lock, [this] { return d->write_queue.empty() || !d->write_thread.joinable(); });
+    }
+    return d->db->flush();
 }
 
 void Storage::close() {
+    // Drain the async writer before destroying the db to avoid use-after-free in RocksDB's dtor.
+    if (d->write_thread.joinable()) {
+        {
+            std::unique_lock<std::mutex> lock(d->write_lock);
+            d->quit = true;
+        }
+        d->write_cond_var.notify_all();
+        d->write_thread.join();
+    }
     d->db.reset();
     d->set_last_error();
 }
@@ -552,14 +687,24 @@ bool Storage::pool_save(Pool pool) {
         d->set_last_error(InvalidParameter, "%s: Trying to save pool with another prev hash [hash: %s]", funcName(), pool.previous_hash().to_string().c_str());
         return false;
     }
-    /*
-      {
+
+    if (!d->async_writes) {
+        if (!d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary())) {
+            // not stored: do not count it, so the next block cannot be saved on top of a hole
+            d->set_last_error(DatabaseError, "%s: cannot write pool %llu: %s", funcName(),
+                              static_cast<unsigned long long>(pool.sequence()), d->db->last_error_message().c_str());
+            return false;
+        }
+    }
+    else {
+        // Hand off to write_routine; backpressure if queue full.
         std::unique_lock<std::mutex> lock(d->write_lock);
+        d->queue_space_cond.wait(lock, [this] {
+            return d->write_queue.size() < d->asyncWriteQueueMax_;
+        });
         d->write_queue.push_back(pool);
         d->write_cond_var.notify_one();
-      }
-    */
-    d->db->put(hash.to_binary(), static_cast<uint32_t>(pool.sequence()), pool.to_binary());
+    }
 
     {
         std::unique_lock<std::mutex> lock(d->data_lock);
@@ -720,7 +865,9 @@ Pool Storage::pool_load(const cs::Sequence sequence) const {
 
     if (needParseData) {
         res = Pool::from_binary(std::move(data));
-        d->pools_cache_insert(res.sequence(), res.hash(), res);
+        if (res.is_valid()) {
+            d->pools_cache_insert(res.sequence(), res.hash(), res);
+        }
     }
 
     if (!res.is_valid()) {
@@ -1068,6 +1215,60 @@ bool Storage::update_contract_data(const Address& abs_addr /*input*/, const cs::
     cs::Bytes bytes(pk.size());
     bytes.assign(pk.cbegin(), pk.cend());
     return d->db->updateContractData(bytes, data);
+}
+
+bool Storage::pool_prune(const PoolHash& hash) {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    // the pool cache is left alone: it is not locked, and an old pool it may still hold stays valid
+    if (!d->db->remove(hash.to_binary())) {
+        d->set_last_error(DatabaseError, "%s: cannot remove pool %s", funcName(), hash.to_string().c_str());
+        return false;
+    }
+    return true;
+}
+
+bool Storage::pool_prune_batch(const std::vector<PoolHash>& hashes) {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    std::vector<cs::Bytes> keys;
+    keys.reserve(hashes.size());
+    for (const auto& hash : hashes) {
+        keys.push_back(hash.to_binary());
+    }
+    // the pool cache is left alone, as in pool_prune
+    if (!d->db->remove_batch(keys)) {
+        d->set_last_error(DatabaseError, "%s: %s", funcName(), d->db->last_error_message().c_str());
+        return false;
+    }
+    return true;
+}
+
+cs::Sequence Storage::first_sequence() const {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return std::numeric_limits<cs::Sequence>::max();
+    }
+    auto it = d->db->new_iterator();
+    it->seek_to_first();
+    return it->is_valid() ? it->key() : std::numeric_limits<cs::Sequence>::max();
+}
+
+bool Storage::compact() {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    if (!d->db->compact()) {
+        // not a fault: compaction only returns space, and freed pages are reused for new blocks anyway
+        cswarning() << "Storage> compaction skipped: " << d->db->last_error_message();
+        return false;
+    }
+    return true;
 }
 
 cs::Sequence Storage::pool_sequence(const PoolHash& hash) const {

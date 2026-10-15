@@ -1,0 +1,210 @@
+name: Database comparison
+
+# Full nodes on the three block database backends sync the same part of mainnet at the same time
+# (BerkeleyDB, LMDB, RocksDB), stop at the same sequence and report the database size, the sync
+# speed and the peak memory. The node is built from the branch; the executor, JDK and configuration
+# come from the latest community package, with full storage.
+on:
+  # a db-compare-* tag runs it on the tagged commit with the default inputs (a manual run needs the
+  # workflow on the default branch)
+  push:
+    tags: ['db-compare-*']
+  workflow_dispatch:
+    inputs:
+      target_seq:
+        description: 'Sequence every node syncs to from block 0'
+        default: '3000000'
+      timeout_min:
+        description: 'Give up after this many minutes'
+        default: '150'
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  BOOST_PREFIX: /home/runner/boost
+  CCACHE_DIR: /home/runner/.ccache
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build flex bison autoconf automake libtool pkg-config ccache
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-24.04-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | sha256sum -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(nproc)" -d0 variant=release link=static runtime-link=static threading=multi \
+            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-24.04-${{ github.sha }}
+          restore-keys: ccache-ubuntu-24.04-
+
+      - name: Build node
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF
+          cmake --build build -j"$(nproc)" --target node
+          ls -la build/client/node
+
+      - name: Upload node
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ github.sha }}
+          path: build/client/node
+          retention-days: 7
+
+  measure:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 200
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [berkeleydb, lmdb, rocksdb]
+    env:
+      BACKEND: ${{ matrix.backend }}
+      TARGET_SEQ: ${{ inputs.target_seq || '3000000' }}
+      TIMEOUT_MIN: ${{ inputs.timeout_min || '150' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Drop git credentials
+        run: git config --local --unset-all http.https://github.com/.extraheader || true
+
+      - name: Python packages
+        run: pip install --quiet base58 pynacl
+
+      - name: Fetch package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$TARGET_SEQ$TIMEOUT_MIN" | grep -qE '^[0-9]+$' || { echo "bad inputs"; exit 1; }
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
+            --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-full.tar.gz' --pattern SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          tar -xzf *-full.tar.gz
+          echo "package $tag"
+
+      - name: Download node
+        uses: actions/download-artifact@v4
+        with:
+          name: node-${{ github.sha }}
+          path: built
+
+      - name: Configure
+        run: |
+          install -m 755 built/node csnode/node
+          cp packaging/mainnet/known_hosts.txt csnode/known_hosts.txt
+          sed -i 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
+          printf '\n[storage]\ndb_backend=%s\n' "$BACKEND" >> csnode/config.ini
+          python3 ci/testnet/gen_keys.py 1 keys
+          cp keys/n1/NodePublic.txt keys/n1/NodePrivate.txt csnode/
+          tail -3 csnode/config.ini
+
+      - name: Sync
+        run: |
+          cd csnode
+          seq_now() { grep -ah 'Last written sequence = ' $(ls -tr log/log_*.txt 2>/dev/null) 2>/dev/null | tail -1 \
+            | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'"; }
+          start=$(date +%s); deadline=$((start + TIMEOUT_MIN * 60)); peak=0
+          ./node --db-path db --config-file config.ini </dev/null > stdout.log 2>&1 &
+          pid=$!
+          while kill -0 "$pid" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 30
+            rss=$(awk '/VmRSS/ {print $2}' /proc/$pid/status 2>/dev/null || echo 0)
+            [ "${rss:-0}" -gt "$peak" ] && peak=$rss
+            s=$(seq_now); echo "$(( ($(date +%s) - start) / 60 )) min: seq ${s:-0}, rss ${rss:-0} kB"
+            [ "${s:-0}" -ge "$TARGET_SEQ" ] && break
+          done
+          seq=$(seq_now); secs=$(( $(date +%s) - start ))
+          # sizes are taken with the database closed, after the node flushed and stopped
+          kill -INT "$pid" 2>/dev/null || true
+          for _ in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          kill -KILL "$pid" 2>/dev/null || true
+          pkill -f '[c]ontract-executor[.]jar' 2>/dev/null || true
+          db=$(du -sb db | cut -f1); caches=$(du -sb caches 2>/dev/null | cut -f1)
+          du -sh db/* | sort -h | tail -8
+          mkdir -p ../result
+          printf '{"backend":"%s","seq":%s,"seconds":%s,"db_bytes":%s,"caches_bytes":%s,"peak_rss_kb":%s}\n' \
+            "$BACKEND" "${seq:-0}" "$secs" "$db" "${caches:-0}" "$peak" | tee ../result/$BACKEND.json
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.backend }}
+          path: |
+            result/
+            csnode/log/
+            csnode/stdout.log
+          retention-days: 14
+
+  summary:
+    needs: measure
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: result-*
+          path: results
+
+      - name: Summary
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, json
+          rows = [json.load(open(p)) for p in sorted(glob.glob('results/*/result/*.json'))]
+          print('| Backend | Blocks synced | Database | Bytes per block | Caches | Sync speed | Peak memory |')
+          print('| --- | --- | --- | --- | --- | --- | --- |')
+          for r in rows:
+              per = r['db_bytes'] / r['seq'] if r['seq'] else 0
+              speed = r['seq'] / (r['seconds'] / 60) if r['seconds'] else 0
+              print(f"| {r['backend']} | {r['seq']:,} | {r['db_bytes'] / 2**20:,.0f} MiB | {per:,.0f} | "
+                    f"{r['caches_bytes'] / 2**20:,.0f} MiB | {speed:,.0f} blocks/min | {r['peak_rss_kb'] / 1024:,.0f} MiB |")
+          PY
