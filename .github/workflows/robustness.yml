@@ -103,6 +103,8 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # a few runners at a time: the suite is long and heavy use got Actions disabled once
+      max-parallel: 5
       matrix:
         include:
           - name: rocksdb-crash
