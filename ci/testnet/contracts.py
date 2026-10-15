@@ -121,6 +121,27 @@ public class Caller extends SmartContract {
 }
 """
 
+# the same call declared with @UsingContract: the node refuses it (Violations::SubsequentCall)
+CALLER_DECLARED = """import com.credits.scapi.annotations.UsingContract;
+import com.credits.scapi.v0.SmartContract;
+
+public class CallerDeclared extends SmartContract {
+    private int calls;
+    private int last;
+
+    public CallerDeclared() {
+        super();
+    }
+
+    @UsingContract(address = "%s", method = "get")
+    public int callCounter() {
+        last = (Integer) invokeExternalContract("%s", "get");
+        calls += 1;
+        return last;
+    }
+}
+"""
+
 
 def write_sources(directory):
     """Write the test contracts as Java files, for a compile check before the network starts."""
@@ -129,6 +150,8 @@ def write_sources(directory):
         f.write(COUNTER)
     with open(os.path.join(directory, "Caller.java"), "w") as f:
         f.write(CALLER % placeholder)
+    with open(os.path.join(directory, "CallerDeclared.java"), "w") as f:
+        f.write(CALLER_DECLARED % (placeholder, placeholder))
     with open(os.path.join(directory, "Ledger.java"), "w") as f:
         f.write(LEDGER)
 
@@ -226,7 +249,17 @@ def main():
     counter = deploy(client_for(1), master, "Counter", COUNTER)
     ledger = deploy(client_for(1), master, "Ledger", LEDGER)
     caller = deploy(client_for(1), master, "Caller", CALLER % base58.b58encode(counter).decode())
-    call(client_for(1), master, caller, "callCounter", "contract-to-contract call (known not to work)")
+    counter_b58 = base58.b58encode(counter).decode()
+    declared = deploy(client_for(1), master, "CallerDeclared", CALLER_DECLARED % (counter_b58, counter_b58))
+    # contract-to-contract calls fail on mainnet today; what matters is that every node fails them the
+    # same way, also a node that restarted from a checkpoint taken after the callee was deployed
+    callers = (("Caller", caller), ("CallerDeclared", declared))
+
+    def call_callers(when, via):
+        for name, contract in callers:
+            call(client_for(via), master, contract, "callCounter", f"{name} contract-to-contract call {when} via n{via}")
+
+    call_callers("before restart", 1)
 
     failures = 0
     calls = 0
@@ -246,9 +279,11 @@ def main():
         failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} after restart", calls) else 1
         failures += 0 if call(client_for(1), master, ledger, "record", f"Ledger call {calls} after restart", calls) else 1
     failures += 0 if call(client_for(1), master, ledger, "entries", "Ledger entries", calls) else 1
+    call_callers("after restart", 1)
+    call_callers("after restart", 2)
 
     time.sleep(60)  # let the last state reach every node
-    for name, contract in (("Counter", counter), ("Ledger", ledger)):
+    for name, contract in (("Counter", counter), ("Ledger", ledger)) + callers:
         states = {}
         for i in range(1, args.nodes + 1):
             try:

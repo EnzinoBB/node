@@ -20,6 +20,9 @@
 #        the restart test, which waits for the first calls; all nodes must end with the same state
 #        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
+#        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
+#        that differs from BIN's shows up as a diverging state
+#        RESTART_NODES (default: the last node): the nodes the restart test stops and restarts together
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -43,11 +46,16 @@
 set -euo pipefail
 
 BIN=$(realpath "$1")
+# mixed nodes: the even nodes run BIN_ALT, built from another ref
+BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
+[ -z "$BIN_ALT" ] || echo "mixed nodes: even nodes run $BIN_ALT"
 HERE=$(cd "$(dirname "$0")" && pwd)
 NODES=${NODES:-7}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
 RESTART_AT=${RESTART_AT:-300}
+RESTART_NODES=${RESTART_NODES:-$NODES}
+echo "$RESTART_NODES" | grep -qE '^[0-9]+( [0-9]+)*$' || { echo "bad RESTART_NODES '$RESTART_NODES'"; exit 1; }
 FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
 LOAD_SECONDS=${LOAD_SECONDS:-300}
@@ -205,7 +213,9 @@ done
 start_node() {
     local i=$1
     # core dumps (see core_pattern in the workflow) let a crash be traced afterwards
-    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$BIN" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
+    local bin=$BIN
+    if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then bin=$BIN_ALT; fi
+    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
 }
 
@@ -228,6 +238,16 @@ trap stop_all EXIT
 seq_of() {
     grep -ah 'Last written sequence = ' "$WORK/n$1"/node.log "$WORK/n$1"/stdout.log 2>/dev/null \
         | tail -1 | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'" || true
+}
+
+# the lowest sequence among the nodes of the restart test
+restarted_seq() {
+    local low="" s
+    for i in $RESTART_NODES; do
+        s=$(seq_of "$i"); s=${s:-0}
+        if [ -z "$low" ] || [ "$s" -lt "$low" ]; then low=$s; fi
+    done
+    echo "${low:-0}"
 }
 
 if [ "$DISK_FULL_NODE" -gt 0 ]; then
@@ -324,15 +344,17 @@ while :; do
 
     if [ "$RESTART_AT" -gt 0 ] && [ "$restarted" -eq 0 ] && [ "$min" -ge "$RESTART_AT" ] \
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
-        echo "restart test: stopping n$NODES at sequence $min"
+        echo "restart test: stopping $(printf 'n%s ' $RESTART_NODES)at sequence $min"
         stopped_at=$min
-        kill -TERM "${PIDS[$NODES]}"
-        wait "${PIDS[$NODES]}" 2>/dev/null || true
-        pkill -f "cs.testnet.node=n$NODES " 2>/dev/null || true
+        for i in $RESTART_NODES; do kill -TERM "${PIDS[$i]}"; done
+        for i in $RESTART_NODES; do
+            wait "${PIDS[$i]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
+        done
         sleep 30
-        start_node "$NODES"
+        for i in $RESTART_NODES; do start_node "$i"; done
         restarted=1
-        echo "restart test: n$NODES started again"
+        echo "restart test: $(printf 'n%s ' $RESTART_NODES)started again"
     fi
 
     if [ "$DISK_FULL_NODE" -gt 0 ] && [ "$disk_filled_at" -eq 0 ] && [ "$min" -ge "$DISK_FULL_AT" ]; then
@@ -367,7 +389,7 @@ while :; do
         CONTRACTS_PID=$!
     fi
     # the calls after the restart must run on the restarted node too, so let it catch up first
-    if [ "$restarted" -eq 1 ] && [ ! -e "$WORK/restart-done" ] && [ "$(seq_of "$NODES")" -ge $((stopped_at + 30)) ] 2>/dev/null; then
+    if [ "$restarted" -eq 1 ] && [ ! -e "$WORK/restart-done" ] && [ "$(restarted_seq)" -ge $((stopped_at + 30)) ] 2>/dev/null; then
         touch "$WORK/restart-done"
     fi
 
