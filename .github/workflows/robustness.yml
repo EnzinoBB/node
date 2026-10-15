@@ -7,13 +7,19 @@ name: Robustness
 # - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
 # - the whole network killed at once and restarted, as after a power cut;
 # - a full disk on a RocksDB, LMDB or BerkeleyDB node; pruned storage on RocksDB with a node joining from block 0;
-# - a pruned node killed while it prunes.
+# - a pruned node killed while it prunes;
+# - packet loss, corruption, delay, reordering and a partition on some nodes, slow nodes, random
+#   datagrams, and all of them at once.
 # All scenarios run funded transfers and the usual restart test.
 on:
   # a robustness-* tag runs it on the tagged commit (a manual run needs the workflow on the default branch)
   push:
     tags: ['robustness-*']
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated scenario names to run (empty = all)'
+        default: ''
 
 permissions:
   contents: read
@@ -101,6 +107,8 @@ jobs:
     timeout-minutes: 120
     strategy:
       fail-fast: false
+      # a few runners at a time: the suite is long and heavy use got Actions disabled once
+      max-parallel: 5
       matrix:
         include:
           - name: rocksdb-crash
@@ -131,16 +139,45 @@ jobs:
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           - name: lmdb-pruned-crash
             env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
+          # network faults on two nodes (tc netem on everything they send and on what is sent to them)
+          - name: net-loss
+            env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5
+          - name: net-corrupt
+            env: NET_FAULT=corrupt NET_FAULT_PCT=5 NET_FAULT_NODES=3,5
+          - name: net-delay
+            env: NET_FAULT=delay NET_FAULT_NODES=3,5
+          - name: net-reorder-duplicate
+            env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=2,6
+          - name: net-partition
+            env: NET_FAULT=partition NET_FAULT_NODES=5,6 NET_FAULT_AT=300 NET_FAULT_SECONDS=120
+          # slow nodes: 5% of one CPU for two trusted nodes
+          - name: slow-nodes
+            env: SLOW_NODES=3,6 SLOW_CPU=5
+          # random datagrams to every node's p2p port
+          - name: garbage-datagrams
+            env: GARBAGE_AT=150 GARBAGE_RATE=300
+          # all at once, on a mixed-backend network
+          - name: chaos-mixed
+            env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
     name: ${{ matrix.name }}
+    # a manual run can pick scenarios; the others stop at once
+    env:
+      SELECTED: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), format(',{0},', matrix.name)) }}
     steps:
+      - name: Skip unselected scenario
+        if: env.SELECTED != 'true'
+        run: echo "not selected"
       - name: Checkout
+        if: env.SELECTED == 'true'
         uses: actions/checkout@v4
 
       # fund.py reads the node API definitions from it
       - name: Checkout API definitions
+        if: env.SELECTED == 'true'
         run: git submodule update --init -- third-party/thrift-interface-definitions
 
       - name: Install tools
+        if: env.SELECTED == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-nacl python3-base58 gdb
@@ -148,12 +185,14 @@ jobs:
           sudo sysctl -w kernel.core_pattern="${{ github.workspace }}/testnet-run/core.%e.%p"
 
       - name: Download node
+        if: env.SELECTED == 'true'
         uses: actions/download-artifact@v4
         with:
           name: testnet-node-${{ github.sha }}
           path: build
 
       - name: Run private network
+        if: env.SELECTED == 'true'
         timeout-minutes: 100
         env:
           SCENARIO: ${{ matrix.env }}
@@ -168,14 +207,14 @@ jobs:
           chmod +x build/node
           # the scenario's variables come from the matrix above, NAME=value pairs only
           for kv in $SCENARIO; do
-            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9]+$' || { echo "bad scenario entry $kv"; exit 1; }
+            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9,]+$' || { echo "bad scenario entry $kv"; exit 1; }
             export "$kv"
           done
           echo "scenario: $SCENARIO"
           ci/testnet/run.sh build/node
 
       - name: Upload logs
-        if: always()
+        if: always() && env.SELECTED == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.name }}
