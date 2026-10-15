@@ -148,6 +148,11 @@ public:
     std::optional<csdb::TransactionID> getDeployTrxn(const csdb::Address& address);
 
     void updateDeployTrxns(const csdb::Address& address, const csdb::TransactionID& trxnsId);
+
+    // deployTrxns_ is filled only while blocks are read, so after a quick start it misses the contracts
+    // deployed before the checkpoint; their deploy transactions, kept by the checkpoint, are set here
+    void setRestoredDeploys(std::map<csdb::Address, csdb::Transaction> deploys);
+    std::optional<csdb::Transaction> getRestoredDeploy(const csdb::Address& address);
     void setLastState(const csdb::Address& address, const std::string& state);
 
     std::optional<std::string> getState(const csdb::Address& address);
@@ -252,6 +257,7 @@ private:
     std::map<general::AccessID, uint64_t> executeTrxnsTime;
 
     std::map<csdb::Address, csdb::TransactionID> deployTrxns_;
+    std::map<csdb::Address, csdb::Transaction> restoredDeploys_;
     std::map<csdb::Address, std::string> lastState_;
     std::map<csdb::Address, std::unordered_map<cs::Sequence, std::string>> cacheLastStates_;
     std::map<general::AccessID, std::vector<csdb::Transaction>> innerSendTransactions_;
