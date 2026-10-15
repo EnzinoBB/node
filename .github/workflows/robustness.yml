@@ -16,6 +16,10 @@ on:
   push:
     tags: ['robustness-*']
   workflow_dispatch:
+    inputs:
+      only:
+        description: 'Comma-separated scenario names to run (empty = all)'
+        default: ''
 
 permissions:
   contents: read
@@ -146,9 +150,9 @@ jobs:
             env: NET_FAULT=reorder NET_FAULT_PCT=25 NET_FAULT_NODES=2,6
           - name: net-partition
             env: NET_FAULT=partition NET_FAULT_NODES=5,6 NET_FAULT_AT=300 NET_FAULT_SECONDS=120
-          # slow nodes: a fifth of one CPU for two trusted nodes
+          # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
-            env: SLOW_NODES=3,6 SLOW_CPU=20
+            env: SLOW_NODES=3,6 SLOW_CPU=5
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300
@@ -156,15 +160,24 @@ jobs:
           - name: chaos-mixed
             env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
     name: ${{ matrix.name }}
+    # a manual run can pick scenarios; the others stop at once
+    env:
+      SELECTED: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), format(',{0},', matrix.name)) }}
     steps:
+      - name: Skip unselected scenario
+        if: env.SELECTED != 'true'
+        run: echo "not selected"
       - name: Checkout
+        if: env.SELECTED == 'true'
         uses: actions/checkout@v4
 
       # fund.py reads the node API definitions from it
       - name: Checkout API definitions
+        if: env.SELECTED == 'true'
         run: git submodule update --init -- third-party/thrift-interface-definitions
 
       - name: Install tools
+        if: env.SELECTED == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-nacl python3-base58 gdb
@@ -172,12 +185,14 @@ jobs:
           sudo sysctl -w kernel.core_pattern="${{ github.workspace }}/testnet-run/core.%e.%p"
 
       - name: Download node
+        if: env.SELECTED == 'true'
         uses: actions/download-artifact@v4
         with:
           name: testnet-node-${{ github.sha }}
           path: build
 
       - name: Run private network
+        if: env.SELECTED == 'true'
         timeout-minutes: 100
         env:
           SCENARIO: ${{ matrix.env }}
@@ -199,7 +214,7 @@ jobs:
           ci/testnet/run.sh build/node
 
       - name: Upload logs
-        if: always()
+        if: always() && env.SELECTED == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ matrix.name }}

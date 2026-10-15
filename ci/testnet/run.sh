@@ -23,7 +23,7 @@
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
 #        RESTART_NODES (default: the last node): the nodes the restart test stops and restarts together
-#        NET_FAULT (default off): loss, corrupt, delay, reorder, duplicate or partition, applied with
+#        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
 #        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up
@@ -104,7 +104,7 @@ case "$NET_FAULT" in
     loss) NETEM="loss ${NET_FAULT_PCT}%" ;;
     corrupt) NETEM="corrupt ${NET_FAULT_PCT}%" ;;
     delay) NETEM="delay 250ms 150ms distribution normal" ;;
-    reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50%" ;;
+    reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50% duplicate 5%" ;;
     duplicate) NETEM="duplicate ${NET_FAULT_PCT}%" ;;
     partition) NETEM="loss 100%" ;;
     *) echo "bad NET_FAULT '$NET_FAULT'"; exit 1 ;;
@@ -294,6 +294,9 @@ stop_all() {
     if [ "$DISK_FULL_NODE" -gt 0 ]; then
         sudo umount "$WORK/n$DISK_FULL_NODE/db" 2>/dev/null || true
     fi
+    for i in ${SLOW_NODES//,/ }; do
+        echo "slow node n$i: $(tr '\n' ' ' < "/sys/fs/cgroup/cstest-$i/cpu.stat" 2>/dev/null || echo 'no cgroup')"
+    done
     if [ "${net_fault_at:-0}" -gt 0 ] && [ "${net_fault_done:-1}" -eq 0 ]; then
         echo "net fault: until the end ($(net_fault_stats))"
     fi
