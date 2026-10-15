@@ -145,7 +145,7 @@ jobs:
           CCACHE_BASEDIR: ${{ github.workspace }}
           NODE_ALT_REF: ${{ inputs.node_alt_ref }}
         run: |
-          git fetch -q origin -- "$NODE_ALT_REF"
+          git fetch -q --no-recurse-submodules origin -- "$NODE_ALT_REF"
           git worktree add -q node-alt FETCH_HEAD
           # the submodules are copied from this run's checkout, which must point to the same commits
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
