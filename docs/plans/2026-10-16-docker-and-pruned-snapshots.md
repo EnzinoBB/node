@@ -27,6 +27,20 @@
 - Matrix workflows keep `max-parallel` at 5 or lower (Actions was disabled once for heavy use).
 - All GitHub text is in English. Commits end with the Co-Authored-By line.
 
+## Storage changes (added at the user's request)
+
+The entrypoint records the storage in use in `/data/.storage` after a successful start, as `mode=<pruned|full> backend=<…>`. On every start it compares that record with what `config.ini` asks for:
+
+| Change | What happens |
+| --- | --- |
+| None | Start. |
+| Full to pruned, same backend | Start. The node prunes old blocks at its next checkpoints. A log line says so. |
+| Pruned to full, same backend | Refuse to start: the pruned blocks are gone, so the node can never be full. The message says to set `CREDITS_RESET=1` for a fresh sync. |
+| Any backend change | Refuse to start: checkpoints and caches belong to the old database. Same message. |
+| `CREDITS_RESET=1` | Move `db/ caches/ qs/ *.dat` into `/data/old-<date>/` (never deleted), then first-start rules: a restore for pruned with `auto`, otherwise a sync from block 0. |
+
+- `.env` values that differ from `config.ini` after the first start produce a warning naming both. `config.ini` stays the source of truth.
+
 ## Review focus
 
 1. **A volume left half-written by an interrupted snapshot download or extraction.** The next start must not run on partial data. Restore into `/data/.restore-tmp`, move into place only at the end, and wipe `.restore-tmp` on start.
@@ -108,6 +122,12 @@
   4. The same with a wrong digest in `snapshot.json`: the container stops with `SNAPSHOT DIGEST MISMATCH`.
   5. An unreachable snapshot URL: the node starts anyway, with the reason in the log.
   6. A leftover `.restore-tmp`: wiped.
+- [ ] Add storage-change cases to `test-entrypoint.sh`:
+  - **full to pruned** (same backend): starts, with the note;
+  - **pruned to full:** refused, exit code 3 and the message;
+  - **lmdb to rocksdb:** refused;
+  - **`CREDITS_RESET=1`:** old data moved to `old-<date>/` and a fresh setup;
+  - **`.env` differing from `config.ini`:** a warning.
 - [ ] Run it and see it fail.
 - [ ] Implement the Dockerfile, `entrypoint.sh` and `keygen.py` (adapted from `ci/testnet/gen_keys.py`), until the test passes. Docker builds run with `nice -n 19`.
 - [ ] Write `docker-compose.yml`, `.env.example` and the README (install in 3 commands, backup of `~/.credits/keys`, upgrades).
@@ -151,7 +171,8 @@
 
 - [ ] Add the variables and the logic, reusing the `JOIN_PRUNED_AT` join-node plumbing (`JOIN_NODE`, `ALL_NODES`).
 - [ ] Add the two scenarios: `DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=1500 TARGET_SEQ=2300`, and the same with `SNAPSHOT_CORRUPT=1`.
-- [ ] Run with `gh workflow run robustness.yml -f only=snapshot-join,snapshot-corrupt`. Both must pass with matching digests.
+- [ ] Add `STORAGE_SWITCH_AT=<seq>`. At that sequence, node 5 (full LMDB) is restarted as pruned (`prune_keep_blocks=300`, checkpoints every 1,000), and node 6 (pruned LMDB) is restarted as full (`prune_keep_blocks=0`). Both must keep the network's digests. Node 5 must log a pruning step after the switch. Node 6's oldest stored block must stay where it was, so the old blocks never come back. Scenario `storage-switch`: `DB_BACKEND=lmdb STORAGE_SWITCH_AT=1200 TARGET_SEQ=2600`.
+- [ ] Run with `gh workflow run robustness.yml -f only=snapshot-join,snapshot-corrupt,storage-switch`. All must pass with matching digests.
 - [ ] Commit: `ci(robustness): a node joining from a snapshot, and from a corrupted one`.
 
 ### Task 5: Snapshot publishing workflow
