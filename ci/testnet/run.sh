@@ -329,7 +329,8 @@ digest_offline() {
     local i=$1 dir="$WORK/n$1" before
     kill -TERM "${PIDS[$i]}"; wait "${PIDS[$i]}" 2>/dev/null || true
     pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
-    : > "$dir/hosts-none.txt"
+    # an empty hosts file stops the node ("No hosts specified"): one host nobody listens on
+    echo "127.0.0.1:9 11111111111111111111111111111111" > "$dir/hosts-none.txt"
     awk -v port=$((BASE_PORT + 500 + i)) '
         /^\[/ { section = $0 }
         /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
@@ -342,6 +343,10 @@ digest_offline() {
         sleep 2
     done
     kill -TERM "$pid"; wait "$pid" 2>/dev/null || true
+    if [ "$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)" -le "${before:-0}" ]; then
+        echo "FAIL: n$i logged no start-up digest without peers" >&2
+        return 1
+    fi
     grep -a 'STATE DIGEST #' "$dir/node.log" | tail -1 | sed 's/^.*STATE DIGEST/STATE DIGEST/'
 }
 
@@ -489,7 +494,8 @@ while :; do
 
     if [ "$SNAPSHOT_AT" -gt 0 ] && [ "$snapshot_done" -eq 0 ] && [ "$min" -ge "$SNAPSHOT_AT" ]; then
         snapshot_done=1
-        echo "snapshot test: n$PRUNE_NODE stopped at sequence $(seq_of "$PRUNE_NODE"), head $(digest_offline "$PRUNE_NODE")"
+        head_digest=$(digest_offline "$PRUNE_NODE") || exit 1
+        echo "snapshot test: n$PRUNE_NODE stopped, head $head_digest"
         "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
             | sed 's/^/snapshot test: /'
         start_node "$PRUNE_NODE"
@@ -662,7 +668,9 @@ if [ "$SNAPSHOT_AT" -gt 0 ]; then
     fi
 fi
 if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
-    tail -n +"$((switch_lines5 + 1))" "$WORK/n5/node.log" | grep -aq 'pruned storage: blocks before .* removed' \
+    # no "tail | grep -q" under pipefail: grep -q stops at the first match and tail fails on SIGPIPE
+    after5=$(tail -n +"$((switch_lines5 + 1))" "$WORK/n5/node.log")
+    grep -aq 'pruned storage: blocks before .* removed' <<<"$after5" \
         || { echo "FAIL: n5 did not prune after switching to pruned storage"; exit 1; }
     # n6, now full, must still start from the block its last pruning left, and prune no more
     after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n6/node.log")

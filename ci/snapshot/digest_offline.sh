@@ -6,7 +6,8 @@
 set -euo pipefail
 dir=$(cd "$1" && pwd) timeout=${2:-600}
 cd "$dir"
-: > hosts-none.txt
+# an empty hosts file stops the node ("No hosts specified"): one host nobody listens on
+echo "127.0.0.1:9 11111111111111111111111111111111" > hosts-none.txt
 awk '
     /^\[/ { section = $0 }
     /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
