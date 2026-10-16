@@ -86,7 +86,7 @@ def balances(args):
     picked, compared, mismatches = set(), 0, []
     cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=24)
     tries = 0
-    while compared < args.count and tries < args.count * 6:
+    while compared < args.count and tries < args.count * args.tries:
         tries += 1
         offset = random.randrange(max(total, 1))
         if offset in picked:
@@ -113,7 +113,7 @@ def balances(args):
     print(f"{compared} wallets compared at block {head} ({total} on the node), {len(mismatches)} mismatches", flush=True)
     for address, ours, theirs in mismatches:
         print(f"  {address}: node {ours}, monitor {theirs}", flush=True)
-    if compared < args.count // 2:
+    if compared < (args.min_compared if args.min_compared is not None else args.count // 2):
         print("FAIL: too few wallets could be compared", flush=True)
         return 1
     return 1 if mismatches else 0
@@ -128,7 +128,9 @@ def main():
     b = sub.add_parser("balances")
     b.add_argument("--api", required=True)
     b.add_argument("--count", type=int, default=50)
+    b.add_argument("--tries", type=int, default=6, help="wallets looked at per wallet compared, at most")
     b.add_argument("--self-test-mismatch", action="store_true")
+    b.add_argument("--min-compared", type=int, help="fewest wallets that must be compared (default: half of --count)")
     args = parser.parse_args()
     sys.exit(wait_head(args) if args.cmd == "wait-head" else balances(args))
 
