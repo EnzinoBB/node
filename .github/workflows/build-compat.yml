@@ -1,0 +1,130 @@
+name: Build for Ubuntu 20.04
+
+# The node built inside an Ubuntu 20.04 container (glibc 2.31) with GCC 11, so that the binary runs on
+# Ubuntu 20.04 and every later system; the default build on ubuntu-24.04 needs glibc 2.38. Called by
+# release.yml; a compat-build-* tag or a manual run builds it alone.
+on:
+  push:
+    tags: ['compat-build-*']
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      artifact:
+        type: string
+        default: node-ubuntu20
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  BOOST_PREFIX: /opt/boost
+  CCACHE_DIR: /github/home/.ccache
+
+jobs:
+  build:
+    name: Node for Ubuntu 20.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    container: ubuntu:20.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq software-properties-common ca-certificates curl git bzip2 xz-utils
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get update -qq
+          apt-get install -y -qq gcc-11 g++-11 cmake ninja-build flex bison autoconf automake libtool \
+            pkg-config ccache liblz4-dev zlib1g-dev python3 binutils
+          update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 --slave /usr/bin/g++ g++ /usr/bin/g++-11
+          gcc --version | sed -n 1p; cmake --version | sed -n 1p; ldd --version | sed -n 1p
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git config --global --add safe.directory '*'
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-20.04-gcc11-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | sha256sum -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(nproc)" -d0 variant=release link=static runtime-link=static threading=multi \
+            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-ubuntu-20.04-gcc11-v1
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-20.04-gcc11-${{ github.sha }}
+          restore-keys: ccache-ubuntu-20.04-gcc11-
+
+      - name: Build node
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF
+          ccache --max-size=2G
+          cmake --build build -j"$(nproc)" --target node
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-ubuntu-20.04-gcc11-${{ github.sha }}
+
+      # the binary must need nothing newer than Ubuntu 20.04's glibc, and start there
+      - name: Check
+        run: |
+          b=build/client/node
+          need=$(objdump -T "$b" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol: $need"
+          [ "$(printf '%s\nGLIBC_2.31\n' "$need" | sort -V | tail -1)" = GLIBC_2.31 ] || { echo "needs more than glibc 2.31"; exit 1; }
+          ldd "$b"
+          "$b" --help | sed -n 1,3p
+
+      - name: Upload node
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact || 'node-ubuntu20' }}
+          path: build/client/node
+          retention-days: 7

@@ -58,6 +58,7 @@ Credits node, community build $version ($variant storage)
 
 Built from https://github.com/EnzinoBB/node and https://github.com/EnzinoBB/contract-executor.
 Node protocol version 532, compatible with the mainnet release 4.2.532.
+Runs on: ${PACKAGE_RUNS_ON:-Linux x86-64 with glibc 2.38 or later (Ubuntu 24.04, Debian 13 and later)}.
 
 Differences from the official package:
 - config.ini: [event_report] is commented out; executor_commit_max=$commits accepts the
@@ -69,6 +70,7 @@ Start: cd csnode && ./node
 EOF
 
 mkdir -p "$out"
-name="credits-node-$version-linux-x64-$variant.tar.gz"
+# PACKAGE_PLATFORM names a build for another baseline, e.g. glibc2.31 for Ubuntu 20.04 and later
+name="credits-node-$version-linux-x64${PACKAGE_PLATFORM:+-$PACKAGE_PLATFORM}-$variant.tar.gz"
 tar -C "$stage" --owner=0 --group=0 --sort=name -czf "$out/$name" csnode
 echo "$out/$name"
