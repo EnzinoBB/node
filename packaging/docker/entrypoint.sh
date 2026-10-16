@@ -128,7 +128,12 @@ find log -maxdepth 1 -name 'executor-log-*.txt' -mtime +7 -delete 2>/dev/null ||
 
 # after a restore, the node's start-up digest must equal the snapshot's
 if [ -f snapshot.json ] && [ ! -f snapshot.verified ]; then
-    read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' snapshot.json)
+    # the manifest comes from the network: only a plain number and a hex digest are used, never
+    # anything bash would evaluate (an arithmetic expansion runs command substitutions in its operand)
+    read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' snapshot.json) || true
+    if ! [[ "${snap_seq:-}" =~ ^[0-9]{1,12}$ && "${snap_digest:-}" =~ ^[0-9A-Fa-f]{64}$ ]]; then
+        refuse "snapshot.json has no valid block number and digest" 4
+    fi
     node_pid=$$
     (
         deadline=$(( $(date +%s) + DIGEST_WAIT ))

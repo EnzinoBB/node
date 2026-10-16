@@ -44,7 +44,7 @@ for env in "$fake/db/lmdb" "$fake/caches/seqdb"; do
     printf 'VERSION=3\nformat=print\ntype=btree\nHEADER=END\n k\n v\nDATA=END\n' | "$tools/mdb_load" -f /dev/stdin "$env"
 done
 echo x > "$fake/qs/1000/head.bin"
-echo "[t] [info] STATE DIGEST #1000 abcd wallets 5" > "$fake/log/log_0.txt"
+echo "[t] [info] STATE DIGEST #1000 abababababababababababababababababababababababababababababababab wallets 5" > "$fake/log/log_0.txt"
 "$here/snapshot-make.sh" "$fake" "$work/snap" "$tools/mdb_copy" >/dev/null
 
 run() {  # run <data dir> [docker args...]: runs the container to its end, prints its output
@@ -88,7 +88,7 @@ pass "snapshot restored and verified"
 
 # 4. digest mismatch stops the node, and the next start is refused
 d=$(newdata 4)
-echo "1000 ffff" > "$d/stub-digest"
+echo "1000 $(printf 'f%.0s' $(seq 1 64))" > "$d/stub-digest"
 start=$(date +%s)
 out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=60)
 grep -q 'SNAPSHOT DIGEST MISMATCH' <<<"$out" || { echo "$out"; fail "mismatch not reported"; }
@@ -147,5 +147,14 @@ pass "backend change refused, CREDITS_RESET=1 starts over"
 out=$(run "$d" -e CREDITS_STORAGE=full -e CREDITS_SNAPSHOT=off)
 grep -q 'warning: CREDITS_STORAGE=full, but config.ini runs a pruned node' <<<"$out" || { echo "$out"; fail ".env warning"; }
 pass ".env differing from config.ini reported"
+
+# 12. a snapshot.json with a block number bash would evaluate: refused, nothing run
+d=$(newdata 12)
+run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
+printf '{"seq": "a[$(touch /data/pwned)]", "state_digest": "%s"}' "$(printf 'a%.0s' $(seq 1 64))" > "$d/snapshot.json"
+set +e; out=$(run "$d"); rc=$?; set -e
+[ "$rc" = 4 ] || { echo "$out"; fail "malicious snapshot.json: exit $rc, expected 4"; }
+[ -e "$d/pwned" ] && fail "malicious snapshot.json ran a command"
+pass "malicious snapshot.json refused"
 
 echo "PASS: entrypoint"

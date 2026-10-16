@@ -19,6 +19,9 @@ digest=$(cat "$node"/log/log_*.txt "$node"/node.log 2>/dev/null | grep -a 'STATE
 seq=$(sed -E 's/.*STATE DIGEST #([0-9]+) .*/\1/' <<<"$digest")
 hex=$(sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+) .*/\1/' <<<"$digest")
 wallets=$(sed -E 's/.*wallets ([0-9]+).*/\1/' <<<"$digest")
+# the log is written by a node that talks to untrusted peers: use only the exact shapes expected
+[[ "$seq" =~ ^[0-9]{1,12}$ && "$hex" =~ ^[0-9A-Fa-f]{64}$ && "$wallets" =~ ^[0-9]{1,12}$ ]] \
+    || { echo "malformed STATE DIGEST line: $digest" >&2; exit 1; }
 
 mkdir -p "$out"
 stage=$(mktemp -d "$out/.stage.XXXXXX")
@@ -44,11 +47,13 @@ sha=$(sha256sum "$out/$name" | cut -d' ' -f1)
 checkpoint=$(ls "$node/qs" | sort -n | tail -1)
 node_version=$(cat "$node/VERSION" 2>/dev/null || echo unknown)
 
-python3 - "$out/latest.json" <<PY
+# values as arguments, never interpolated into the program
+python3 - "$out/latest.json" "$seq" "$hex" "$wallets" "$checkpoint" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$node_version" "$name" "$size" "$sha" "$run" <<'PY'
 import json, sys
-json.dump({"seq": $seq, "state_digest": "$hex", "wallets": $wallets, "checkpoint": "$checkpoint",
-           "created": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "node": "$node_version",
-           "file": "$name", "size": $size, "sha256": "$sha", "run": "$run"},
-          open(sys.argv[1], "w"), indent=2)
+path, seq, hex_, wallets, checkpoint, created, node, name, size, sha, run = sys.argv[1:]
+json.dump({"seq": int(seq), "state_digest": hex_, "wallets": int(wallets), "checkpoint": checkpoint,
+           "created": created, "node": node, "file": name, "size": int(size), "sha256": sha, "run": run},
+          open(path, "w"), indent=2)
 PY
 echo "snapshot $name: block $seq, digest $hex, $size bytes"

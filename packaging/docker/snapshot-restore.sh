@@ -29,7 +29,12 @@ read -r file sha seq < <(python3 -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
 print(m["file"], m["sha256"], m["seq"])' "$tmp/latest.json") || give_up "unreadable manifest"
-case "$file" in */*|"") give_up "bad file name in the manifest" ;; esac
+# the manifest comes from the network: accept only the exact shapes this script uses
+[[ "$file" =~ ^credits-pruned-[0-9]{1,12}\.tar\.zst$ ]] || give_up "bad file name in the manifest"
+[[ "$sha" =~ ^[0-9a-f]{64}$ ]] || give_up "bad checksum in the manifest"
+[[ "$seq" =~ ^[0-9]{1,12}$ ]] || give_up "bad block number in the manifest"
+python3 -c 'import json,sys,re; m=json.load(open(sys.argv[1])); sys.exit(0 if re.fullmatch(r"[0-9A-Fa-f]{64}", str(m.get("state_digest",""))) else 1)' \
+    "$tmp/latest.json" || give_up "bad state digest in the manifest"
 
 case "$base" in
     http://*|https://*) curl -fsSL --retry 3 -o "$tmp/$file" "$base/$file" || give_up "cannot download $file" ;;
