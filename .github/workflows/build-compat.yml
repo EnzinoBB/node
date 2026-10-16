@@ -43,7 +43,7 @@ jobs:
           apt-get install -y -qq gcc-11 g++-11 cmake ninja-build flex bison autoconf automake libtool \
             pkg-config ccache liblz4-dev zlib1g-dev python3 binutils
           update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 100 --slave /usr/bin/g++ g++ /usr/bin/g++-11
-          gcc --version | head -1; cmake --version | head -1; ldd --version | head -1
+          gcc --version | sed -n 1p; cmake --version | sed -n 1p; ldd --version | sed -n 1p
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -120,7 +120,7 @@ jobs:
           echo "highest glibc symbol: $need"
           [ "$(printf '%s\nGLIBC_2.31\n' "$need" | sort -V | tail -1)" = GLIBC_2.31 ] || { echo "needs more than glibc 2.31"; exit 1; }
           ldd "$b"
-          "$b" --help | head -3
+          "$b" --help | sed -n 1,3p
 
       - name: Upload node
         uses: actions/upload-artifact@v4
