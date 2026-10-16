@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -45,8 +46,21 @@ TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, 
     // stale even on clean shutdown — the OS lazily flushed Boost mapped_file
     // pages, so on restart its value lagged the LMDB and forced a full reindex).
     init();
-    if (_recreate || !loadLastIndexedFromDb()) {
+    if (_recreate) {
         recreate_ = true;
+    }
+    else if (!loadLastIndexedFromDb()) {
+        // an index written by an earlier build, or by the official node, keeps its watermark in the
+        // old last_indexed file: take it over instead of rebuilding the index (and slow-starting).
+        // pinFloor() marks the index incomplete if that watermark lags the quick-start checkpoint.
+        if (loadLastIndexedFromLegacyFile()) {
+            cslog() << "trxIndex: last indexed block " << lastIndexedPool_
+                    << " taken over from the legacy last_indexed file";
+            updateLastIndexed();
+        }
+        else {
+            recreate_ = true;
+        }
     }
     loadIncompleteFromDb();
     loadCompleteFlagFromDb();
@@ -393,6 +407,20 @@ Sequence TransactionsIndex::getPrevTransBlock(const csdb::Address& _addr, Sequen
         return kWrongSequence;
     }
     return db_->value<Sequence>(key);
+}
+
+bool TransactionsIndex::loadLastIndexedFromLegacyFile() {
+    // <path>/last_indexed: one cs::Sequence, as the memory-mapped file of earlier builds wrote it
+    std::ifstream f(rootPath_ + "/last_indexed", std::ios::binary);
+    cs::Sequence v = kWrongSequence;
+    if (!f.read(reinterpret_cast<char*>(&v), sizeof(v)) || v == kWrongSequence || v == 0) {
+        return false;
+    }
+    if (!db_->isOpen()) {
+        return false;
+    }
+    lastIndexedPool_ = v;
+    return true;
 }
 
 bool TransactionsIndex::loadLastIndexedFromDb() {

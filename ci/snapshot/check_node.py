@@ -5,6 +5,11 @@
       Exit 0 once the node's last block has stayed within 3 rounds of the current round for 3 minutes
       (SyncStateGet), 1 on timeout.
 
+  check_node.py history --api HOST:PORT --count N
+      Compares the transaction history the node serves from its transaction index (TransactionsGet)
+      with the monitor's, for N wallets with 1 to 50 transactions, counting blocks up to the node's
+      last block only. Exit 1 on any difference.
+
   check_node.py balances --api HOST:PORT --count N [--self-test-mismatch]
       Compares the balances of N wallets with the public monitor, an independent source. Wallets come
       from the node (WalletsGet, at random); only those whose last transaction, per the monitor, is
@@ -119,6 +124,36 @@ def balances(args):
     return 1 if mismatches else 0
 
 
+def history(args):
+    node = client(args.api)
+    head = node.SyncStateGet().lastBlock
+    total = node.WalletsGet(0, 1, 0, True).count
+    compared, bad, tries = 0, 0, 0
+    while compared < args.count and tries < args.count * args.tries:
+        tries += 1
+        w = node.WalletsGet(random.randrange(max(total, 1)), 1, 0, True).wallets[0]
+        if not 1 <= w.transactionsNumber <= 50:
+            continue
+        address = base58.b58encode(w.address).decode()
+        try:
+            theirs = monitor(f"AccountTransactions?id={address}&page=1&limit=100").get("transactions") or []
+        except Exception as e:
+            print(f"FAIL: the monitor cannot be reached: {e}", flush=True)
+            return 1
+        theirs = sorted(int(t["blockNum"]) for t in theirs if int(t["blockNum"]) <= head)
+        ours = sorted(t.id.poolSeq for t in (node.TransactionsGet(w.address, 0, 100).transactions or [])
+                      if t.id.poolSeq <= head)
+        compared += 1
+        if ours != theirs:
+            bad += 1
+            print(f"  {address}: node blocks {ours[:8]}, monitor {theirs[:8]}", flush=True)
+    print(f"{compared} wallet histories compared up to block {head}, {bad} differ", flush=True)
+    if compared < (args.min_compared if args.min_compared is not None else args.count // 2):
+        print("FAIL: too few wallets could be compared", flush=True)
+        return 1
+    return 1 if bad else 0
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -131,8 +166,13 @@ def main():
     b.add_argument("--tries", type=int, default=6, help="wallets looked at per wallet compared, at most")
     b.add_argument("--self-test-mismatch", action="store_true")
     b.add_argument("--min-compared", type=int, help="fewest wallets that must be compared (default: half of --count)")
+    h = sub.add_parser("history")
+    h.add_argument("--api", required=True)
+    h.add_argument("--count", type=int, default=20)
+    h.add_argument("--tries", type=int, default=20)
+    h.add_argument("--min-compared", type=int)
     args = parser.parse_args()
-    sys.exit(wait_head(args) if args.cmd == "wait-head" else balances(args))
+    sys.exit({"wait-head": wait_head, "balances": balances, "history": history}[args.cmd](args))
 
 
 if __name__ == "__main__":

@@ -68,6 +68,9 @@ private:
     // Reads last_indexed value from the index LMDB. Returns true if a valid
     // value was loaded into lastIndexedPool_, false if missing or sentinel.
     bool loadLastIndexedFromDb();
+    // the watermark of the old last_indexed file (earlier builds, the official node): true if a
+    // valid value was loaded into lastIndexedPool_
+    bool loadLastIndexedFromLegacyFile();
 
     void setPrevTransBlock(const PublicKey&, cs::Sequence _curr, cs::Sequence _prev);
     void removeLastTransBlock(const PublicKey&, cs::Sequence _curr);
