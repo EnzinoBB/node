@@ -41,8 +41,15 @@ env:
   OFFICIAL_RELEASE: https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
 
 jobs:
+  # the node for Ubuntu 20.04 and later (glibc 2.31); the default build below needs glibc 2.38
+  compat:
+    uses: ./.github/workflows/build-compat.yml
+    with:
+      artifact: node-glibc2.31-${{ github.sha }}
+
   package:
     name: Packages
+    needs: compat
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     outputs:
@@ -169,10 +176,21 @@ jobs:
           mkdir -p jdk && tar -xzf jdk.tar.gz -C jdk
           jdk/java-11-openjdk-11.0.4/bin/java -version
 
+      - name: Download the node for Ubuntu 20.04
+        uses: actions/download-artifact@v4
+        with:
+          name: node-glibc2.31-${{ github.sha }}
+          path: compat
+
       - name: Packages
         run: |
+          chmod +x compat/node
           for variant in full pruned; do
             packaging/make-package.sh "$variant" "$VERSION" build/client/node executor \
+              jdk/java-11-openjdk-11.0.4 dist
+            PACKAGE_PLATFORM=glibc2.31 \
+            PACKAGE_RUNS_ON="Linux x86-64 with glibc 2.31 or later (Ubuntu 20.04, Debian 11 and later)" \
+              packaging/make-package.sh "$variant" "$VERSION" compat/node executor \
               jdk/java-11-openjdk-11.0.4 dist
           done
           (cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
@@ -196,8 +214,10 @@ jobs:
           - contract executor: EnzinoBB/contract-executor release ${EXECUTOR_TAG}
           - JDK: ojdkbuild 11.0.4, the one the official release ships
 
-          The two packages hold the same binaries and differ only in config.ini: full storage, or
-          pruned storage on LMDB. See README-COMMUNITY.txt inside each package. Verify with SHA256SUMS.
+          Full or pruned storage: the packages differ only in config.ini (pruned storage runs on LMDB).
+          Two builds of the same code: `linux-x64` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
+          `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
+          each package. Verify with SHA256SUMS.
           EOF
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber --repo "$GITHUB_REPOSITORY"

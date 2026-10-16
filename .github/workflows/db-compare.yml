@@ -125,9 +125,9 @@ jobs:
           echo "$TARGET_SEQ$TIMEOUT_MIN" | grep -qE '^[0-9]+$' || { echo "bad inputs"; exit 1; }
           tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
             --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-full.tar.gz' --pattern SHA256SUMS
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64-full.tar.gz' --pattern SHA256SUMS
           sha256sum -c --ignore-missing SHA256SUMS
-          tar -xzf *-full.tar.gz
+          tar -xzf *-linux-x64-full.tar.gz
           echo "package $tag"
 
       - name: Download node
