@@ -113,7 +113,7 @@ Then the node starts. It quick-starts from the snapshot's checkpoint, reads the 
 1. Download the latest pruned release package and the latest snapshot. Verify both.
 2. Start the node from the snapshot, with the package configuration.
 3. Wait until the node is at the head: `SYNC: Blocks remaining` below 100 for 3 minutes, and the last written block advancing. Timeout: 90 minutes.
-4. Stop the node with SIGTERM and wait for it to exit.
+4. Cross-check the balances against an independent source while the node runs with its API on. For 50 wallets picked at random from the node's `WalletsGet`, among those with no transaction in the last 24 hours, the balance must equal `ExtendedBalance` from `monitor.credits.com`. If the monitor cannot be reached, the run fails rather than skips the check. Then stop the node with SIGTERM and wait for it to exit.
 5. Check it before publishing. Any failure stops the run, publishes nothing and keeps the previous snapshot.
    - The log has none of these:
      - `counted transactions is different`;
@@ -121,7 +121,7 @@ Then the node starts. It quick-starts from the snapshot's checkpoint, reads the 
      - `is not on this chain`;
      - a quick start one block behind its caches.
    - A start-up `STATE DIGEST` is present after the restart.
-   - Balance cross-check against an independent source: for 50 wallets picked at random from the node's wallet cache, among those with no transaction in the last 24 hours, the balance equals `ExtendedBalance` from `monitor.credits.com`. If the monitor cannot be reached, the run fails rather than skips the check.
+   - The balance cross-check of step 4 passed.
 6. Package it (section 2) and publish it as assets of the release `pruned-snapshot`. Replace `latest.json` and delete the archives older than the last 3.
 
 **Cost.** About 20 to 40 minutes every 12 hours, one runner, no matrix.
