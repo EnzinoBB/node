@@ -10,8 +10,11 @@ on:
     - cron: '37 5,17 * * *'
   workflow_dispatch:
 
+# the job that runs the node holds no write token: the node talks to untrusted peers, so a token in
+# its environment or in .git/config could be read by a compromised node. Publishing is a separate
+# job that never runs the node.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: snapshot
@@ -21,12 +24,17 @@ jobs:
   snapshot:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    outputs:
+      skip: ${{ steps.fetch.outputs.skip }}
     env:
-      GH_TOKEN: ${{ github.token }}
       RELEASE: pruned-snapshot
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # no credentials left for the steps that run the node
+      - name: Drop git credentials
+        run: git config --local --unset-all http.https://github.com/.extraheader || true
 
       - name: Tools
         run: |
@@ -36,9 +44,13 @@ jobs:
           python3 -m pip install --user --quiet --break-system-packages thriftpy2
 
       - name: Latest package and snapshot
+        id: fetch
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           if ! gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "no snapshot yet: the first one is published by hand"; echo "SKIP=1" >> "$GITHUB_ENV"; exit 0
+            echo "no snapshot yet: the first one is published by hand"
+            echo "SKIP=1" >> "$GITHUB_ENV"; echo "skip=1" >> "$GITHUB_OUTPUT"; exit 0
           fi
           tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
             --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
@@ -86,8 +98,54 @@ jobs:
           [ "$size" -lt 2000000000 ] || { echo "FAIL: $size bytes, above the 2 GB asset limit"; exit 1; }
           cat out/latest.json
 
-      - name: Publish
+      - name: Upload snapshot
         if: env.SKIP != '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot
+          path: out/
+          retention-days: 2
+
+  publish:
+    needs: snapshot
+    if: needs.snapshot.outputs.skip != '1'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE: pruned-snapshot
+    steps:
+      - name: Download snapshot
+        uses: actions/download-artifact@v4
+        with:
+          name: snapshot
+          path: out
+
+      # the manifest comes from the job that ran the node: check its form and the archive's checksum
+      - name: Check
+        run: |
+          ls -la out
+          python3 - <<'PY'
+          import json, os, re, hashlib
+          m = json.load(open("out/latest.json"))
+          assert set(m) == {"seq", "state_digest", "wallets", "checkpoint", "created", "node", "file", "size", "sha256", "run"}, m.keys()
+          assert isinstance(m["seq"], int) and m["seq"] > 0
+          assert re.fullmatch(r"[0-9A-Fa-f]{64}", m["state_digest"]) and re.fullmatch(r"[0-9a-f]{64}", m["sha256"])
+          assert m["file"] == f"credits-pruned-{m['seq']}.tar.zst"
+          assert sorted(os.listdir("out")) == sorted(["latest.json", m["file"]]), os.listdir("out")
+          path = os.path.join("out", m["file"])
+          assert os.path.getsize(path) == m["size"] < 2_000_000_000
+          h = hashlib.sha256()
+          with open(path, "rb") as f:
+              for chunk in iter(lambda: f.read(1 << 20), b""):
+                  h.update(chunk)
+          assert h.hexdigest() == m["sha256"], "checksum"
+          print("snapshot", m["file"], "block", m["seq"], "digest", m["state_digest"])
+          PY
+
+      - name: Publish
         run: |
           gh release upload "$RELEASE" out/credits-pruned-*.tar.zst --repo "$GITHUB_REPOSITORY"
           gh release upload "$RELEASE" out/latest.json --clobber --repo "$GITHUB_REPOSITORY"

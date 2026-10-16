@@ -18,11 +18,13 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    env:
-      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # no credentials left for the steps that run the node
+      - name: Drop git credentials
+        run: git config --local --unset-all http.https://github.com/.extraheader || true
 
       - name: LMDB tools
         run: |
@@ -37,6 +39,8 @@ jobs:
         run: packaging/docker/test/test-entrypoint.sh third-party/lmdb/libraries/liblmdb
 
       - name: Build the real image
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
             --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
