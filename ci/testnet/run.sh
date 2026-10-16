@@ -692,9 +692,11 @@ done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$ALL_NODES" "$FUND" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$SNAPSHOT_AT" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+# a node that joins from a snapshot starts past block 1000: only the initial nodes log it
+initial = int(sys.argv[4]) if int(sys.argv[5]) > 0 else nodes
 seen = collections.defaultdict(dict)
 for i in range(1, nodes + 1):
     for path in glob.glob(f"{work}/n{i}/*.log"):
@@ -707,8 +709,8 @@ for seq in sorted(seen):
     if len(values) != 1:
         ok = False
     print(f"STATE DIGEST #{seq}: {status} ({len(seen[seq])} nodes) {sorted(values)[:3]}")
-if 1000 not in seen or len(seen[1000]) < nodes:
-    print(f"FAIL: expected a STATE DIGEST #1000 from all {nodes} nodes, got {len(seen.get(1000, {}))}")
+if 1000 not in seen or len(seen[1000]) < initial:
+    print(f"FAIL: expected a STATE DIGEST #1000 from all {initial} nodes, got {len(seen.get(1000, {}))}")
     ok = False
 if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     print("FAIL: funding did not change the wallet state by block 1000")
