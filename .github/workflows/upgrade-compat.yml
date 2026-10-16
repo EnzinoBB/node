@@ -7,7 +7,8 @@ name: Upgrade compatibility
 #      checkpoints or rebuild its state (slow start), and does it keep syncing? Balances of wallets
 #      untouched since its last block are compared with the public monitor;
 #   3. the official node starts again on the folder the community node left.
-# Both nodes run in an Ubuntu 20.04 container, the system the official build targets.
+# The official node runs in an Ubuntu 20.04 container, the system its build targets; the community
+# node in an Ubuntu 24.04 one, since its build needs glibc 2.38.
 on:
   push:
     tags: ['upgrade-test-*']
@@ -61,8 +62,10 @@ jobs:
           node=$PWD/official/csnode
           seq_now() { cat "$node"/log/log_*.txt 2>/dev/null | grep -a 'Last written sequence = ' | tail -1 \
                         | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'"; }
+          # the official build targets Ubuntu 20.04; the community build needs glibc 2.38 (Ubuntu 24.04)
           phase() {  # phase <binary> <minutes>
-            docker run -d --name credits --network host --user "$(id -u)" -v "$node:/node" -w /node ubuntu:20.04 \
+            image=ubuntu:20.04; [ "$1" = node-community ] && image=ubuntu:24.04
+            docker run -d --name credits --network host --user "$(id -u)" -v "$node:/node" -w /node "$image" \
               "./$1" --db-path db --config-file config.ini >/dev/null
             sleep $(( $2 * 60 ))
           }
@@ -84,6 +87,7 @@ jobs:
           after=$(cat "$node"/log/log_*.txt | tail -n +"$((lines1 + 1))")
           grep -aE 'QUICK START!|SLOW START|Caches for QUICK START loaded|schema_version|not on this chain|quarantin|trxIndex needs rebuild|Couldn.t open|caches already hold' <<<"$after" | head -20
           s2=$(seq_now); echo "community node reached block ${s2:-none}"
+          docker logs credits > "$node/docker-community.log" 2>&1 || true
           [ "${s2:-0}" -gt "$s1" ] || { echo "FAIL: the community node did not go past block $s1"; docker logs --tail 40 credits; exit 1; }
           python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
             || { echo "FAIL: balances differ from the monitor"; exit 1; }
