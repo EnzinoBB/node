@@ -28,6 +28,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     container: ubuntu:20.04
+    defaults:
+      run:
+        shell: bash
     env:
       DEBIAN_FRONTEND: noninteractive
     steps:
