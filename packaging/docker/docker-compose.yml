@@ -1,0 +1,24 @@
+# Community Credits node. Start: docker compose up -d   Logs: docker compose logs -f
+# Settings: .env (copy .env.example). Data, configuration and keys: ${CREDITS_HOME:-~/.credits}.
+services:
+  node:
+    image: ghcr.io/enzinobb/credits-node:${CREDITS_VERSION:-latest}
+    container_name: credits-node
+    restart: unless-stopped
+    stop_grace_period: 120s
+    env_file: .env
+    volumes:
+      - ${CREDITS_HOME:-~/.credits}:/data
+    ports:
+      - "${CREDITS_P2P_PORT:-9510}:${CREDITS_P2P_PORT:-9510}/tcp"
+      - "${CREDITS_P2P_PORT:-9510}:${CREDITS_P2P_PORT:-9510}/udp"
+      # with CREDITS_API=on, the Thrift API for this host only
+      - "127.0.0.1:9090:9090"
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "2"
+    # what a pruned node used while syncing on a shared server; remove or raise as needed
+    cpus: 1.5
+    mem_limit: 4g
