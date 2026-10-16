@@ -173,3 +173,16 @@ Both must reach the target with the state digests of the network. A second varia
 - The image registry: GHCR on EnzinoBB/node needs `packages: write` in `release.yml`. The image is public, like the repository.
 - The 2 GB limit for a release asset: if a snapshot ever exceeds it, it is split into parts.
 - The balance cross-check relies on `monitor.credits.com`. BK's dashboard API (`wallet.get`) can be a second source.
+
+## Next phase: snapshots served by community nodes
+
+Agreed direction (2026-10-16), to be designed in its own spec after this one is done: a new node fetches the snapshot from other community nodes, with GitHub as a fallback and as one more source.
+
+- **Compatibility.** No change to the p2p protocol. Snapshots are served by a separate read-only service on its own port, so official nodes see no difference.
+- **First version.** A side service in the container, enabled with `CREDITS_SERVE_SNAPSHOT=on`, serves the snapshot the node makes from its own checkpoints (every 100,000 blocks). There is no change to the C++ node.
+- **Copy while running.** LMDB allows a consistent copy while the node runs (`mdb_copy` reads in one transaction), and checkpoints do not change once written. To solve: the digest must refer to the checkpoint block, not to the head, and the node does not log it during a quick start today.
+- **Discovery.** The weekly known-hosts job also probes which nodes serve snapshots and publishes the list.
+- **Agreement.** A new node accepts a snapshot only when at least 3 sources declare the same digest for the same block. The GitHub snapshot counts as one source.
+- **Download.** In chunks from several nodes in parallel; the manifest carries a hash per chunk, and a bad chunk is fetched again elsewhere. Then the start-up digest check of section 3.
+- **Operators.** Bandwidth and concurrent-download limits, configurable. The service never serves keys or configuration.
+- **More sources for the publishing check.** Several known hosts expose their Thrift API at the chain head (11 of 16 on 2026-10-16). The balance cross-check of section 4 can compare with 2 or 3 of them as well as the monitor, so it does not depend on one source.
