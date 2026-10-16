@@ -98,9 +98,9 @@ jobs:
           [ "${s2:-0}" -gt "$s1" ] || { echo "FAIL: the community node did not go past block $s1"; docker logs --tail 40 credits; exit 1; }
           python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
             || { echo "FAIL: balances differ from the monitor"; exit 1; }
-          # the official checkpoint and transaction index are taken over: no slow start
-          grep -aq 'Caches for QUICK START loaded successfully' <<<"$after" \
-            || { echo "FAIL: the community node did not quick-start from the official checkpoint"; exit 1; }
+          # the official transaction index is taken over; the official checkpoint is not used (it has no
+          # head record, so a checkpoint saved with the live off-by-one cannot be told apart), so the
+          # community node rebuilds its state from the local database: a slow start, by design
           grep -aq 'taken over from the legacy last_indexed file' <<<"$after" \
             || { echo "FAIL: the official transaction index was not taken over"; exit 1; }
           python3 ci/snapshot/check_node.py history --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
