@@ -1,0 +1,110 @@
+name: Upgrade compatibility
+
+# Runs the latest community node on the folder of an official 4.2.532.0 node, and the official node
+# again afterwards, on mainnet:
+#   1. the official node syncs from block 0 for 30 minutes and stops;
+#   2. the community node starts on the same folder: does it quick-start from the official
+#      checkpoints or rebuild its state (slow start), and does it keep syncing? Balances of wallets
+#      untouched since its last block are compared with the public monitor;
+#   3. the official node starts again on the folder the community node left.
+# Both nodes run in an Ubuntu 20.04 container, the system the official build targets.
+on:
+  push:
+    tags: ['upgrade-test-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Drop git credentials
+        run: git config --local --unset-all http.https://github.com/.extraheader || true
+
+      - name: Tools
+        run: |
+          git submodule update --init -- third-party/thrift-interface-definitions
+          sudo apt-get install -y -qq python3-nacl python3-base58
+          python3 -m pip install --user --quiet --break-system-packages thriftpy2
+
+      - name: Official release and community node
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          curl -sSfL -o official.tar.gz \
+            https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
+          mkdir official && tar -xzf official.tar.gz -C official && rm official.tar.gz
+          rm -rf official/csnode/javafx-sdk-13
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
+            --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-full.tar.gz' --pattern SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          mkdir community && tar -xzf *-full.tar.gz -C community
+          node=official/csnode
+          cp community/csnode/node "$node/node-community"
+          cp "$node/node" "$node/node-official"
+          # the official seed list of 2023 is dead: use the community one; one executor per node
+          cp packaging/mainnet/known_hosts.txt "$node/known_hosts.txt"
+          sed -i 's/^executor_multi_instance=.*/executor_multi_instance=true/' "$node/config.ini"
+          python3 ci/testnet/gen_keys.py 1 keys >/dev/null && cp keys/n1/Node*.txt "$node/"
+          grep -n '^\[storage\]' "$node/config.ini" || echo "official config.ini: no [storage] section (full BerkeleyDB)"
+          echo "community node from $tag; official node $(md5sum < "$node/node-official" | cut -c1-12)"
+
+      - name: Run the three phases
+        run: |
+          node=$PWD/official/csnode
+          seq_now() { cat "$node"/log/log_*.txt 2>/dev/null | grep -a 'Last written sequence = ' | tail -1 \
+                        | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'"; }
+          phase() {  # phase <binary> <minutes>
+            docker run -d --name credits --network host --user "$(id -u)" -v "$node:/node" -w /node ubuntu:20.04 \
+              "./$1" --db-path db --config-file config.ini >/dev/null
+            sleep $(( $2 * 60 ))
+          }
+          stop() {
+            docker stop -t 120 credits >/dev/null; docker logs credits > "$node/docker-$1.log" 2>&1; docker rm credits >/dev/null
+            pkill -f '[c]ontract-executor[.]jar' || true
+          }
+
+          echo "== phase 1: official node, 30 minutes"
+          phase node-official 30
+          s1=$(seq_now); echo "official node reached block ${s1:-none}"
+          [ "${s1:-0}" -gt 1000 ] || { docker logs --tail 40 credits; exit 1; }
+          stop official-1
+          ls "$node/qs"
+          lines1=$(cat "$node"/log/log_*.txt | wc -l)
+
+          echo "== phase 2: community node on the same folder, 20 minutes"
+          phase node-community 20
+          after=$(cat "$node"/log/log_*.txt | tail -n +"$((lines1 + 1))")
+          grep -aE 'QUICK START!|SLOW START|Caches for QUICK START loaded|schema_version|not on this chain|quarantin|trxIndex needs rebuild|Couldn.t open|caches already hold' <<<"$after" | head -20
+          s2=$(seq_now); echo "community node reached block ${s2:-none}"
+          [ "${s2:-0}" -gt "$s1" ] || { echo "FAIL: the community node did not go past block $s1"; docker logs --tail 40 credits; exit 1; }
+          python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
+            || { echo "FAIL: balances differ from the monitor"; exit 1; }
+          stop community
+          lines2=$(cat "$node"/log/log_*.txt | wc -l)
+
+          echo "== phase 3: official node again, 10 minutes"
+          phase node-official 10
+          after=$(cat "$node"/log/log_*.txt | tail -n +"$((lines2 + 1))")
+          grep -aE 'QUICK START!|SLOW START|Caches for QUICK START loaded|schema|quarantin|rebuild|Couldn.t open' <<<"$after" | head -20
+          s3=$(seq_now); echo "official node reached block ${s3:-none}"
+          [ "${s3:-0}" -gt "$s2" ] || { echo "FAIL: the official node did not go past block $s2"; docker logs --tail 40 credits; exit 1; }
+          stop official-2
+          echo "PASS: official $s1 -> community $s2 -> official $s3"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-logs
+          path: |
+            official/csnode/log/
+            official/csnode/docker-*.log
+          retention-days: 14
