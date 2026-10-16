@@ -662,7 +662,8 @@ if [ "$SNAPSHOT_AT" -gt 0 ]; then
         grep -aq 'Caches for QUICK START loaded successfully' "$WORK/n$JOIN_NODE"/node.log \
             || { echo "FAIL: n$JOIN_NODE did not start from the snapshot"; exit 1; }
         read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' "$WORK/n$JOIN_NODE/snapshot.json")
-        got=$(grep -a -m1 "STATE DIGEST #$snap_seq " "$WORK/n$JOIN_NODE"/node.log | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' || true)
+        # the start-up digest: a checkpoint saved at shutdown labels it one block higher (S + 1)
+        got=$(grep -a -m1 -E "STATE DIGEST #($snap_seq|$((snap_seq + 1))) " "$WORK/n$JOIN_NODE"/node.log | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' || true)
         [ "${got,,}" = "${snap_digest,,}" ] || { echo "FAIL: n$JOIN_NODE start-up digest ${got:-none} differs from the snapshot's $snap_digest"; exit 1; }
         echo "snapshot test: n$JOIN_NODE started from the snapshot at block $snap_seq with its digest $got"
     fi

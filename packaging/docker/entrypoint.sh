@@ -133,7 +133,8 @@ if [ -f snapshot.json ] && [ ! -f snapshot.verified ]; then
     (
         deadline=$(( $(date +%s) + DIGEST_WAIT ))
         while [ "$(date +%s)" -lt "$deadline" ]; do
-            line=$(cat log/log_*.txt 2>/dev/null | grep -a "STATE DIGEST #$snap_seq " | tail -1 || true)
+            # the start-up digest: a checkpoint saved at shutdown labels it one block higher (S + 1)
+            line=$(cat log/log_*.txt 2>/dev/null | grep -a -E "STATE DIGEST #($snap_seq|$((snap_seq + 1))) " | tail -1 || true)
             if [ -n "$line" ]; then
                 got=$(sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' <<<"$line")
                 if [ "${got,,}" = "${snap_digest,,}" ]; then
