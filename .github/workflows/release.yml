@@ -45,6 +45,9 @@ jobs:
     name: Packages
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
     env:
       GH_TOKEN: ${{ github.token }}
 
@@ -54,6 +57,7 @@ jobs:
 
       # inputs through env, never expanded into the script
       - name: Version
+        id: version
         env:
           IN_VERSION: ${{ inputs.version }}
           IN_EXECUTOR_TAG: ${{ inputs.executor_tag }}
@@ -79,6 +83,7 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "EXECUTOR_TAG=$executor_tag" >> "$GITHUB_ENV"
           echo "PUBLISH=$publish" >> "$GITHUB_ENV"
+          printf 'version=%s\npublish=%s\n' "$version" "$publish" >> "$GITHUB_OUTPUT"
           echo "version $version, executor $executor_tag, publish $publish"
 
       # the submodules the build needs, listed explicitly
@@ -199,4 +204,49 @@ jobs:
           else
             gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --title "Community node $VERSION" --notes-file notes.md
+          fi
+
+  # the Docker image of the pruned package (the image chooses full or pruned at its first start, so
+  # the package variant only provides the binaries and the configuration template)
+  image:
+    name: Docker image
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+      PUBLISH: ${{ needs.package.outputs.publish }}
+      IMAGE: ghcr.io/enzinobb/credits-node
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          name: credits-node-${{ needs.package.outputs.version }}
+          path: dist
+
+      - name: Build image
+        run: |
+          mkdir pkg
+          tar -xzf dist/credits-node-${VERSION}-linux-x64-pruned.tar.gz -C pkg
+          echo "$VERSION" > pkg/csnode/VERSION
+          packaging/docker/build.sh pkg/csnode "$IMAGE:$VERSION"
+          docker image ls "$IMAGE"
+
+      - name: Push image
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:$VERSION"
+          # a tagged release also moves latest; a manual publish does not
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            docker tag "$IMAGE:$VERSION" "$IMAGE:latest"
+            docker push "$IMAGE:latest"
           fi

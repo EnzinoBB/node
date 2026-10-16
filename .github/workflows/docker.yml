@@ -1,0 +1,75 @@
+name: Docker image
+
+# Tests of the Docker image: the snapshot scripts and the entrypoint with a stub node, then the real
+# image built from the latest release package, on mainnet: it must sync, stop cleanly and start
+# again from its checkpoint with the same identity.
+on:
+  pull_request:
+    branches: [master]
+    paths: ['packaging/docker/**', '.github/workflows/docker.yml']
+  push:
+    tags: ['docker-test-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # no credentials left for the steps that run the node
+      - name: Drop git credentials
+        run: git config --local --unset-all http.https://github.com/.extraheader || true
+
+      - name: LMDB tools
+        run: |
+          git submodule update --init -- third-party/lmdb
+          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_load mdb_dump
+          sudo apt-get install -y -qq zstd python3-nacl python3-base58
+
+      - name: Snapshot scripts
+        run: packaging/docker/test/test-snapshot.sh third-party/lmdb/libraries/liblmdb
+
+      - name: Entrypoint
+        run: packaging/docker/test/test-entrypoint.sh third-party/lmdb/libraries/liblmdb
+
+      - name: Build the real image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
+            --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-pruned.tar.gz' --pattern SHA256SUMS
+          sha256sum -c --ignore-missing SHA256SUMS
+          mkdir pkg && tar -xzf *-pruned.tar.gz -C pkg
+          echo "${tag#community-v}" > pkg/csnode/VERSION
+          packaging/docker/build.sh pkg/csnode credits-node:smoke
+          echo "built from $tag"
+
+      - name: Mainnet smoke test
+        run: |
+          mkdir data
+          seq_now() { cat data/log/log_*.txt 2>/dev/null | grep -a 'Last written sequence = ' | tail -1 \
+                        | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'"; }
+          run() { docker run -d --name smoke --user "$(id -u)" -v "$PWD/data:/data" \
+                    -e CREDITS_SNAPSHOT=off credits-node:smoke >/dev/null; }
+          run
+          sleep 300
+          first=$(seq_now); echo "after 5 minutes: block ${first:-none}"
+          [ "${first:-0}" -gt 1000 ] || { docker logs --tail 50 smoke; exit 1; }
+          key=$(cat data/keys/NodePublic.txt)
+          docker stop -t 120 smoke >/dev/null && docker rm smoke >/dev/null
+          run
+          sleep 120
+          grep -aq 'Caches for QUICK START loaded successfully' data/log/log_*.txt \
+            || { echo "no quick start after the restart"; docker logs --tail 50 smoke; exit 1; }
+          [ "$(cat data/keys/NodePublic.txt)" = "$key" ] || { echo "identity changed"; exit 1; }
+          second=$(seq_now); echo "after the restart: block $second"
+          [ "$second" -gt "$first" ] || { echo "no progress after the restart"; exit 1; }
+          docker stop -t 120 smoke >/dev/null
+          echo "PASS: synced to $first, restarted from its checkpoint, reached $second with key $key"

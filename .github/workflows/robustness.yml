@@ -159,6 +159,14 @@ jobs:
           # all at once, on a mixed-backend network
           - name: chaos-mixed
             env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
+          # a node joining from a snapshot taken after the first pruning, and from a truncated one
+          - name: snapshot-join
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100
+          - name: snapshot-corrupt
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_CORRUPT=1 TARGET_SEQ=3100
+          # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
+          - name: storage-switch
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=2300 TARGET_SEQ=3300
     name: ${{ matrix.name }}
     # a manual run can pick scenarios; the others stop at once
     env:
@@ -179,6 +187,9 @@ jobs:
       - name: Install tools
         if: env.SELECTED == 'true'
         run: |
+          git submodule update --init -- third-party/lmdb
+          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy
+          sudo apt-get install -y -qq zstd
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-nacl python3-base58 gdb
           python3 -m pip install --user --quiet --break-system-packages thriftpy2
