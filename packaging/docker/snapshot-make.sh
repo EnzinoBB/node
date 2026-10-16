@@ -14,7 +14,7 @@ node=$1 out=$2 mdb_copy=$3 run=${4:-}
 [ -d "$node/db/lmdb" ] || { echo "no $node/db/lmdb: not a pruned LMDB node" >&2; exit 1; }
 [ -d "$node/qs" ] || { echo "no $node/qs: no checkpoint" >&2; exit 1; }
 
-digest=$(cat "$node"/log/log_*.txt 2>/dev/null | grep -a 'STATE DIGEST #' | tail -1 || true)
+digest=$(cat "$node"/log/log_*.txt "$node"/node.log 2>/dev/null | grep -a 'STATE DIGEST #' | tail -1 || true)
 [ -n "$digest" ] || { echo "no STATE DIGEST line in $node/log" >&2; exit 1; }
 seq=$(sed -E 's/.*STATE DIGEST #([0-9]+) .*/\1/' <<<"$digest")
 hex=$(sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+) .*/\1/' <<<"$digest")

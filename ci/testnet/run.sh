@@ -33,6 +33,13 @@
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
+#        SNAPSHOT_AT (default 0 = off, needs PRUNE_NODE): at that sequence the pruned node is stopped,
+#        started once without peers to log the digest of its head, packaged with
+#        packaging/docker/snapshot-make.sh and started again; one more node (NODES + 1) restores the
+#        snapshot with snapshot-restore.sh and joins; with SNAPSHOT_CORRUPT=1 the archive is truncated
+#        first, so the restore must fail and that node syncs from block 0
+#        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
+#        node 5 is restarted as a pruned node and node 6 as a full one
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
 #        with pruned storage like PRUNE_NODE and must end with the same state digest
@@ -57,6 +64,7 @@ BIN=$(realpath "$1")
 BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 [ -z "$BIN_ALT" ] || echo "mixed nodes: even nodes run $BIN_ALT"
 HERE=$(cd "$(dirname "$0")" && pwd)
+REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
@@ -80,7 +88,11 @@ CRASH_FROM=${CRASH_FROM:-150}
 CRASH_ALL_AT=${CRASH_ALL_AT:-0}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
-JOIN_NODE=$([ "$JOIN_PRUNED_AT" -gt 0 ] && echo $((NODES + 1)) || echo 0)
+SNAPSHOT_AT=${SNAPSHOT_AT:-0}
+SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
+STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
+MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
+JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
@@ -311,6 +323,28 @@ seq_of() {
         | tail -1 | sed -E "s/.*Last written sequence = ([0-9']+).*/\1/" | tr -d "'" || true
 }
 
+# stop node i cleanly, start it once without peers (another port, no hosts) so that its start-up
+# STATE DIGEST is the digest of its head, and stop it again
+digest_offline() {
+    local i=$1 dir="$WORK/n$1" before
+    kill -TERM "${PIDS[$i]}"; wait "${PIDS[$i]}" 2>/dev/null || true
+    pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
+    : > "$dir/hosts-none.txt"
+    awk -v port=$((BASE_PORT + 500 + i)) '
+        /^\[/ { section = $0 }
+        /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
+        section == "[host_input]" && /^port=/ { print "port=" port; next }
+        { print }' "$dir/config.ini" > "$dir/config-offline.ini"
+    before=$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)
+    (cd "$dir" && exec "$BIN" --db-path db --config-file config-offline.ini </dev/null >> stdout.log 2>&1) &
+    local pid=$! deadline=$(( $(date +%s) + 300 ))
+    while [ "$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)" -le "${before:-0}" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+        sleep 2
+    done
+    kill -TERM "$pid"; wait "$pid" 2>/dev/null || true
+    grep -a 'STATE DIGEST #' "$dir/node.log" | tail -1 | sed 's/^.*STATE DIGEST/STATE DIGEST/'
+}
+
 # the lowest sequence among the nodes of the restart test
 restarted_seq() {
     local low="" s
@@ -344,6 +378,8 @@ disk_filled_at=0
 disk_freed=0
 net_fault_at=0
 net_fault_done=0
+snapshot_done=0
+storage_switched=0
 GARBAGE_PID=
 if [ -n "$SLOW_NODES" ]; then
     echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
@@ -379,7 +415,7 @@ while :; do
     fi
     echo "$line"
 
-    if [ "$JOIN_NODE" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
+    if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
         echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
         start_node "$JOIN_NODE"
     fi
@@ -449,6 +485,40 @@ while :; do
         echo "garbage: $GARBAGE_RATE random datagrams a second to every node for $GARBAGE_SECONDS s, from sequence $min"
         python3 "$HERE/garbage.py" "$BASE_PORT" "$ALL_NODES" "$GARBAGE_SECONDS" "$GARBAGE_RATE" > "$WORK/garbage.log" 2>&1 &
         GARBAGE_PID=$!
+    fi
+
+    if [ "$SNAPSHOT_AT" -gt 0 ] && [ "$snapshot_done" -eq 0 ] && [ "$min" -ge "$SNAPSHOT_AT" ]; then
+        snapshot_done=1
+        echo "snapshot test: n$PRUNE_NODE stopped at sequence $(seq_of "$PRUNE_NODE"), head $(digest_offline "$PRUNE_NODE")"
+        "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
+            | sed 's/^/snapshot test: /'
+        start_node "$PRUNE_NODE"
+        if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+            f=$(ls "$WORK"/snapshot/credits-pruned-*.tar.zst)
+            head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+            echo "snapshot test: archive truncated"
+        fi
+        rc=0
+        "$REPO/packaging/docker/snapshot-restore.sh" "$WORK/n$JOIN_NODE" "$WORK/snapshot/latest.json" \
+            > "$WORK/restore.log" 2>&1 || rc=$?
+        sed 's/^/snapshot test: /' "$WORK/restore.log"
+        echo "snapshot test: restore exit $rc; n$JOIN_NODE joins at sequence $min"
+        if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ "$rc" != 2 ]; then echo "FAIL: a truncated snapshot was restored"; exit 1; fi
+        if [ "$SNAPSHOT_CORRUPT" != 1 ] && [ "$rc" != 0 ]; then echo "FAIL: the snapshot was not restored"; exit 1; fi
+        start_node "$JOIN_NODE"
+    fi
+
+    if [ "$STORAGE_SWITCH_AT" -gt 0 ] && [ "$storage_switched" -eq 0 ] && [ "$min" -ge "$STORAGE_SWITCH_AT" ]; then
+        storage_switched=1
+        pruned_before=$(grep -a 'pruned storage: blocks before .* removed' "$WORK/n6"/node.log | tail -1 | sed -E "s/.*blocks before ([0-9']+) removed.*/\1/" | tr -d "'")
+        for i in 5 6; do kill -TERM "${PIDS[$i]}"; done
+        for i in 5 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
+        sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n5/config.ini"
+        sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n6/config.ini"
+        switch_lines5=$(wc -l < "$WORK/n5/node.log")
+        switch_lines6=$(wc -l < "$WORK/n6/node.log")
+        for i in 5 6; do start_node "$i"; done
+        echo "storage switch: n5 full -> pruned, n6 pruned -> full at sequence $min (n6 had pruned up to ${pruned_before:-none})"
     fi
 
     if [ "$DISK_FULL_NODE" -gt 0 ] && [ "$disk_filled_at" -eq 0 ] && [ "$min" -ge "$DISK_FULL_AT" ]; then
@@ -578,6 +648,32 @@ for i in $(seq 1 "$ALL_NODES"); do
     n=$(cat "$WORK/n$i"/*.log | grep -ac "but its caches already hold block" || true)
     if [ "${n:-0}" -gt 0 ]; then echo "n$i loaded $n checkpoint(s) one block behind their caches"; fi
 done
+if [ "$SNAPSHOT_AT" -gt 0 ]; then
+    if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+        grep -aq 'SLOW START' "$WORK/n$JOIN_NODE"/node.log || { echo "FAIL: n$JOIN_NODE did not sync from block 0"; exit 1; }
+        echo "snapshot test: n$JOIN_NODE synced from block 0 after the truncated snapshot"
+    else
+        grep -aq 'Caches for QUICK START loaded successfully' "$WORK/n$JOIN_NODE"/node.log \
+            || { echo "FAIL: n$JOIN_NODE did not start from the snapshot"; exit 1; }
+        read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' "$WORK/n$JOIN_NODE/snapshot.json")
+        got=$(grep -a "STATE DIGEST #$snap_seq " "$WORK/n$JOIN_NODE"/node.log | head -1 | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/')
+        [ "${got,,}" = "${snap_digest,,}" ] || { echo "FAIL: n$JOIN_NODE start-up digest ${got:-none} differs from the snapshot's $snap_digest"; exit 1; }
+        echo "snapshot test: n$JOIN_NODE started from the snapshot at block $snap_seq with its digest $got"
+    fi
+fi
+if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
+    tail -n +"$((switch_lines5 + 1))" "$WORK/n5/node.log" | grep -aq 'pruned storage: blocks before .* removed' \
+        || { echo "FAIL: n5 did not prune after switching to pruned storage"; exit 1; }
+    # n6, now full, must still start from the block its last pruning left, and prune no more
+    after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n6/node.log")
+    oldest_after=$(grep -a 'oldest block stored is' <<<"$after6" | head -1 | sed -E 's/.*stored is //' | tr -d "'")
+    [ -n "$pruned_before" ] && [ "$oldest_after" = "$pruned_before" ] \
+        || { echo "FAIL: n6 had pruned up to ${pruned_before:-none}, its oldest block after the switch is ${oldest_after:-none}"; exit 1; }
+    ! grep -aq 'pruned storage: blocks before .* removed' <<<"$after6" \
+        || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
+    echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
+fi
+
 # the round statistics of a node that applied a block twice no longer match its blockchain
 for i in $(seq 1 "$ALL_NODES"); do
     n=$(cat "$WORK/n$i"/*.log | grep -ac "counted transactions is different" || true)
