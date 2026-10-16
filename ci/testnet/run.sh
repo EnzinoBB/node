@@ -662,7 +662,7 @@ if [ "$SNAPSHOT_AT" -gt 0 ]; then
         grep -aq 'Caches for QUICK START loaded successfully' "$WORK/n$JOIN_NODE"/node.log \
             || { echo "FAIL: n$JOIN_NODE did not start from the snapshot"; exit 1; }
         read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' "$WORK/n$JOIN_NODE/snapshot.json")
-        got=$(grep -a "STATE DIGEST #$snap_seq " "$WORK/n$JOIN_NODE"/node.log | head -1 | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/')
+        got=$(grep -a -m1 "STATE DIGEST #$snap_seq " "$WORK/n$JOIN_NODE"/node.log | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' || true)
         [ "${got,,}" = "${snap_digest,,}" ] || { echo "FAIL: n$JOIN_NODE start-up digest ${got:-none} differs from the snapshot's $snap_digest"; exit 1; }
         echo "snapshot test: n$JOIN_NODE started from the snapshot at block $snap_seq with its digest $got"
     fi
@@ -674,7 +674,7 @@ if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
         || { echo "FAIL: n5 did not prune after switching to pruned storage"; exit 1; }
     # n6, now full, must still start from the block its last pruning left, and prune no more
     after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n6/node.log")
-    oldest_after=$(grep -a 'oldest block stored is' <<<"$after6" | head -1 | sed -E 's/.*stored is //' | tr -d "'")
+    oldest_after=$(grep -a -m1 'oldest block stored is' <<<"$after6" | sed -E 's/.*stored is //' | tr -d "'" || true)
     [ -n "$pruned_before" ] && [ "$oldest_after" = "$pruned_before" ] \
         || { echo "FAIL: n6 had pruned up to ${pruned_before:-none}, its oldest block after the switch is ${oldest_after:-none}"; exit 1; }
     ! grep -aq 'pruned storage: blocks before .* removed' <<<"$after6" \
