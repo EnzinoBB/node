@@ -8,6 +8,7 @@ name: Robustness
 # - the whole network killed at once and restarted, as after a power cut;
 # - a full disk on a RocksDB, LMDB or BerkeleyDB node; pruned storage on RocksDB with a node joining from block 0;
 # - a pruned node killed while it prunes;
+# - every block database, full and pruned, in one network, also with crashes and a power cut;
 # - packet loss, corruption, delay, reordering and a partition on some nodes, slow nodes, random
 #   datagrams, and all of them at once.
 # All scenarios run funded transfers and the usual restart test.
@@ -159,6 +160,15 @@ jobs:
           # all at once, on a mixed-backend network
           - name: chaos-mixed
             env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
+          # every block database, full and pruned, in one network (n4-n6 pruned; n8 joins from a
+          # snapshot of n5); then the same network with crashes of the pruned BerkeleyDB node, and
+          # with a power cut and packet corruption
+          - name: all-storage
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=5 SNAPSHOT_AT=2300 TARGET_SEQ=3300
+          - name: all-storage-crash
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_NODE=4 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=3300
+          - name: all-storage-power-cut
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_ALL_AT=2500 NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=2,6 TARGET_SEQ=3300
           # a node joining from a snapshot taken after the first pruning, and from a truncated one
           - name: snapshot-join
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100
@@ -218,7 +228,7 @@ jobs:
           chmod +x build/node
           # the scenario's variables come from the matrix above, NAME=value pairs only
           for kv in $SCENARIO; do
-            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9,]+$' || { echo "bad scenario entry $kv"; exit 1; }
+            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9,:]+$' || { echo "bad scenario entry $kv"; exit 1; }
             export "$kv"
           done
           echo "scenario: $SCENARIO"
