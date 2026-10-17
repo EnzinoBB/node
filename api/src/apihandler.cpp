@@ -2739,6 +2739,15 @@ void APIHandler::TransactionsListGet(api::TransactionsGetResult& _return, int64_
         }
         else {
             auto p = executor_.loadBlockApi(tPair.first);
+            // a pruned or unreadable block has no transactions to list: skip it rather than step
+            // an iterator past the end of an empty vector
+            if (!p.is_valid() || static_cast<size_t>(offset) >= p.transactions().size()) {
+                offset = 0;
+                if (limit) {
+                    tPair = blockchain_.getPreviousNonEmptyBlock(tPair.first);
+                }
+                continue;
+            }
             auto it = p.transactions().rbegin() + offset;
             offset = 0;
 
