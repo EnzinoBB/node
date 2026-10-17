@@ -33,6 +33,10 @@
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
+#        NODE_STORAGE (optional): the storage of every node in order, comma separated, each
+#        <berkeleydb|lmdb|rocksdb>[:pruned] (pruned: a checkpoint every 1'000 blocks and every minute,
+#        prune_keep_blocks=300); the entry after the last initial node is the joining node's. It takes
+#        precedence over DB_BACKEND, and every pruned node must prune
 #        SNAPSHOT_AT (default 0 = off, needs PRUNE_NODE): at that sequence the pruned node is stopped,
 #        started once without peers to log the digest of its head, packaged with
 #        packaging/docker/snapshot-make.sh and started again; one more node (NODES + 1) restores the
@@ -81,6 +85,7 @@ DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
 CONTRACTS=${CONTRACTS:-0}
 PRUNE_NODE=${PRUNE_NODE:-0}
+NODE_STORAGE=${NODE_STORAGE:-}
 DB_BACKEND=${DB_BACKEND:-}
 CRASH_NODE=${CRASH_NODE:-0}
 CRASH_TIMES=${CRASH_TIMES:-6}
@@ -94,6 +99,21 @@ STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
+declare -a STORE_BACKEND STORE_PRUNED
+if [ -n "$NODE_STORAGE" ]; then
+    IFS=, read -r -a entries <<<"$NODE_STORAGE"
+    [ "${#entries[@]}" -eq "$ALL_NODES" ] || { echo "NODE_STORAGE needs $ALL_NODES entries, has ${#entries[@]}"; exit 1; }
+    for i in $(seq 1 "$ALL_NODES"); do
+        e=${entries[$((i - 1))]}
+        [[ "$e" =~ ^(berkeleydb|lmdb|rocksdb)(:pruned)?$ ]] || { echo "bad NODE_STORAGE entry '$e'"; exit 1; }
+        STORE_BACKEND[$i]=${e%%:*}
+        STORE_PRUNED[$i]=$([ "$e" != "${e%:pruned}" ] && echo 1 || echo 0)
+    done
+fi
+# every node with pruned storage: the PRUNE_NODE, the joining node, and those of NODE_STORAGE
+PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
+    if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ] || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
+done | tr '\n' ' ')
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -198,8 +218,11 @@ storage_section() {
         mixed) backend=$(echo berkeleydb lmdb rocksdb | cut -d' ' -f$(( (i - 1) % 3 + 1 ))) ;;
         *) backend=$DB_BACKEND ;;
     esac
-    if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ]; then
-        { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
+    if [ -n "$NODE_STORAGE" ]; then
+        backend=${STORE_BACKEND[$i]}
+    fi
+    if [[ " $PRUNED_NODES " == *" $i "* ]]; then
+        [ -z "$NODE_STORAGE" ] && { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
         # pruning follows the periodic checkpoints only: it starts at #2000; a checkpoint a minute as
         # well, so that kills of a pruned node land right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
@@ -606,9 +629,13 @@ if [ "$CRASH_NODE" -gt 0 ]; then
         exit 1
     fi
 fi
-if [ -n "$DB_BACKEND" ]; then
+if [ -n "$DB_BACKEND" ] || [ -n "$NODE_STORAGE" ]; then
     for i in $(seq 1 "$ALL_NODES"); do
-        echo "n$i block database: $(grep -ah 'block database: ' "$WORK/n$i"/*.log | tail -1 | sed 's/.*block database: //')"
+        used=$(grep -ah 'block database: ' "$WORK/n$i"/*.log | tail -1 | sed 's/.*block database: //' || true)
+        echo "n$i block database: $used"
+        if [ -n "$NODE_STORAGE" ] && [ "${used%% *}" != "${STORE_BACKEND[$i]}" ]; then
+            echo "FAIL: n$i was to run on ${STORE_BACKEND[$i]}"; exit 1
+        fi
     done
 fi
 
@@ -633,8 +660,7 @@ for core in "$WORK"/core.* "$WORK"/n*/core*; do
     gdb -q -batch -ex "bt 40" "$BIN" "$core" 2>/dev/null | grep -E '^#' | head -n 40
 done
 
-for p in "$PRUNE_NODE" "$JOIN_NODE"; do
-    [ "$p" -gt 0 ] || continue
+for p in $PRUNED_NODES; do
     echo "pruned storage: n$p logged:"
     { grep -ah "pruned storage" "$WORK/n$p"/node.log || true; } | sed 's/^/  /' | tail -n 8
     # file by file, for the pruned node and a full one: block records, hash index, logs, environment
