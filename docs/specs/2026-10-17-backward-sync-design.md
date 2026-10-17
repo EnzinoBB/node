@@ -93,9 +93,7 @@ Until the index reaches block 0, an API history stops at the oldest block it can
 
 ### 7. Progress and completion
 
-- **Visibility.**
-  - A log line every 100,000 blocks with the lowest stored block, the rate and the estimated time left.
-  - The same figures in the API (`SyncStateGet` gets no new field; a new log-only figure is enough for this version).
+- **Visibility.** A log line every 100,000 blocks with the lowest stored block, the rate and the estimated time left. No API change in this version.
 - **At block 0:** a log line "full history stored", and the slow-start check (`storage.cpp:297-306`) accepts the database again.
 
 ### 8. Fixes found on the way (separate commits, cherry-pickable)
