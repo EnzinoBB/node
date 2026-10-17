@@ -1853,7 +1853,10 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
         return;
     }
 
-    if (poolsBlock.size() == 1 && poolsBlock.back().sequence() == neededSequence_) {
+    // The "necessary block" request is disabled (sendNecessaryBlockRequest sends nothing), so no reply
+    // to it can be legitimate: neededSequence_ stays 0, and a one-block reply for block 0 from any peer
+    // used to reach getNecessaryBlockRequest, erase end() of an empty vector and cache the peer's block.
+    if (!requestedKeys_.empty() && poolsBlock.size() == 1 && poolsBlock.back().sequence() == neededSequence_) {
         getNecessaryBlockRequest(poolsBlock, sender);
         return;
     }
@@ -5116,6 +5119,10 @@ void Node::sendNecessaryBlockRequest(csdb::PoolHash hash, cs::Sequence seq) {
 void Node::getNecessaryBlockRequest(cs::PoolsBlock& pBlock, const cs::PublicKey& sender) {
     csdebug() << __func__ << ": " << pBlock.back().sequence();
     auto it = std::find(requestedKeys_.begin(), requestedKeys_.end(), sender);
+    if (it == requestedKeys_.end()) {
+        // not a neighbour this node asked for the block
+        return;
+    }
     requestedKeys_.erase(it);
     if (neededHash_== csdb::PoolHash() || pBlock.back().hash() == neededHash_) {
         if (goodAnswers_ == 0) {
