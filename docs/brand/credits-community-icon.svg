@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Credits Community">
+  <defs><linearGradient id="cc-grad" gradientUnits="userSpaceOnUse" x1="96" y1="96" x2="416" y2="416"><stop offset="0" stop-color="#14B8A6"/><stop offset="1" stop-color="#6366F1"/></linearGradient></defs>
+  <path d="M390.8 142.9 A176 176 0 1 0 390.8 369.1" fill="none" stroke="url(#cc-grad)" stroke-width="21.1" stroke-linecap="round"/>
+  <line x1="256" y1="256" x2="390.8" y2="142.9" stroke="url(#cc-grad)" stroke-width="6.2" stroke-linecap="round" opacity="0.55"/>
+  <line x1="256" y1="256" x2="237.6" y2="81.0" stroke="url(#cc-grad)" stroke-width="6.2" stroke-linecap="round" opacity="0.55"/>
+  <line x1="256" y1="256" x2="100.6" y2="173.4" stroke="url(#cc-grad)" stroke-width="6.2" stroke-linecap="round" opacity="0.55"/>
+  <line x1="256" y1="256" x2="100.6" y2="338.6" stroke="url(#cc-grad)" stroke-width="6.2" stroke-linecap="round" opacity="0.55"/>
+  <line x1="256" y1="256" x2="237.6" y2="431.0" stroke="url(#cc-grad)" stroke-width="6.2" stroke-linecap="round" opacity="0.55"/>
+  <line x1="256" y1="256" x2="390.8" y2="369.1" stroke="url(#cc-grad)" stroke-width="6.2" stroke-linecap="round" opacity="0.55"/>
+  <circle cx="390.8" cy="142.9" r="26.4" fill="#FFFFFF" stroke="url(#cc-grad)" stroke-width="12.3"/>
+  <circle cx="237.6" cy="81.0" r="26.4" fill="#FFFFFF" stroke="url(#cc-grad)" stroke-width="12.3"/>
+  <circle cx="100.6" cy="173.4" r="26.4" fill="#FFFFFF" stroke="url(#cc-grad)" stroke-width="12.3"/>
+  <circle cx="100.6" cy="338.6" r="26.4" fill="#FFFFFF" stroke="url(#cc-grad)" stroke-width="12.3"/>
+  <circle cx="237.6" cy="431.0" r="26.4" fill="#FFFFFF" stroke="url(#cc-grad)" stroke-width="12.3"/>
+  <circle cx="390.8" cy="369.1" r="26.4" fill="#FFFFFF" stroke="url(#cc-grad)" stroke-width="12.3"/>
+  <circle cx="256" cy="256" r="38.7" fill="url(#cc-grad)"/>
+</svg>
