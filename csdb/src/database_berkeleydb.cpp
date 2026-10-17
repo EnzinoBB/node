@@ -117,6 +117,21 @@ void DatabaseBerkeleyDB::logfile_routine() {
     }
 }
 
+// Commits run with DB_TXN_NOSYNC, so their log records may still sit in the in-process log buffer.
+// Write and sync the log, or a checkpoint saved after this call could name blocks that a killed
+// process never put on disk, and the next start would refuse the database.
+bool DatabaseBerkeleyDB::flush() {
+    try {
+        const int status = env_.log_flush(nullptr);
+        set_last_error_from_berkeleydb(status);
+        return status == 0;
+    }
+    catch (const DbException& e) {
+        set_last_error_from_berkeleydb(e.get_errno());
+        return false;
+    }
+}
+
 void DatabaseBerkeleyDB::set_last_error_from_berkeleydb(int status) {
     Error err = UnknownError;
     if (status == 0) {
