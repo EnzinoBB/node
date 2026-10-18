@@ -46,6 +46,8 @@ add_executable(client
   include/client/cmdlineargs.hpp
   src/peer.cpp
   src/main.cpp
+  src/dbcheck.cpp
+  src/dbcheck.hpp
   "${CMAKE_CURRENT_BINARY_DIR}/version.cpp" include/client/version.hpp
 )
 
