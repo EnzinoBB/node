@@ -297,6 +297,34 @@ TEST(Convert, EstimateCoversTheWholeCopyUnlessTheSourceShrinks) {
     fs::remove_all(bdbDir);
 }
 
+TEST(Convert, ResumedEstimateCountsTheConvertedPart) {
+    // a node with just enough disk for the start must be able to resume: the old LMDB file keeps its
+    // size, but what is already in .convert-new no longer needs room
+    const auto chain = makeChain(0, 2000);
+    const auto dir = writeDb("lmdb", "estimate_resume", chain);
+    auto o = opts(dir, "lmdb", "rocksdb", 100);
+    int asked = 0;
+    o.stopRequested = [&] { return ++asked == 10; };
+    auto r = csdb::convert::run(o);
+    ASSERT_TRUE(r.stopped) << r.error;
+    ASSERT_TRUE(fs::exists(dir / ".convert"));
+    constexpr uint64_t margin = 256ULL << 20;
+    const uint64_t old = sourceBytes("lmdb", dir);      // what a fresh start on these files would count
+    uint64_t converted = 0;
+    for (const auto& e : fs::recursive_directory_iterator(dir / ".convert-new")) {
+        if (e.is_regular_file()) converted += e.file_size();
+    }
+    ASSERT_GT(converted, 0u);
+    const auto resumed = csdb::convert::estimatePeakBytes(dir.string(), "lmdb", 100);
+    EXPECT_EQ(resumed, (old > converted ? old - converted : 0) + margin);
+    EXPECT_LT(resumed, old + margin);
+    EXPECT_GE(resumed, margin);     // never below the margin
+    o.stopRequested = nullptr;
+    r = csdb::convert::run(o);
+    ASSERT_TRUE(r.ok) << r.error;
+    fs::remove_all(dir);
+}
+
 TEST(Convert, RefusesToDeleteAnOldBlockOutsideTheRange) {
     const auto chain = makeChain(0, 401);
     Chain first400 = chain;
