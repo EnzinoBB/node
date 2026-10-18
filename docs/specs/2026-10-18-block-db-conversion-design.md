@@ -59,13 +59,15 @@ Because checkpoints and the transaction index stay valid, the node quick-starts 
 
 ## 2. Conversion
 
-**Order: newest block first.** The node walks from the last stored block down to the first stored block. BerkeleyDB gives disk space back only from the end of its files (compaction with `DB_FREE_SPACE`, already used by pruning in bounded steps). The newest blocks are at the end of `blockchain.db`, so removing them first lets each compaction shorten the file. LMDB and RocksDB accept writes in any order.
+**Order: newest block first from berkeleydb, oldest block first from the others.** BerkeleyDB gives disk space back only from the end of its files (compaction with `DB_FREE_SPACE`, already used by pruning in bounded steps). The newest blocks are at the end of `blockchain.db`, so with a berkeleydb source the node walks from the last stored block down to the first, and each compaction shortens the file. LMDB and RocksDB sources do not shrink during the conversion anyway (see **Disk**), so from them the node walks from the first stored block up to the last. That order matters for a berkeleydb target: BerkeleyDB keeps blocks in a Recno table where record N is sequence + 1, and a first put far above record 1 creates every lower record in one operation. On mainnet (4,008,827 blocks, rocksdb to berkeleydb, newest first) that put failed with `BDB2055 Lock table is out of available lock entries` and `Db::put: Cannot allocate memory`; oldest first, the table grows record by record.
 
-**Batch.** 100,000 blocks by default (`--convert-batch N`). For each batch, from sequence `hi` down to `lo`:
+**Pruned database to berkeleydb: refused.** Its first block is far above record 1 in either order, so the conversion stops before anything is written: `a pruned block database cannot be converted to berkeleydb; use lmdb or rocksdb` (exit 3).
+
+**Batch.** 100,000 blocks by default (`--convert-batch N`). For each batch of sequences `lo`..`hi`, read and written in the conversion's order:
 
 1. read every block of the batch from the old database (`get(seq)`), parse it, take its hash;
 2. write them to the new database (`put(hash, seq, value)`), then `flush()` (the BerkeleyDB and RocksDB flush already syncs to disk, LMDB syncs on commit);
-3. verify: read each block back from the new database by sequence and by hash, compare the bytes, recompute the pool hash and check that block `seq` names block `seq-1`'s hash as previous (across batch boundaries too);
+3. verify: read each block back from the new database by sequence and by hash, compare the bytes, recompute the pool hash and check that block `seq` names block `seq-1`'s hash as previous (across batch boundaries too, through the hash recorded in the state file);
 4. record the batch in `db/.convert` (written to a temporary file, synced, renamed);
 5. remove the batch from the old database (`remove_batch`), then compact it (BerkeleyDB) or let the backend reclaim space (LMDB reuses pages, RocksDB compacts in the background).
 
@@ -80,11 +82,30 @@ from=berkeleydb
 to=lmdb
 first=0
 last=186002345
+order=desc
 done_down_to=185902346
+next_prev_hash=<hex: previous_hash of block 185902346, the hash block 185902345 must have>
 contracts=copied
+phase=blocks
 ```
 
-**Resume.** On start-up with `db/.convert` present, the node opens both databases and continues from `done_down_to - 1`. If it stopped between steps 2 and 4, the batch is in both databases: it is written again (idempotent) and verified. If it stopped during step 5, the batch is partly removed from the old database: removal is repeated for the keys still present.
+From lmdb or rocksdb:
+
+```
+from=rocksdb
+to=berkeleydb
+first=0
+last=186002345
+order=asc
+done_up_to=99999
+done_up_to_hash=<hex: hash of block 99999, which block 100000 must name as previous>
+contracts=copied
+phase=blocks
+```
+
+A state file without `order=` was written before the order was recorded and is read as `desc`. Each order has its own boundary key; a file with the other order's key is unreadable.
+
+**Resume.** On start-up with `db/.convert` present, the node opens both databases and continues in the recorded order, from `done_down_to - 1` downwards or from `done_up_to + 1` upwards. If it stopped between steps 2 and 4, the batch is in both databases: it is written again (idempotent) and verified. If it stopped during step 5, the batch is partly removed from the old database: removal is repeated for the keys still present.
 
 **End.**
 
@@ -97,7 +118,7 @@ Then the node starts normally, or exits with `--convert-only`.
 
 **Disk.** With a berkeleydb source, peak use is the old database plus one batch in the new format plus the compaction work space, about 1 GB on mainnet. With an lmdb or rocksdb source the old files do not shrink during the conversion (LMDB never shrinks `data.mdb`, RocksDB deletes are tombstones compacted later), so the peak is about the old plus the whole new database, and the node checks for that much free space. Before starting, the node estimates this and refuses (exit 3) when the free space is lower, naming both numbers.
 
-**Pruned nodes.** The same procedure over the stored range `first_sequence()`..`last`; the converted node keeps its pruning settings.
+**Pruned nodes.** The same procedure over the stored range `first_sequence()`..`last`, to lmdb or rocksdb; the converted node keeps its pruning settings. To berkeleydb a pruned database is refused (see **Order**).
 
 ## 3. Docker
 
