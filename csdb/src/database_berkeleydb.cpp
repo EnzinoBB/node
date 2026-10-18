@@ -73,15 +73,22 @@ DatabaseBerkeleyDB::DatabaseBerkeleyDB()
 , db_contracts_(nullptr) {}
 
 DatabaseBerkeleyDB::~DatabaseBerkeleyDB() {
-    std::cout << "Attempt db_blocks_ to close...\n" << std::flush;
-    db_blocks_->close(0);
-    std::cout << "DB db_blocks_ was closed.\n" << std::flush;
-    std::cout << "Attempt db_seq_no_ to close...\n" << std::flush;
-    db_seq_no_->close(0);
-    std::cout << "DB db_seq_no_ was closed.\n" << std::flush;
-    std::cout << "Attempt db_contracts_ to close...\n" << std::flush;
-    db_contracts_->close(0);
-    std::cout << "DB db_contracts_ was closed.\n" << std::flush;
+    // after a failed open some handles were never created
+    if (db_blocks_) {
+        std::cout << "Attempt db_blocks_ to close...\n" << std::flush;
+        db_blocks_->close(0);
+        std::cout << "DB db_blocks_ was closed.\n" << std::flush;
+    }
+    if (db_seq_no_) {
+        std::cout << "Attempt db_seq_no_ to close...\n" << std::flush;
+        db_seq_no_->close(0);
+        std::cout << "DB db_seq_no_ was closed.\n" << std::flush;
+    }
+    if (db_contracts_) {
+        std::cout << "Attempt db_contracts_ to close...\n" << std::flush;
+        db_contracts_->close(0);
+        std::cout << "DB db_contracts_ was closed.\n" << std::flush;
+    }
     if (logfile_thread_.joinable()) {
         quit_ = true;
         logfile_thread_.join();
@@ -190,20 +197,21 @@ bool DatabaseBerkeleyDB::open(const std::string &path) {
     });
 
     if (!status) {
-        auto db_blocks = new Db(&env_, 0);
+        // owned before open: when open throws, ~Db closes the handle, so the environment can close
+        std::unique_ptr<Db> db_blocks(new Db(&env_, 0));
         status = db_blocks->open(txn, "blockchain.db", NULL, DB_RECNO, DB_CREATE | DB_READ_UNCOMMITTED, 0);
-        db_blocks_.reset(db_blocks);
+        db_blocks_ = std::move(db_blocks);
     }
     if (!status) {
-        auto db_seq_no = new Db(&env_, 0);
+        std::unique_ptr<Db> db_seq_no(new Db(&env_, 0));
         status = db_seq_no->open(txn, "sequence.db", NULL, DB_HASH, DB_CREATE | DB_READ_UNCOMMITTED, 0);
-        db_seq_no_.reset(db_seq_no);
+        db_seq_no_ = std::move(db_seq_no);
     }
     if (status == 0) {
         // until the explanation found suppress exceptions particularly on db close()
-        auto db_contracts = new Db(&env_, 0/*DB_CXX_NO_EXCEPTIONS*/);
+        std::unique_ptr<Db> db_contracts(new Db(&env_, 0/*DB_CXX_NO_EXCEPTIONS*/));
         status = db_contracts->open(txn, "contracts.db", NULL, DB_HASH, DB_CREATE | DB_READ_UNCOMMITTED, 0);
-        db_contracts_.reset(db_contracts);
+        db_contracts_ = std::move(db_contracts);
     }
     if (status) {
         set_last_error_from_berkeleydb(status);
