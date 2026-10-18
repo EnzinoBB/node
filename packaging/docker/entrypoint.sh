@@ -21,6 +21,7 @@ API=${CREDITS_API:-off}
 EXECUTOR=${CREDITS_EXECUTOR:-on}
 RESET=${CREDITS_RESET:-0}
 DIGEST_WAIT=${CREDITS_DIGEST_WAIT:-600}
+CONVERT_ARGS=()
 
 log() { echo "[entrypoint] $*"; }
 refuse() { log "NOT STARTING: $*"; log "To start over (the current data is moved to $DATA/old-<date>, not deleted), set CREDITS_RESET=1 once."; exit "${2:-3}"; }
@@ -98,8 +99,14 @@ fi
 if has_data; then
     if [ -f .storage ]; then
         read -r rec_mode rec_backend < <(sed -E 's/mode=([a-z]+) backend=([a-z]+)/\1 \2/' .storage)
-        [ "$rec_backend" = "$cfg_backend" ] \
-            || refuse "the data was written by $rec_backend, config.ini asks for $cfg_backend; checkpoints and caches belong to the old database"
+        if [ "$rec_backend" != "$cfg_backend" ]; then
+            if [ "${CREDITS_CONVERT_DB:-}" = yes ]; then
+                log "converting the block database from $rec_backend to $cfg_backend (CREDITS_CONVERT_DB=yes)"
+                CONVERT_ARGS=(--convert-db)
+            else
+                refuse "the data was written by $rec_backend, config.ini asks for $cfg_backend: set CREDITS_CONVERT_DB=yes to convert it, or set CREDITS_DB_BACKEND=$rec_backend (and db_backend in config.ini)" 3
+            fi
+        fi
         if [ "$rec_mode" = pruned ] && [ "$cfg_mode" = full ]; then
             refuse "this node pruned its old blocks, so it cannot become a full node; a full node syncs from block 0"
         fi
@@ -159,4 +166,5 @@ if [ -f snapshot.json ] && [ ! -f snapshot.verified ]; then
 fi
 
 exec "$OPT/node" --db-path db --config-file config.ini \
-    --public-key-file keys/NodePublic.txt --private-key-file keys/NodePrivate.txt
+    --public-key-file keys/NodePublic.txt --private-key-file keys/NodePrivate.txt \
+    "${CONVERT_ARGS[@]}"

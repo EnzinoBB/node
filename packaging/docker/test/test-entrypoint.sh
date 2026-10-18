@@ -157,4 +157,22 @@ set +e; out=$(run "$d"); rc=$?; set -e
 [ -e "$d/pwned" ] && fail "malicious snapshot.json ran a command"
 pass "malicious snapshot.json refused"
 
+# 13. backend change without CREDITS_CONVERT_DB: refused, with the hint
+d=$(withdata 13)
+sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$d/config.ini"
+set +e; out=$(run "$d"); rc=$?; set -e
+[ "$rc" = 3 ] && grep -q 'CREDITS_CONVERT_DB=yes' <<<"$out" || { echo "$out"; fail "backend change hint: exit $rc"; }
+pass "backend change refused with the conversion hint"
+
+# 14. backend change with CREDITS_CONVERT_DB=yes: the node gets --convert-db, .storage follows the config
+d=$(withdata 14)
+sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$d/config.ini"
+out=$(run "$d" -e CREDITS_CONVERT_DB=yes)
+grep -q -- '--convert-db' "$d/stub-args" || { echo "$out"; fail "convert: no --convert-db"; }
+grep -q 'mode=pruned backend=rocksdb' "$d/.storage" || fail "convert: record"
+d=$(withdata 15)
+run "$d" -e CREDITS_CONVERT_DB=yes >/dev/null
+grep -q -- '--convert-db' "$d/stub-args" && fail "--convert-db passed without a backend change"
+pass "CREDITS_CONVERT_DB=yes converts on a backend change only"
+
 echo "PASS: entrypoint"
