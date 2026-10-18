@@ -140,6 +140,11 @@ jobs:
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           - name: lmdb-pruned-crash
             env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
+          # docker stop with a short timeout: SIGTERM, then SIGKILL while the node shuts down
+          - name: lmdb-pruned-term-kill
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 TARGET_SEQ=3000
+          - name: berkeleydb-term-kill
+            env: DB_BACKEND=berkeleydb TERM_KILL_NODE=3
           # a pruned node that lost its transaction index cannot slow-start: it rebuilds it from its blocks
           - name: lmdb-pruned-index-loss
             env: DB_BACKEND=lmdb PRUNE_NODE=6 INDEX_LOSS_AT=2300 TARGET_SEQ=3000
