@@ -31,6 +31,7 @@ add_library(${PROJECT_NAME} STATIC
   src/currency.cpp
   src/wallet.cpp
   src/storage.cpp
+  src/storage_backend.cpp
   src/binary_streams.cpp
   src/binary_streams.hpp
   src/utils.cpp
@@ -58,6 +59,7 @@ add_library(${PROJECT_NAME} STATIC
   include/csdb/currency.hpp
   include/csdb/wallet.hpp
   include/csdb/storage.hpp
+  include/csdb/storage_backend.hpp
   include/csdb/database.hpp
   include/csdb/user_field.hpp
   )
