@@ -122,3 +122,31 @@ TEST(DbCheck, NoConversionWhileAnotherProcessHoldsTheDatabase) {
     fs::remove_all(dir);
 }
 #endif
+
+TEST(DbCheck, PrunedDatabaseToBerkeleyDbStops) {
+    // the converter refuses a pruned database to berkeleydb: --convert-db stops with nothing changed
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "cs_dbcheck_pruned_to_bdb";
+    fs::remove_all(dir);
+    {
+        auto db = csdb::backend::open("lmdb", dir.string());
+        ASSERT_TRUE(db);
+        for (uint32_t s = 1000; s < 1100; ++s) {
+            ASSERT_TRUE(db->put(cs::Bytes(32, static_cast<cs::Byte>(s)), s, cs::Bytes(100, 1)));
+        }
+        db->flush();
+    }
+    EXPECT_EQ(dbcheck::check(dir.string(), "berkeleydb", true, false, 100000), 3);   // --convert-db
+    EXPECT_EQ(dbcheck::check(dir.string(), "berkeleydb", true, true, 100000), 3);    // --convert-only
+    EXPECT_FALSE(fs::exists(dir / ".convert"));
+    EXPECT_FALSE(fs::exists(dir / ".convert-new"));
+    EXPECT_TRUE(csdb::backend::files("berkeleydb", dir.string()).empty());
+    EXPECT_EQ(csdb::backend::detect(dir.string()), std::vector<std::string>{"lmdb"});
+    {
+        auto db = csdb::backend::open("lmdb", dir.string());
+        ASSERT_TRUE(db);
+        cs::Bytes v;
+        for (uint32_t s = 1000; s < 1100; ++s) ASSERT_TRUE(db->get(s, &v)) << s;
+    }
+    fs::remove_all(dir);
+}
