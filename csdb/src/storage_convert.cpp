@@ -152,8 +152,14 @@ uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, u
     for (const auto& p : files) bytes += pathBytes(p);
     constexpr uint64_t kMargin = 256ULL << 20;
     // LMDB never shrinks data.mdb and RocksDB deletes are tombstones compacted later: the old files
-    // keep their size until they are deleted at the end, so the new database needs room for all of it
-    if (from != "berkeleydb") return bytes + kMargin;
+    // keep their size until they are deleted at the end, so the new database needs room for all of it,
+    // less what a resumed conversion already holds in .convert-new
+    if (from != "berkeleydb") {
+        std::error_code ec;
+        const fs::path dir(dbPath);
+        const uint64_t done = fs::exists(dir / kStateFile, ec) ? folderBytes(dir / kNewDir) : 0;
+        return (bytes > done ? bytes - done : 0) + kMargin;
+    }
     auto db = backend::open(from, dbPath);
     if (!db) return bytes;
     auto it = db->new_iterator();

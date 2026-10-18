@@ -42,6 +42,7 @@ struct State {                          // db/.convert
 
 bool readState(const std::string& dbPath, State& out);    // false if absent or malformed
 bool writeState(const std::string& dbPath, const State& s);
+// free space the conversion needs; a resumed conversion from lmdb or rocksdb counts what .convert-new holds
 uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, uint32_t batch);
 Result run(const Options& opt);         // starts a new conversion or resumes db/.convert
 
