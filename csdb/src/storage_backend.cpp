@@ -66,9 +66,28 @@ std::vector<std::string> detect(const std::string& dbPath) {
     if (!fs::is_directory(dir, ec)) {
         return found;   // first start: no db/ yet
     }
+    // fingerprints from the files alone; an engine is opened only where the files cannot tell
     if (bigger(dir / "blockchain.db") && fs::exists(dir / "sequence.db")) found.push_back("berkeleydb");
-    if (bigger(dir / "lmdb" / "data.mdb") && hasBlocks("lmdb", dbPath)) found.push_back("lmdb");
-    if (fs::exists(dir / "CURRENT") && anyMatching(dir, "MANIFEST-") && hasBlocks("rocksdb", dbPath)) found.push_back("rocksdb");
+    if (bigger(dir / "lmdb" / "data.mdb")) found.push_back("lmdb");     // a fresh LMDB file is 12 KB
+    const bool rocksdb = fs::exists(dir / "CURRENT") && anyMatching(dir, "MANIFEST-");
+    if (found.empty() && rocksdb) {
+        // a fresh, empty RocksDB has CURRENT and a MANIFEST too, but no table file yet: only then
+        // is the small database opened to look for blocks
+        bool tables = false;
+        for (const auto& e : fs::directory_iterator(dir, ec)) {
+            if (e.path().extension() == ".sst") { tables = true; break; }
+        }
+        if (tables || hasBlocks("rocksdb", dbPath)) found.push_back("rocksdb");
+        return found;
+    }
+    if (rocksdb) found.push_back("rocksdb");
+    if (found.size() > 1) {
+        // two formats only decide something when both hold blocks: an empty one, e.g. a target
+        // created by a node started with the other backend, does not count
+        found.erase(std::remove_if(found.begin(), found.end(),
+                                   [&](const std::string& b) { return b != "berkeleydb" && !hasBlocks(b, dbPath); }),
+                    found.end());
+    }
     std::sort(found.begin(), found.end());
     return found;
 }
