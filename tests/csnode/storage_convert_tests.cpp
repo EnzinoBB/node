@@ -223,6 +223,53 @@ TEST(Convert, RefusesToResumeWithoutTheNewFolder) {
     fs::remove_all(dir);
 }
 
+TEST(Convert, RefusesToResumeOverTargetFilesThatAppearedInAPause) {
+    // a node started on db/ during a pause created an empty lmdb database there: moving the converted
+    // one into db/ would collide with it
+    const auto chain = makeChain(0, 400);
+    const auto dir = writeDb("berkeleydb", "stray_target", chain);
+    auto o = opts(dir, "berkeleydb", "lmdb", 100);
+    int asked = 0;
+    o.stopRequested = [&] { return ++asked == 2; };
+    ASSERT_TRUE(csdb::convert::run(o).stopped);
+    csdb::convert::State before;
+    ASSERT_TRUE(csdb::convert::readState(dir.string(), before));
+    { auto stray = csdb::backend::open("lmdb", dir.string()); ASSERT_TRUE(stray); }
+    o.stopRequested = nullptr;
+    auto r = csdb::convert::run(o);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("not part of the conversion"), std::string::npos) << r.error;
+    csdb::convert::State after;
+    ASSERT_TRUE(csdb::convert::readState(dir.string(), after));
+    EXPECT_EQ(after.doneDownTo, before.doneDownTo);
+    {
+        auto db = csdb::backend::open("berkeleydb", dir.string());
+        ASSERT_TRUE(db);
+        cs::Bytes v;
+        for (uint32_t seq = 0; seq < uint32_t(before.doneDownTo); ++seq) ASSERT_TRUE(db->get(seq, &v)) << seq;
+    }
+    fs::remove_all(dir / "lmdb");
+    r = csdb::convert::run(o);
+    ASSERT_TRUE(r.ok) << r.error;
+    expectSame("lmdb", dir, chain);
+    fs::remove_all(dir);
+}
+
+TEST(Convert, FinishKeepsTheOldFilesWithoutTheNewDatabase) {
+    const auto chain = makeChain(0, 100);
+    const auto dir = writeDb("berkeleydb", "finish_without_new", chain);
+    csdb::convert::State s;
+    s.from = "berkeleydb"; s.to = "lmdb"; s.first = 0; s.last = 99;
+    s.doneDownTo = 0; s.contractsCopied = true; s.moving = true;
+    ASSERT_TRUE(csdb::convert::writeState(dir.string(), s));
+    auto r = csdb::convert::run(opts(dir, "berkeleydb", "lmdb"));
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("files are kept"), std::string::npos) << r.error;
+    EXPECT_TRUE(fs::exists(dir / "blockchain.db"));
+    EXPECT_TRUE(fs::exists(dir / ".convert"));
+    fs::remove_all(dir);
+}
+
 TEST(Convert, FinishesAnInterruptedMove) {
     // a crash while the new files were moved into db/: only the move is left to do
     const auto chain = makeChain(0, 100);

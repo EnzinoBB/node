@@ -78,6 +78,11 @@ Result finish(const Options& opt, const State& st, Result r, std::chrono::steady
     const fs::path dir(opt.dbPath);
     const fs::path newDir = dir / kNewDir;
     std::error_code ec;
+    // the old files go only when the new database is there: still in .convert-new, or already
+    // moved into db/ by an interrupted finish
+    if (backend::files(st.to, newDir.string()).empty() && backend::files(st.to, opt.dbPath).empty()) {
+        return failed(r, "the " + st.to + " database is neither in db/.convert-new nor in db/: the " + opt.from + " files are kept");
+    }
     for (const auto& p : backend::files(opt.from, opt.dbPath)) {
         fs::remove_all(p, ec);
         if (ec) return failed(r, "cannot remove " + p.string() + ": " + ec.message());
@@ -195,6 +200,14 @@ Result run(const Options& opt) {
         // blocks recorded as converted are only in .convert-new: without it, stop before removing more
         if (!st.moving && (st.doneDownTo >= 0 || st.contractsCopied) && !fs::exists(newDir)) {
             return failed(r, "db/.convert records converted data but db/.convert-new is missing");
+        }
+        // files of the target backend that appeared in db/ during a pause (another node started there)
+        // would collide with the new ones when they move into db/
+        if (!st.moving) {
+            const auto existing = backend::files(opt.to, opt.dbPath);
+            if (!existing.empty()) {
+                return failed(r, "db/ holds " + opt.to + " files (" + existing.front().string() + ") that are not part of the conversion: remove them to resume");
+            }
         }
         say(opt, "resuming the conversion from " + st.from + " to " + st.to
                  + (st.doneDownTo < 0 ? std::string(" from the start") : " below block " + std::to_string(st.doneDownTo)));
