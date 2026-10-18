@@ -66,6 +66,17 @@ Differences from the official package:
 - The executor listens on 127.0.0.1 only (contract.executor.host in settings.properties
   changes it). Keep port 9080 closed to other hosts anyway.
 
+Changing the block database (db_backend)
+- The node recognises the format of an existing db/ folder. If config.ini asks for another one, it
+  offers to convert it (from a terminal), or stops and explains how (without a terminal). Run
+  ./node --convert-only to convert and exit, or ./node --convert-db to convert and start.
+  The conversion goes batch by batch and needs about 1 GB free beyond the database when
+  converting from berkeleydb; about the size of the database again when converting from lmdb
+  or rocksdb (their files do not shrink until the conversion ends). If interrupted it resumes
+  at the next start. Checkpoints and the transaction index are kept, so the node quick-starts
+  afterwards. The official node only reads berkeleydb: convert back before running it on this
+  folder. In Docker, use CREDITS_CONVERT_DB=yes.
+
 Start: cd csnode && ./node
 EOF
 
