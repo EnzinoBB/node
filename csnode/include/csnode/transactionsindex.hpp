@@ -1,6 +1,7 @@
 #ifndef TRANSACTIONSINDEX_HPP
 #define TRANSACTIONSINDEX_HPP
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -42,6 +43,13 @@ public:
 
     // wipe lastIndexedPool_ and arm recreate_ so the next slow-start fully repopulates.
     void forceRebuild();
+
+    // pruned storage has no old blocks for a slow start: after a quick start the index is rebuilt
+    // from the blocks the node stores. deferRebuild() makes the start-up read of the database leave
+    // the index alone; rebuildFrom() then walks first..last and marks the index complete.
+    void deferRebuild();
+    bool rebuildDeferred() const;
+    void rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load);
 
     Sequence getPrevTransBlock(const csdb::Address& _addr, Sequence _curr) const;
 
@@ -87,6 +95,7 @@ private:
     bool recreate_ = false;
     bool indexIncomplete_ = false;
     bool indexComplete_ = false;
+    bool rebuildDeferred_ = false;
 
     std::map<csdb::Address, cs::Sequence> lapoos_;
 };

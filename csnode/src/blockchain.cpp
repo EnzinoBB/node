@@ -134,7 +134,24 @@ bool BlockChain::init(
     bool successfulQuickStart = false;
 
     if (newBlockchainTop == cs::kWrongSequence) {
-        if (trxIndex_->recreate() || !trxIndex_->isReady() || trxIndex_->looksEmpty()) {
+        const bool indexNeedsRebuild = trxIndex_->recreate() || !trxIndex_->isReady() || trxIndex_->looksEmpty();
+        // pruned storage has no old blocks to slow-start from: quick-start, then rebuild the index from
+        // the stored blocks (a slow start stays the way when there is no usable checkpoint)
+        const bool prunedStorage = cs::ConfigHolder::instance().config()->getStorageSettings().pruneKeepBlocks > 0;
+        if (indexNeedsRebuild && prunedStorage) {
+            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
+            if (successfulQuickStart) {
+                cswarning() << "trxIndex needs rebuild — pruned storage: QUICK START, then rebuild it from the stored blocks";
+                trxIndex_->deferRebuild();
+            }
+            else {
+                cswarning() << "trxIndex needs rebuild — pruned storage without a usable checkpoint: slow start";
+                if (!trxIndex_->recreate()) {
+                    trxIndex_->forceRebuild();
+                }
+            }
+        }
+        else if (indexNeedsRebuild) {
             cswarning() << "trxIndex needs rebuild — skipping QuickStart, slow-start will populate it";
             if (!trxIndex_->recreate()) {
                 trxIndex_->forceRebuild();
@@ -153,7 +170,9 @@ bool BlockChain::init(
     if (successfulQuickStart) {
         if (lastSequence_ != 0) {
             firstBlockToReadInDatabase = lastSequence_ + 1;
-            trxIndex_->pinFloor(lastSequence_.load());
+            if (!trxIndex_->rebuildDeferred()) {
+                trxIndex_->pinFloor(lastSequence_.load());
+            }
             emit successfullQuickStartEvent(csdb::Amount(blockRewardIntegral_, blockRewardFraction_), csdb::Amount(miningCoefficientIntegral_, miningCoefficientFraction_), miningOn_, stakingOn_, TimeMinStage1_);
         }
 
@@ -177,7 +196,7 @@ bool BlockChain::init(
         }
         if (checkTrxIndexRecreate) {
           checkTrxIndexRecreate = false;
-          if (trxIndex_->recreate() && successfulQuickStart) {
+          if (trxIndex_->recreate() && successfulQuickStart && !trxIndex_->rebuildDeferred()) {
               cslog() << "Blockchain: TrxIndex must be recreated, cancel QUICK START... Restart NODE, please";
               trxIndex_->invalidate();
               return true;
@@ -232,6 +251,12 @@ bool BlockChain::init(
         if (!postInitFromDB(successfulQuickStart)) {
             return false;
         }
+    }
+
+    if (trxIndex_->rebuildDeferred()) {
+        trxIndex_->rebuildFrom(firstStoredSeq_.load(), lastSequence_.load(), [this](cs::Sequence seq) {
+            return storage_.pool_load(seq);
+        });
     }
 
     if (!successfulQuickStart && !stop_ && serializationManPtr_) {
