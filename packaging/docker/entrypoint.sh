@@ -103,7 +103,6 @@ if has_data; then
         if [ "$rec_backend" != "$cfg_backend" ]; then
             if [ "${CREDITS_CONVERT_DB:-}" = yes ]; then
                 log "converting the block database from $rec_backend to $cfg_backend (CREDITS_CONVERT_DB=yes)"
-                CONVERT_ARGS=(--convert-db)
             else
                 refuse "the data was written by $rec_backend, config.ini asks for $cfg_backend: set CREDITS_CONVERT_DB=yes to convert it, or set CREDITS_DB_BACKEND=$rec_backend (and db_backend in config.ini)" 3
             fi
@@ -124,6 +123,9 @@ elif [ "$cfg_mode" = pruned ] && [ "$SNAPSHOT" = auto ]; then
     fi
 fi
 echo "mode=$cfg_mode backend=$cfg_backend" > .storage
+# the node decides from db/ itself (nothing to do when the formats match): passed on every start, so
+# a conversion refused or paused by the node is retried after .storage already follows config.ini
+[ "${CREDITS_CONVERT_DB:-}" != yes ] || CONVERT_ARGS=(--convert-db)
 
 for f in settings.properties known_hosts.txt default_confidants.txt; do
     [ -e "$f" ] || cp "$OPT/$f" "$f"

@@ -170,9 +170,23 @@ sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$d/config.ini"
 out=$(run "$d" -e CREDITS_CONVERT_DB=yes)
 grep -q -- '--convert-db' "$d/stub-args" || { echo "$out"; fail "convert: no --convert-db"; }
 grep -q 'mode=pruned backend=rocksdb' "$d/.storage" || fail "convert: record"
+# a later start (the node refused or paused, .storage already rewritten) still passes the flag
+run "$d" -e CREDITS_CONVERT_DB=yes >/dev/null
+grep -q -- '--convert-db' "$d/stub-args" || fail "convert: no --convert-db at the next start"
+# with CREDITS_CONVERT_DB=yes the node always gets the flag and decides itself; without it never
 d=$(withdata 15)
 run "$d" -e CREDITS_CONVERT_DB=yes >/dev/null
-grep -q -- '--convert-db' "$d/stub-args" && fail "--convert-db passed without a backend change"
-pass "CREDITS_CONVERT_DB=yes converts on a backend change only"
+grep -q -- '--convert-db' "$d/stub-args" || fail "no --convert-db with CREDITS_CONVERT_DB=yes and no backend change"
+run "$d" >/dev/null
+grep -q -- '--convert-db' "$d/stub-args" && fail "--convert-db passed without CREDITS_CONVERT_DB"
+pass "CREDITS_CONVERT_DB=yes always passes --convert-db, without it never"
+
+# 16. db/.lock alone is no data: the snapshot restore still runs
+d=$(newdata 16)
+mkdir -p "$d/db"
+touch "$d/db/.lock"
+out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
+grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "restore over db/.lock"; }
+pass "db/.lock alone does not count as data"
 
 echo "PASS: entrypoint"
