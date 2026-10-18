@@ -150,6 +150,10 @@ uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, u
     if (files.empty()) return 0;    // opening would create an empty database
     uint64_t bytes = 0;
     for (const auto& p : files) bytes += pathBytes(p);
+    constexpr uint64_t kMargin = 256ULL << 20;
+    // LMDB never shrinks data.mdb and RocksDB deletes are tombstones compacted later: the old files
+    // keep their size until they are deleted at the end, so the new database needs room for all of it
+    if (from != "berkeleydb") return bytes + kMargin;
     auto db = backend::open(from, dbPath);
     if (!db) return bytes;
     auto it = db->new_iterator();
@@ -160,8 +164,9 @@ uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, u
     it->seek_to_last();
     const uint64_t blocks = it->key() - first + 1;
     const uint64_t perBlock = bytes / std::max<uint64_t>(blocks, 1);
-    // one batch in the new format, plus the same again for compaction and the engines' logs
-    return 2 * perBlock * std::min<uint64_t>(batch, blocks) + (256ULL << 20);
+    // BerkeleyDB gives each removed batch back: one batch in the new format, plus the same again for
+    // compaction and the engines' logs
+    return 2 * perBlock * std::min<uint64_t>(batch, blocks) + kMargin;
 }
 
 Result run(const Options& opt) {
@@ -354,6 +359,37 @@ Result run(const Options& opt) {
         uint64_t n = 0;
         newDb->forEachContractData([&](const cs::Bytes&, const cs::Bytes&) { ++n; return true; });
         r.contracts = n;
+    }
+
+    // the old files are deleted next, irreversibly: whatever is left in them must be in the new database
+    {
+        auto it = oldDb->new_iterator();
+        if (!it) return failed(r, "cannot read the " + opt.from + " database");
+        for (it->seek_to_first(); it->is_valid(); it->next()) {
+            const uint32_t seq = it->key();
+            const auto at = "block " + std::to_string(seq);
+            if (seq < st.first || seq > st.last) {
+                return failed(r, at + " is in the " + opt.from + " database but outside the converted range "
+                                 + std::to_string(st.first) + ".." + std::to_string(st.last));
+            }
+            cs::Bytes inNew;
+            if (!newDb->get(seq, &inNew) || inNew != it->value()) {
+                return failed(r, at + " left in the " + opt.from + " database differs from the converted one");
+            }
+        }
+    }
+    {
+        std::string bad;
+        bool readOk = oldDb->forEachContractData([&](const cs::Bytes& k, const cs::Bytes& v) {
+            cs::Bytes inNew;
+            if (!newDb->getContractData(k, inNew) || inNew != v) {
+                bad = hex(k);
+                return false;
+            }
+            return true;
+        });
+        if (!readOk) return failed(r, "cannot read the contract records: " + oldDb->last_error_message());
+        if (!bad.empty()) return failed(r, "contract record " + bad + " in the " + opt.from + " database is missing or differs in the converted one");
     }
 
     newDb.reset();

@@ -265,3 +265,92 @@ TEST(Convert, StateRoundTrips) {
     EXPECT_FALSE(csdb::convert::readState(dir.string(), back));
     fs::remove_all(dir);
 }
+
+namespace {
+uint64_t sourceBytes(const std::string& backend, const fs::path& dir) {
+    uint64_t n = 0;
+    for (const auto& p : csdb::backend::files(backend, dir.string())) {
+        if (fs::is_directory(p)) {
+            for (const auto& e : fs::recursive_directory_iterator(p)) {
+                if (e.is_regular_file()) n += e.file_size();
+            }
+        }
+        else {
+            n += fs::file_size(p);
+        }
+    }
+    return n;
+}
+}  // namespace
+
+TEST(Convert, EstimateCoversTheWholeCopyUnlessTheSourceShrinks) {
+    const auto chain = makeChain(0, 500);
+    const auto lmdbDir = writeDb("lmdb", "estimate_lmdb", chain);
+    const auto bdbDir = writeDb("berkeleydb", "estimate_bdb", chain);
+    // batch 1: in so small a database BerkeleyDB's environment files (MBs) dominate the size per block
+    const auto lmdbEstimate = csdb::convert::estimatePeakBytes(lmdbDir.string(), "lmdb", 1);
+    const auto bdbEstimate = csdb::convert::estimatePeakBytes(bdbDir.string(), "berkeleydb", 1);
+    // LMDB keeps its file size while blocks leave it: the new copy needs room for all of it
+    EXPECT_GE(lmdbEstimate, sourceBytes("lmdb", lmdbDir));
+    EXPECT_LT(bdbEstimate, lmdbEstimate);
+    fs::remove_all(lmdbDir);
+    fs::remove_all(bdbDir);
+}
+
+TEST(Convert, RefusesToDeleteAnOldBlockOutsideTheRange) {
+    const auto chain = makeChain(0, 401);
+    Chain first400 = chain;
+    first400.blocks.pop_back();
+    first400.hashes.pop_back();
+    const auto dir = writeDb("lmdb", "late_block", first400);
+    auto o = opts(dir, "lmdb", "rocksdb");
+    o.stopRequested = [] { return true; };
+    auto r = csdb::convert::run(o);
+    ASSERT_TRUE(r.stopped) << r.error;
+    {
+        // a block arrives in the old database after the range was recorded
+        auto db = csdb::backend::open("lmdb", dir.string());
+        ASSERT_TRUE(db);
+        ASSERT_TRUE(db->put(chain.hashes[400], 400, chain.blocks[400]));
+        db->flush();
+    }
+    o.stopRequested = nullptr;
+    r = csdb::convert::run(o);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("block 400"), std::string::npos) << r.error;
+    EXPECT_TRUE(fs::exists(dir / ".convert"));
+    auto db = csdb::backend::open("lmdb", dir.string());
+    ASSERT_TRUE(db);
+    cs::Bytes v;
+    ASSERT_TRUE(db->get(400u, &v));
+    EXPECT_EQ(v, chain.blocks[400]);
+    db.reset();
+    fs::remove_all(dir);
+}
+
+TEST(Convert, RefusesToDeleteAChangedContractRecord) {
+    const auto chain = makeChain(0, 200);
+    const auto dir = writeDb("berkeleydb", "changed_contract", chain);
+    auto o = opts(dir, "berkeleydb", "lmdb");
+    o.stopRequested = [] { return true; };
+    auto r = csdb::convert::run(o);
+    ASSERT_TRUE(r.stopped) << r.error;
+    {
+        auto db = csdb::backend::open("berkeleydb", dir.string());
+        ASSERT_TRUE(db);
+        ASSERT_TRUE(db->updateContractData(cs::Bytes(32, 2), cs::Bytes(50, 9)));
+        db->flush();
+    }
+    o.stopRequested = nullptr;
+    r = csdb::convert::run(o);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("contract record"), std::string::npos) << r.error;
+    EXPECT_TRUE(fs::exists(dir / ".convert"));
+    auto db = csdb::backend::open("berkeleydb", dir.string());
+    ASSERT_TRUE(db);
+    cs::Bytes v;
+    ASSERT_TRUE(db->getContractData(cs::Bytes(32, 2), v));
+    EXPECT_EQ(v, cs::Bytes(50, 9));
+    db.reset();
+    fs::remove_all(dir);
+}
