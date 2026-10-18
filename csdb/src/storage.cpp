@@ -33,6 +33,7 @@
 #include <csdb/internal/shared_data_ptr_implementation.hpp>
 #include <csdb/internal/utils.hpp>
 #include <csdb/pool.hpp>
+#include <csdb/storage_backend.hpp>
 #include <csdb/wallet.hpp>
 
 #include "binary_streams.hpp"
@@ -593,8 +594,13 @@ bool Storage::open(
         auto lmdb = std::make_shared<DatabaseLmdb>();
         lmdb->open(path + "/lmdb");
         OpenOptions opt{lmdb, newBlockchainTop, startReadFrom};
-        return open(opt, callback);
+        const bool ok = open(opt, callback);
+        if (ok) {
+            backend::writeMarker(path, "lmdb");
+        }
+        return ok;
     }
+    const char* backendName = "berkeleydb";   // what the code below opens, recorded in db/.backend
 #if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
     // Default berkeleydb; rocksdb is opt-in via [storage] db_backend = rocksdb.
     if (dbBackend == "rocksdb" || dbBackend == "rocks") {
@@ -603,6 +609,7 @@ bool Storage::open(
         rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
         rocks->open(path);
         db = rocks;
+        backendName = "rocksdb";
     } else {
         auto bdb = std::make_shared<DatabaseBerkeleyDB>();
         bdb->open(path);
@@ -614,6 +621,7 @@ bool Storage::open(
     rocks->set_tuning(rocksDbBlockCacheBytes, rocksDbMemtableBytes);
     rocks->open(path);
     db = rocks;
+    backendName = "rocksdb";
     (void)dbBackend;
 #else
     auto bdb = std::make_shared<DatabaseBerkeleyDB>();
@@ -624,7 +632,11 @@ bool Storage::open(
     (void)dbBackend;
 #endif
     OpenOptions opt{db, newBlockchainTop, startReadFrom};
-    return open(opt, callback);
+    const bool ok = open(opt, callback);
+    if (ok) {
+        backend::writeMarker(path, backendName);
+    }
+    return ok;
 }
 
 bool Storage::flush() {
