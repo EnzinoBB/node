@@ -33,7 +33,7 @@ To start over, set `CREDITS_RESET=1` once. The old data is moved to `~/.credits/
 
 ### Changing the block database
 
-To move an existing database to another backend, set `db_backend` in `config.ini` to the new one and set `CREDITS_CONVERT_DB=yes` in `.env`. Stop the node before converting. The node converts the database in place at the next start; it needs about 1 GB of free space beyond the size of the database, and resumes if interrupted. Remove `CREDITS_CONVERT_DB` afterwards.
+To move an existing database to another backend, set `db_backend` in `config.ini` to the new one and set `CREDITS_CONVERT_DB=yes` in `.env`. Stop the node before converting. The node converts the database in place at the next start; it needs about 1 GB free beyond the database when converting from berkeleydb; about the size of the database again when converting from lmdb or rocksdb (their files do not shrink until the conversion ends). It resumes if interrupted. Remove `CREDITS_CONVERT_DB` afterwards.
 
 ## Upgrades
 
