@@ -7,6 +7,8 @@ name: Upgrade compatibility
 #      checkpoints or rebuild its state (slow start), and does it keep syncing? Balances of wallets
 #      untouched since its last block are compared with the public monitor;
 #   3. the official node starts again on the folder the community node left.
+#   2b/2c. between 2 and 3 the folder is converted to LMDB (community node runs on it), RocksDB and back
+#      to BerkeleyDB, timed against the network sync; phase 3 then proves the official node opens it.
 # The community node is built from this commit for Ubuntu 20.04 (build-compat.yml), and both nodes
 # run in an Ubuntu 20.04 container, the system the official build targets.
 on:
@@ -84,6 +86,8 @@ jobs:
           phase node-official 30
           s1=$(seq_now); echo "official node reached block ${s1:-none}"
           [ "${s1:-0}" -gt 1000 ] || { docker logs --tail 40 credits; exit 1; }
+          sync_rate=$(( s1 / (30 * 60) ))   # blocks per second from the network, phase 1
+          echo "TIMING network sync: $s1 blocks in 1800 s ($sync_rate blocks/s)"
           stop official-1
           ls "$node/qs"
           lines1=$(cat "$node"/log/log_*.txt | wc -l)
@@ -107,6 +111,47 @@ jobs:
             || { echo "FAIL: transaction histories differ from the monitor"; exit 1; }
           stop community
           lines2=$(cat "$node"/log/log_*.txt | wc -l)
+
+          # conversion of the official folder: BerkeleyDB -> LMDB -> RocksDB -> BerkeleyDB
+          cp "$node/config.ini" "$node/config.ini.orig"   # the official config has no [storage] section
+          convert() {  # convert <backend>; prints and appends a TIMING line
+            sed -i "/^\[storage\]/,/^\[/{/^db_backend=/d}" "$node/config.ini"
+            grep -q '^\[storage\]' "$node/config.ini" || printf '\n[storage]\n' >> "$node/config.ini"
+            sed -i "/^\[storage\]/a db_backend=$1" "$node/config.ini"
+            before=$(du -sb "$node/db" | cut -f1); t0=$(date +%s)
+            docker run --rm --network host --user "$(id -u)" -v "$node:/node" -w /node ubuntu:20.04 \
+              ./node-community --db-path db --config-file config.ini --convert-only > "$node/convert-$1.log" 2>&1 \
+              || { echo "FAIL: conversion to $1"; tail -20 "$node/convert-$1.log"; exit 1; }
+            secs=$(( $(date +%s) - t0 )); after=$(du -sb "$node/db" | cut -f1)
+            line=$(grep -a 'conversion done' "$node/convert-$1.log" | tail -1 || true)
+            blocks=$(sed -nE 's/.*conversion done: ([0-9]+) blocks.*/\1/p' <<<"$line")
+            [[ "$blocks" =~ ^[0-9]+$ ]] || { echo "FAIL: no 'conversion done' line for $1"; tail -20 "$node/convert-$1.log"; exit 1; }
+            echo "TIMING convert to $1: $blocks blocks in $secs s, $((before >> 20)) MB -> $((after >> 20)) MB"
+            echo "| to $1 | $blocks | $secs s | $((before >> 20)) MB -> $((after >> 20)) MB | $(( 186000000 * secs / (blocks > 0 ? blocks : 1) / 3600 )) h |" >> "$GITHUB_STEP_SUMMARY"
+          }
+          {
+            echo "### Block database conversion vs network sync"
+            echo "Network sync (phase 1): $s1 blocks in 30 min, $(( 186000000 / (sync_rate > 0 ? sync_rate : 1) / 3600 )) h for 186 M blocks"
+            echo ""
+            echo "| conversion | blocks | time | size | whole chain (est.) |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "== phase 2b: convert the official folder to lmdb, run the community node 5 minutes"
+          convert lmdb
+          phase node-community 5
+          after=$(docker logs credits 2>&1)
+          grep -aq 'QUICK START!' <<<"$after" || { echo "FAIL: no quick start after the conversion"; docker logs --tail 40 credits; exit 1; }
+          python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
+            || { echo "FAIL: balances differ from the monitor after the conversion"; exit 1; }
+          python3 ci/snapshot/check_node.py history --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
+            || { echo "FAIL: histories differ from the monitor after the conversion"; exit 1; }
+          stop community-lmdb
+
+          echo "== phase 2c: lmdb -> rocksdb -> berkeleydb, back to the official format"
+          convert rocksdb
+          convert berkeleydb
+          cp "$node/config.ini.orig" "$node/config.ini"   # the official node gets its own config back
 
           echo "== phase 3: official node again, 10 minutes"
           phase node-official 10
