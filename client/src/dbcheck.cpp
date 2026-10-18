@@ -126,7 +126,9 @@ Action decide(const Facts& f) {
     return Action::StopMismatch;
 }
 
-int check(const std::string& dbPath, const std::string& configured, bool convertFlag, bool convertOnly, uint32_t batch) {
+namespace {
+
+int checkImpl(const std::string& dbPath, const std::string& configured, bool convertFlag, bool convertOnly, uint32_t batch) {
     Facts f;
     f.configured = configured;
     f.convertFlag = convertFlag;
@@ -199,6 +201,20 @@ int check(const std::string& dbPath, const std::string& configured, bool convert
             return convertNow(dbPath, state.from, state.to, convertOnly, batch);
     }
     return -1;
+}
+
+}  // namespace
+
+int check(const std::string& dbPath, const std::string& configured, bool convertFlag, bool convertOnly, uint32_t batch) {
+    // No engine exception may escape: print it and stop with nothing changed. The signal handlers
+    // are installed and restored inside convertNow, around csdb::convert::run only.
+    try {
+        return checkImpl(dbPath, configured, convertFlag, convertOnly, batch);
+    }
+    catch (const std::exception& e) {
+        say() << "failed: " << e.what() << std::endl;
+        return 3;
+    }
 }
 
 }  // namespace dbcheck
