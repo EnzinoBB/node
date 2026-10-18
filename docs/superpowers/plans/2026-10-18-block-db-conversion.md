@@ -29,11 +29,12 @@
 
 ## Review Focus
 
-1. **Folder with both a BerkeleyDB and an LMDB database** (an operator switched `db_backend` once already and the node opened an empty LMDB): two formats with data must stop with the "found both" message, never pick one. Test in Task 2 (`DetectsBothFormats`) and Task 4 (`BothFormatsStop`).
-2. **An empty database of the configured format next to a full one of another format** (same situation, the new one has zero blocks): the empty one must not count as "data", so the node offers to convert the full one. Test in Task 2 (`EmptyTargetDoesNotCount`).
-3. **Pruned database whose first block is not 0**: the conversion covers `first..last` only and the hash-chain check does not ask for block `first-1`. Test in Task 3 (`ConvertsPrunedRange`).
-4. **Ctrl-C / SIGTERM during a conversion**: the node must stop between batches with `db/.convert` consistent and resume next time. Test in Task 3 (`ResumesAfterEachStep`, the stop flag variant).
-5. **Conversion back to berkeleydb so the official node can run again**: the official node must open the result. Test in Task 7 (official phase 3 runs on the folder converted back).
+1. **No block database at all** (first start: `db/` missing, or `db/` empty, or only a stale `db/.backend` left): the node must start exactly as today, with no prompt, no message and no new exit path, and create the configured database. Tests in Task 2 (`MissingFolderHasNoFormat`, `MarkerWithoutDataIsNoFormat`), Task 4 (`NoDatabaseStartsNormally`) and Task 6 (every scenario starts its nodes from an empty `db/`; the new check asserts they never printed a `block database:` line).
+2. **Folder with both a BerkeleyDB and an LMDB database** (an operator switched `db_backend` once already and the node opened an empty LMDB): two formats with data must stop with the "found both" message, never pick one. Test in Task 2 (`DetectsBothFormats`) and Task 4 (`BothFormatsStop`).
+3. **An empty database of the configured format next to a full one of another format** (same situation, the new one has zero blocks): the empty one must not count as "data", so the node offers to convert the full one. Test in Task 2 (`EmptyTargetDoesNotCount`).
+4. **Pruned database whose first block is not 0**: the conversion covers `first..last` only and the hash-chain check does not ask for block `first-1`. Test in Task 3 (`ConvertsPrunedRange`).
+5. **Ctrl-C / SIGTERM during a conversion**: the node must stop between batches with `db/.convert` consistent and resume next time. Test in Task 3 (`ResumesAfterEachStep`, the stop flag variant).
+6. **Conversion back to berkeleydb so the official node can run again**: the official node must open the result. Test in Task 7 (official phase 3 runs on the folder converted back).
 
 ---
 
@@ -366,6 +367,20 @@ TEST(StorageBackend, EmptyFolderHasNoFormat) {
     fs::remove_all(dir);
 }
 
+TEST(StorageBackend, MissingFolderHasNoFormat) {
+    const auto dir = fs::temp_directory_path() / "cs_backend_missing";
+    fs::remove_all(dir);
+    EXPECT_TRUE(csdb::backend::detect(dir.string()).empty());   // must not throw or create the folder
+    EXPECT_FALSE(fs::exists(dir));
+}
+
+TEST(StorageBackend, MarkerWithoutDataIsNoFormat) {
+    auto dir = freshDir("marker_only");
+    ASSERT_TRUE(csdb::backend::writeMarker(dir.string(), "berkeleydb"));
+    EXPECT_TRUE(csdb::backend::detect(dir.string()).empty());
+    fs::remove_all(dir);
+}
+
 TEST(StorageBackend, MarkerRoundTripAndRejectsGarbage) {
     auto dir = freshDir("marker");
     ASSERT_TRUE(csdb::backend::writeMarker(dir.string(), "rocksdb"));
@@ -442,6 +457,7 @@ bool anyMatching(const fs::path& dir, const std::string& prefix) {
 }
 
 bool hasBlocks(const std::string& name, const std::string& dir) {
+    // only called when the backend's files exist, so opening creates nothing new
     auto db = open(name, dir);
     if (!db || !db->is_open()) return false;
     auto it = db->new_iterator();
@@ -466,6 +482,10 @@ bool isKnown(const std::string& name) {
 std::vector<std::string> detect(const std::string& dbPath) {
     const fs::path dir(dbPath);
     std::vector<std::string> found;
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) {
+        return found;   // first start: no db/ yet
+    }
     if (bigger(dir / "blockchain.db") && fs::exists(dir / "sequence.db")) found.push_back("berkeleydb");
     if (bigger(dir / "lmdb" / "data.mdb") && hasBlocks("lmdb", dbPath)) found.push_back("lmdb");
     if (fs::exists(dir / "CURRENT") && anyMatching(dir, "MANIFEST-") && hasBlocks("rocksdb", dbPath)) found.push_back("rocksdb");
@@ -546,7 +566,7 @@ with `#include <csdb/storage_backend.hpp>` at the top.
 - [ ] **Step 4: Run**
 
 Run: `cd build && nice -n 19 ninja -j2 nodetests && ./tests/csnode/nodetests --gtest_filter='StorageBackend.*'`
-Expected: 5 tests PASS.
+Expected: 7 tests PASS.
 
 - [ ] **Step 5: Commit**
 
@@ -1184,6 +1204,22 @@ TEST(DbCheck, BothFormatsStop) {
     EXPECT_EQ(dbcheck::decide(Facts{{"berkeleydb", "lmdb"}, "lmdb", false, true, true}), Action::StopBoth);
 }
 
+TEST(DbCheck, NoDatabaseStartsNormally) {
+    namespace fs = std::filesystem;
+    const auto missing = fs::temp_directory_path() / "cs_dbcheck_missing";
+    fs::remove_all(missing);
+    for (std::string b : {"berkeleydb", "lmdb", "rocksdb"}) {
+        EXPECT_EQ(dbcheck::check(missing.string(), b, false, false, 100000), -1) << b;  // first start
+        EXPECT_EQ(dbcheck::check(missing.string(), b, true, false, 100000), -1) << b;   // --convert-db with nothing to convert
+    }
+    EXPECT_FALSE(fs::exists(missing));
+    const auto empty = fs::temp_directory_path() / "cs_dbcheck_empty_dir";
+    fs::remove_all(empty);
+    fs::create_directories(empty);
+    EXPECT_EQ(dbcheck::check(empty.string(), "lmdb", false, false, 100000), -1);
+    fs::remove_all(empty);
+}
+
 TEST(DbCheck, ConvertOnlyOnMatchingDatabaseExitsZero) {
     const auto dir = std::filesystem::temp_directory_path() / "cs_dbcheck_empty";
     std::filesystem::remove_all(dir);
@@ -1232,7 +1268,7 @@ Check the accessor names on `Config` (`getPathToDB()` is used by `node.cpp`; `ge
 - [ ] **Step 5: Run the tests and a manual smoke test**
 
 Run: `cd build && nice -n 19 ninja -j2 nodetests node && ./tests/csnode/nodetests --gtest_filter='DbCheck.*'`
-Expected: 3 tests PASS.
+Expected: 4 tests PASS.
 
 Smoke (no network needed, uses the unit-test chain writer through a tiny folder):
 
@@ -1389,6 +1425,13 @@ if [ "$CONVERT_AT" -gt 0 ]; then
     done
     echo "convert test: n4 now lmdb, n6 now rocksdb (resumed after a kill), both quick-started"
 fi
+# every node started from an empty db/: the new start-up check must have stayed silent there
+for i in $(seq 1 "$ALL_NODES"); do
+    first_start=$(awk '/conversion done|resuming the conversion/{exit} {print}' "$WORK/n$i/stdout.log")
+    if [ "$CONVERT_AT" -eq 0 ] || { [ "$i" != 4 ] && [ "$i" != 6 ]; }; then
+        ! grep -aq 'block database:' <<<"$first_start" || { echo "FAIL: n$i printed a block database message on a normal start"; exit 1; }
+    fi
+done
 ```
 
 (The digest check that already ends every scenario proves the converted nodes keep the network's state.)
@@ -1413,6 +1456,8 @@ git commit -m "ci(robustness): convert two nodes' block databases mid-run, one o
 git push -u origin <branch>
 gh workflow run robustness.yml -R EnzinoBB/node --ref <branch> -f only=db-convert,storage-switch,all-storage
 ```
+
+Put the "every node started from an empty db/" check outside the `CONVERT_AT` block, so all 27 existing scenarios run it too.
 
 Expected: the three scenarios PASS; `db-convert` prints both "convert test:" lines and "PASS: 7 nodes reached sequence 2500 with matching state digests".
 
