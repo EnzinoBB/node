@@ -55,6 +55,17 @@ TEST(DbCheck, ConvertOnlyOnMatchingDatabaseExitsZero) {
     std::filesystem::remove_all(dir);
 }
 
+TEST(DbCheck, BatchOutsideTheLimitsStops) {
+    namespace fs = std::filesystem;
+    const auto missing = fs::temp_directory_path() / "cs_dbcheck_batch";
+    fs::remove_all(missing);
+    EXPECT_EQ(dbcheck::check(missing.string(), "lmdb", true, false, 0), 3);
+    EXPECT_EQ(dbcheck::check(missing.string(), "lmdb", true, false, dbcheck::kMaxBatch + 1), 3);
+    EXPECT_EQ(dbcheck::check(missing.string(), "lmdb", true, false, 1), -1);
+    EXPECT_EQ(dbcheck::check(missing.string(), "lmdb", true, false, dbcheck::kMaxBatch), -1);
+    EXPECT_FALSE(fs::exists(missing));
+}
+
 TEST(DbCheck, ResumeRefusals) {
     namespace fs = std::filesystem;
     const auto dir = fs::temp_directory_path() / "cs_dbcheck_resume";

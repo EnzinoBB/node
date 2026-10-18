@@ -258,7 +258,8 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
 
         case Action::Resume:
             if (state.to != configured) {
-                say() << "db/.convert converts to " << state.to << ", config.ini asks for " << configured << std::endl;
+                say() << "db/.convert converts to " << state.to << ", config.ini asks for " << configured
+                      << ": set db_backend=" << state.to << " to finish it" << std::endl;
                 return 3;
             }
             if (inUse(lock, dbPath)) {
@@ -274,6 +275,10 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
 int check(const std::string& dbPath, const std::string& configured, bool convertFlag, bool convertOnly, uint32_t batch) {
     // No engine exception may escape: print it and stop with nothing changed. The signal handlers
     // are installed and restored inside convertNow, around csdb::convert::run only.
+    if (batch < 1 || batch > kMaxBatch) {
+        say() << "--convert-batch must be between 1 and " << kMaxBatch << ", got " << batch << std::endl;
+        return 3;
+    }
     try {
         return checkImpl(dbPath, configured, convertFlag, convertOnly, batch);
     }

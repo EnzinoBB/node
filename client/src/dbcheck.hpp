@@ -21,8 +21,12 @@ struct Facts {
 
 Action decide(const Facts& f);
 
+// --convert-batch: blocks read into memory at once
+constexpr uint32_t kMaxBatch = 1000000;
+
 // Runs the decision. Returns -1 to continue the normal start, otherwise the process exit code
-// (0: done or paused, 3: stopped, nothing changed or conversion failed/refused).
+// (0: done or paused, 3: stopped, nothing changed or conversion failed/refused, or a batch
+// outside 1..kMaxBatch).
 int check(const std::string& dbPath, const std::string& configured, bool convertFlag, bool convertOnly, uint32_t batch);
 
 }  // namespace dbcheck
