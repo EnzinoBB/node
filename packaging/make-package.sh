@@ -75,7 +75,8 @@ Changing the block database (db_backend)
   again when converting from lmdb or rocksdb (their files do not shrink until the conversion
   ends). If interrupted it resumes at the next start. Checkpoints and the transaction index are kept, so the node quick-starts
   afterwards. The official node only reads berkeleydb: convert back before running it on this
-  folder. In Docker, use CREDITS_CONVERT_DB=yes.
+  folder. In Docker, use CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in
+  detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
 
 Start: cd csnode && ./node
 EOF
