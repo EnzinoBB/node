@@ -74,7 +74,8 @@ config_storage() {
         }' config.ini
 }
 
-has_data() { [ -d db ] && [ -n "$(ls -A db 2>/dev/null)" ]; }
+# db/.lock alone is no data: the node locks an existing db/ before it opens the database
+has_data() { [ -d db ] && [ -n "$(ls -A db 2>/dev/null | grep -vxF .lock)" ]; }
 
 first_start=0
 [ -f config.ini ] || { write_config; first_start=1; }
