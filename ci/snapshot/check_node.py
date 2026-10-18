@@ -124,6 +124,32 @@ def balances(args):
     return 1 if mismatches else 0
 
 
+MONITOR_MAX_PAGES = 20
+
+
+def monitor_blocks(address, head):
+    """Blocks <= head of the monitor's transactions of a wallet, sorted, or None when more than
+    MONITOR_MAX_PAGES pages would be needed. Pages hold the newest transactions first, so the walk
+    goes from the last (oldest) page towards page 1 and stops after the first page whose newest
+    transaction is above head."""
+    first = monitor(f"AccountTransactions?id={address}&page=1&limit=100")
+    last_page = int(first.get("lastPage") or 1)
+    blocks = []
+    page, data, walked = last_page, first, 0
+    while page >= 1:
+        if page != 1:
+            if walked >= MONITOR_MAX_PAGES:
+                return None
+            data = monitor(f"AccountTransactions?id={address}&page={page}&limit=100")
+        walked += 1
+        txs = data.get("transactions") or []
+        blocks += [int(t["blockNum"]) for t in txs if int(t["blockNum"]) <= head]
+        if txs and int(txs[0]["blockNum"]) > head:
+            break  # this page reaches past head, the newer ones hold nothing of interest
+        page -= 1
+    return sorted(blocks)
+
+
 def history(args):
     node = client(args.api)
     head = node.SyncStateGet().lastBlock
@@ -136,11 +162,12 @@ def history(args):
             continue
         address = base58.b58encode(w.address).decode()
         try:
-            theirs = monitor(f"AccountTransactions?id={address}&page=1&limit=100").get("transactions") or []
+            theirs = monitor_blocks(address, head)
         except Exception as e:
             print(f"FAIL: the monitor cannot be reached: {e}", flush=True)
             return 1
-        theirs = sorted(int(t["blockNum"]) for t in theirs if int(t["blockNum"]) <= head)
+        if theirs is None:
+            continue  # too many pages to walk: not compared
         ours = sorted(t.id.poolSeq for t in (node.TransactionsGet(w.address, 0, 100).transactions or [])
                       if t.id.poolSeq <= head)
         compared += 1
