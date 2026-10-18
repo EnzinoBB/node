@@ -7,6 +7,7 @@
 #define _CREDITS_CSDB_DATABASE_H_INCLUDED_
 
 #include <client/params.hpp>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -55,6 +56,15 @@ public:
 
     virtual bool updateContractData(const cs::Bytes& key, const cs::Bytes& data) = 0;
     virtual bool getContractData(const cs::Bytes& key, cs::Bytes& data) = 0;
+
+    // every contract record, in the engine's key order; fn returns false to stop early.
+    // Used to convert a database to another backend.
+    using ContractVisitor = std::function<bool(const cs::Bytes& key, const cs::Bytes& value)>;
+    virtual bool forEachContractData(const ContractVisitor& fn) {
+        (void)fn;
+        set_last_error(NotSupported);
+        return false;
+    }
 
     // returns the space of removed records to the file system; a no-op where not supported
     virtual bool compact() {

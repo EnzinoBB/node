@@ -451,4 +451,25 @@ bool DatabaseRocksDB::getContractData(const cs::Bytes& key, cs::Bytes& data) {
     return true;
 }
 
+bool DatabaseRocksDB::forEachContractData(const ContractVisitor& fn) {
+    if (!db_ || !cf_contracts_) {
+        set_last_error(NotOpen);
+        return false;
+    }
+    std::unique_ptr<rocksdb::Iterator> it(db_->NewIterator(rocksdb::ReadOptions(), cf_contracts_));
+    for (it->SeekToFirst(); it->Valid(); it->Next()) {
+        const auto k = it->key();
+        const auto v = it->value();
+        if (!fn(cs::Bytes(k.data(), k.data() + k.size()), cs::Bytes(v.data(), v.data() + v.size()))) {
+            break;
+        }
+    }
+    if (!it->status().ok()) {
+        set_last_error(UnknownError, "forEachContractData: %s", it->status().ToString().c_str());
+        return false;
+    }
+    set_last_error();
+    return true;
+}
+
 }  // namespace csdb
