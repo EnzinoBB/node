@@ -27,9 +27,13 @@ The container runs as uid 1000: the directory must be writable by it (`sudo chow
 | --- | --- |
 | Full to pruned, same database | Allowed: old blocks are removed at the next checkpoints. |
 | Pruned to full | Refused: the pruned blocks are gone. |
-| A different database (`db_backend`) | Refused: checkpoints and caches belong to the old one. |
+| A different database (`db_backend`) | Refused, unless `CREDITS_CONVERT_DB=yes` is set (see below). |
 
 To start over, set `CREDITS_RESET=1` once. The old data is moved to `~/.credits/old-<date>`, not deleted.
+
+### Changing the block database
+
+To move an existing database to another backend, set `db_backend` in `config.ini` to the new one and set `CREDITS_CONVERT_DB=yes` in `.env`. Stop the node before converting. The node converts the database in place at the next start; it needs about 1 GB free beyond the database when converting from berkeleydb; about the size of the database again when converting from lmdb or rocksdb (their files do not shrink until the conversion ends). It resumes if interrupted. Remove `CREDITS_CONVERT_DB` afterwards.
 
 ## Upgrades
 

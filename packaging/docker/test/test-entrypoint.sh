@@ -157,4 +157,36 @@ set +e; out=$(run "$d"); rc=$?; set -e
 [ -e "$d/pwned" ] && fail "malicious snapshot.json ran a command"
 pass "malicious snapshot.json refused"
 
+# 13. backend change without CREDITS_CONVERT_DB: refused, with the hint
+d=$(withdata 13)
+sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$d/config.ini"
+set +e; out=$(run "$d"); rc=$?; set -e
+[ "$rc" = 3 ] && grep -q 'CREDITS_CONVERT_DB=yes' <<<"$out" || { echo "$out"; fail "backend change hint: exit $rc"; }
+pass "backend change refused with the conversion hint"
+
+# 14. backend change with CREDITS_CONVERT_DB=yes: the node gets --convert-db, .storage follows the config
+d=$(withdata 14)
+sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$d/config.ini"
+out=$(run "$d" -e CREDITS_CONVERT_DB=yes)
+grep -q -- '--convert-db' "$d/stub-args" || { echo "$out"; fail "convert: no --convert-db"; }
+grep -q 'mode=pruned backend=rocksdb' "$d/.storage" || fail "convert: record"
+# a later start (the node refused or paused, .storage already rewritten) still passes the flag
+run "$d" -e CREDITS_CONVERT_DB=yes >/dev/null
+grep -q -- '--convert-db' "$d/stub-args" || fail "convert: no --convert-db at the next start"
+# with CREDITS_CONVERT_DB=yes the node always gets the flag and decides itself; without it never
+d=$(withdata 15)
+run "$d" -e CREDITS_CONVERT_DB=yes >/dev/null
+grep -q -- '--convert-db' "$d/stub-args" || fail "no --convert-db with CREDITS_CONVERT_DB=yes and no backend change"
+run "$d" >/dev/null
+grep -q -- '--convert-db' "$d/stub-args" && fail "--convert-db passed without CREDITS_CONVERT_DB"
+pass "CREDITS_CONVERT_DB=yes always passes --convert-db, without it never"
+
+# 16. db/.lock alone is no data: the snapshot restore still runs
+d=$(newdata 16)
+mkdir -p "$d/db"
+touch "$d/db/.lock"
+out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
+grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "restore over db/.lock"; }
+pass "db/.lock alone does not count as data"
+
 echo "PASS: entrypoint"
