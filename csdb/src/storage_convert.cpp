@@ -72,6 +72,22 @@ Result failed(Result r, const std::string& error) {
     return r;
 }
 
+bool anyDone(const State& s) {
+    return (s.ascending ? s.doneUpTo : s.doneDownTo) >= 0;
+}
+
+// the next batch to convert after what the state records; false when every block is converted
+bool nextBatch(const State& s, uint32_t batch, int64_t& lo, int64_t& hi) {
+    if (s.ascending) {
+        lo = s.doneUpTo < 0 ? int64_t(s.first) : s.doneUpTo + 1;
+        hi = std::min<int64_t>(s.last, lo + int64_t(batch) - 1);
+        return lo <= int64_t(s.last);
+    }
+    hi = s.doneDownTo < 0 ? int64_t(s.last) : s.doneDownTo - 1;
+    lo = std::max<int64_t>(s.first, hi - int64_t(batch) + 1);
+    return hi >= int64_t(s.first);
+}
+
 // The last part: the old files go, the new ones move into db/. Repeatable after a crash at any point:
 // the two backends' file names never overlap, and entries already moved are no longer in .convert-new.
 Result finish(const Options& opt, const State& st, Result r, std::chrono::steady_clock::time_point started) {
@@ -119,6 +135,7 @@ bool readState(const std::string& dbPath, State& s) {
     s = State{};
     std::string line;
     int seen = 0;
+    bool down = false, up = false;
     while (std::getline(f, line)) {
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
@@ -128,8 +145,14 @@ bool readState(const std::string& dbPath, State& s) {
             else if (k == "to") { s.to = v; ++seen; }
             else if (k == "first") { s.first = static_cast<uint32_t>(std::stoul(v)); ++seen; }
             else if (k == "last") { s.last = static_cast<uint32_t>(std::stoul(v)); ++seen; }
-            else if (k == "done_down_to") { s.doneDownTo = std::stoll(v); ++seen; }
+            else if (k == "done_down_to") { s.doneDownTo = std::stoll(v); down = true; }
             else if (k == "next_prev_hash") { s.nextPrevHash = v; }
+            else if (k == "done_up_to") { s.doneUpTo = std::stoll(v); up = true; }
+            else if (k == "done_up_to_hash") { s.doneUpToHash = v; }
+            else if (k == "order") {
+                if (v != "asc" && v != "desc") return false;
+                s.ascending = v == "asc";
+            }
             else if (k == "contracts") { s.contractsCopied = v == "copied"; }
             else if (k == "phase") { s.moving = v == "moving"; }
         }
@@ -137,15 +160,20 @@ bool readState(const std::string& dbPath, State& s) {
             return false;
         }
     }
-    const bool doneInRange = s.doneDownTo == -1 || (s.doneDownTo >= s.first && s.doneDownTo <= s.last);
-    return seen == 5 && backend::isKnown(s.from) && backend::isKnown(s.to) && s.from != s.to && s.first <= s.last && doneInRange;
+    // no order key: written before the order was recorded, when every conversion went newest first.
+    // The boundary must be the one of the order.
+    const bool boundary = s.ascending ? up && !down : down && !up;
+    const int64_t done = s.ascending ? s.doneUpTo : s.doneDownTo;
+    const bool doneInRange = done == -1 || (done >= s.first && done <= s.last);
+    return seen == 4 && boundary && backend::isKnown(s.from) && backend::isKnown(s.to) && s.from != s.to && s.first <= s.last && doneInRange;
 }
 
 bool writeState(const std::string& dbPath, const State& s) {
     std::ostringstream o;
-    o << "from=" << s.from << "\nto=" << s.to << "\nfirst=" << s.first << "\nlast=" << s.last
-      << "\ndone_down_to=" << s.doneDownTo << "\nnext_prev_hash=" << s.nextPrevHash
-      << "\ncontracts=" << (s.contractsCopied ? "copied" : "pending")
+    o << "from=" << s.from << "\nto=" << s.to << "\nfirst=" << s.first << "\nlast=" << s.last;
+    if (s.ascending) o << "\norder=asc\ndone_up_to=" << s.doneUpTo << "\ndone_up_to_hash=" << s.doneUpToHash;
+    else o << "\norder=desc\ndone_down_to=" << s.doneDownTo << "\nnext_prev_hash=" << s.nextPrevHash;
+    o << "\ncontracts=" << (s.contractsCopied ? "copied" : "pending")
       << "\nphase=" << (s.moving ? "moving" : "blocks") << "\n";
     return syncWrite(fs::path(dbPath) / kStateFile, o.str());
 }
@@ -198,7 +226,7 @@ Result run(const Options& opt) {
             return failed(r, "an unfinished conversion from " + st.from + " to " + st.to + " is in db/.convert");
         }
         // blocks recorded as converted are only in .convert-new: without it, stop before removing more
-        if (!st.moving && (st.doneDownTo >= 0 || st.contractsCopied) && !fs::exists(newDir)) {
+        if (!st.moving && (anyDone(st) || st.contractsCopied) && !fs::exists(newDir)) {
             return failed(r, "db/.convert records converted data but db/.convert-new is missing");
         }
         // files of the target backend that appeared in db/ during a pause (another node started there)
@@ -210,7 +238,8 @@ Result run(const Options& opt) {
             }
         }
         say(opt, "resuming the conversion from " + st.from + " to " + st.to
-                 + (st.doneDownTo < 0 ? std::string(" from the start") : " below block " + std::to_string(st.doneDownTo)));
+                 + (!anyDone(st) ? std::string(" from the start")
+                    : st.ascending ? " above block " + std::to_string(st.doneUpTo) : " below block " + std::to_string(st.doneDownTo)));
     }
     else {
         // the new database must start empty, and its files must not collide with others when moved into db/
@@ -239,12 +268,24 @@ Result run(const Options& opt) {
         st.from = opt.from;
         st.to = opt.to;
         st.first = it->key();
+        // BerkeleyDB stores blocks in a Recno table, record = sequence + 1: the first put of a pruned
+        // database would create every record below it at once (millions on mainnet), and run out of
+        // lock entries and memory
+        if (opt.to == "berkeleydb" && st.first != 0) {
+            return failed(r, "a pruned block database cannot be converted to berkeleydb; use lmdb or rocksdb (its first block is "
+                             + std::to_string(st.first) + ")");
+        }
+        // Newest first only from berkeleydb, which gives space back only from the end of its file. LMDB
+        // and RocksDB do not shrink during the conversion anyway; oldest first, a berkeleydb target grows
+        // record by record instead of creating every lower record with its first put
+        st.ascending = opt.from != "berkeleydb";
         it->seek_to_last();
         if (!it->is_valid() || it->key() < st.first) return failed(r, "cannot find the last block of the " + opt.from + " database");
         st.last = it->key();
         it.reset();
         if (!writeState(opt.dbPath, st)) return failed(r, "cannot write db/.convert");
-        say(opt, "converting blocks " + std::to_string(st.first) + ".." + std::to_string(st.last) + " from " + st.from + " to " + st.to);
+        say(opt, "converting blocks " + std::to_string(st.first) + ".." + std::to_string(st.last) + " from " + st.from + " to " + st.to
+                 + (st.ascending ? ", oldest first" : ", newest first"));
     }
 
     auto newDb = backend::open(opt.to, newDir);
@@ -271,10 +312,11 @@ Result run(const Options& opt) {
 
     // A batch recorded before a crash may still be partly in the old database: remove what is left
     // of it, each block only if the new database holds the same bytes under its sequence
-    if (st.doneDownTo >= 0) {
+    if (anyDone(st)) {
         std::vector<cs::Bytes> leftovers;
-        const int64_t top = std::min<int64_t>(st.last, st.doneDownTo + int64_t(opt.batch) - 1);
-        for (int64_t s = st.doneDownTo; s <= top; ++s) {
+        const int64_t bottom = st.ascending ? std::max<int64_t>(st.first, st.doneUpTo - int64_t(opt.batch) + 1) : st.doneDownTo;
+        const int64_t top = st.ascending ? st.doneUpTo : std::min<int64_t>(st.last, st.doneDownTo + int64_t(opt.batch) - 1);
+        for (int64_t s = bottom; s <= top; ++s) {
             cs::Bytes b, inNew, byKey;
             if (!oldDb->get(static_cast<uint32_t>(s), &b)) continue;
             auto p = csdb::Pool::from_binary(cs::Bytes(b));
@@ -291,14 +333,16 @@ Result run(const Options& opt) {
         }
     }
 
-    int64_t hi = st.doneDownTo < 0 ? int64_t(st.last) : st.doneDownTo - 1;
-    while (hi >= int64_t(st.first)) {
-        const int64_t lo = std::max<int64_t>(st.first, hi - int64_t(opt.batch) + 1);
+    int64_t lo = 0, hi = 0;
+    while (nextBatch(st, opt.batch, lo, hi)) {
         std::vector<Database::PendingWrite> blocks;
         blocks.reserve(static_cast<size_t>(hi - lo + 1));
-        std::string expected = st.nextPrevHash;     // hash the top block must have
-        std::string lowestPrev;
-        for (int64_t s = hi; s >= lo; --s) {
+        // the hash link to the converted part: newest first, the hash the top block must have; oldest
+        // first, the previous_hash the lowest block must have. Blocks are read, and written, in the
+        // conversion's order.
+        std::string link = st.ascending ? st.doneUpToHash : st.nextPrevHash;
+        for (int64_t i = 0; i <= hi - lo; ++i) {
+            const int64_t s = st.ascending ? lo + i : hi - i;
             const auto seq = static_cast<uint32_t>(s);
             const auto at = "block " + std::to_string(s);
             cs::Bytes bytes;
@@ -310,11 +354,18 @@ Result run(const Options& opt) {
             // as seq_no() returns sequence + 1 on BerkeleyDB and RocksDB and the sequence on LMDB
             cs::Bytes byKey;
             if (!oldDb->get(key, &byKey) || byKey != bytes) return failed(r, at + " is stored under another hash");
-            if (!expected.empty() && hex(key) != expected) {
-                return failed(r, at + " is not the previous block of block " + std::to_string(s + 1));
+            if (st.ascending) {
+                if (!link.empty() && hex(pool.previous_hash().to_binary()) != link) {
+                    return failed(r, at + " does not follow block " + std::to_string(s - 1));
+                }
+                link = hex(key);
             }
-            lowestPrev = hex(pool.previous_hash().to_binary());
-            expected = lowestPrev;
+            else {
+                if (!link.empty() && hex(key) != link) {
+                    return failed(r, at + " is not the previous block of block " + std::to_string(s + 1));
+                }
+                link = hex(pool.previous_hash().to_binary());
+            }
             blocks.push_back(Database::PendingWrite{std::move(key), seq, std::move(bytes)});
         }
         if (opt.hook) opt.hook(Step::Read, uint32_t(lo), uint32_t(hi));
@@ -332,8 +383,14 @@ Result run(const Options& opt) {
         }
         if (opt.hook) opt.hook(Step::Verified, uint32_t(lo), uint32_t(hi));
 
-        st.doneDownTo = lo;
-        st.nextPrevHash = lowestPrev;
+        if (st.ascending) {
+            st.doneUpTo = hi;
+            st.doneUpToHash = link;
+        }
+        else {
+            st.doneDownTo = lo;
+            st.nextPrevHash = link;
+        }
         if (!writeState(opt.dbPath, st)) return failed(r, "cannot write db/.convert");
         if (opt.hook) opt.hook(Step::Recorded, uint32_t(lo), uint32_t(hi));
 
@@ -346,9 +403,10 @@ Result run(const Options& opt) {
         if (!oldDb->compact()) say(opt, "compaction of the " + opt.from + " database failed: " + oldDb->last_error_message());
         if (opt.hook) opt.hook(Step::Removed, uint32_t(lo), uint32_t(hi));
 
-        say(opt, "converted blocks " + std::to_string(lo) + ".." + std::to_string(st.last));
-        hi = lo - 1;
-        if (hi >= int64_t(st.first) && opt.stopRequested && opt.stopRequested()) {
+        say(opt, "converted blocks " + (st.ascending ? std::to_string(st.first) + ".." + std::to_string(hi)
+                                                      : std::to_string(lo) + ".." + std::to_string(st.last)));
+        int64_t nextLo = 0, nextHi = 0;
+        if (nextBatch(st, opt.batch, nextLo, nextHi) && opt.stopRequested && opt.stopRequested()) {
             r.stopped = true;
             return failed(r, "stopped on request, the conversion resumes at the next start");
         }
