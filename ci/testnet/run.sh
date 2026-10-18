@@ -565,16 +565,30 @@ while :; do
         (cd "$WORK/n4" && "$BIN" --db-path db --config-file config.ini --convert-only --convert-batch 200 </dev/null >> stdout.log 2>&1) \
             || { echo "FAIL: n4 conversion to lmdb failed"; tail -20 "$WORK/n4/stdout.log"; exit 1; }
         echo "convert test: n4 berkeleydb -> lmdb at sequence $min in $(( $(date +%s) - t0 )) s"
+        # node.log is appended across restarts: remember where the start after the conversion begins
+        convert_lines4=$(wc -l < "$WORK/n4/node.log")
         start_node 4
-        (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 200 </dev/null >> stdout.log 2>&1) &
+        # a small batch for n6, so that many batches remain after the second one
+        (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) &
         cpid=$!
-        until [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -ge 2 ] || ! kill -0 "$cpid" 2>/dev/null; do sleep 0.2; done
+        until_t=$(( $(date +%s) + 300 ))
+        until [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -ge 2 ] || ! kill -0 "$cpid" 2>/dev/null; do
+            [ "$(date +%s)" -lt "$until_t" ] || { kill -KILL "$cpid" 2>/dev/null || true; echo "FAIL: n6 did not log two converted batches within 300 s"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+            sleep 0.2
+        done
         kill -KILL "$cpid" 2>/dev/null || true; wait "$cpid" 2>/dev/null || true
-        [ -f "$WORK/n6/db/.convert" ] || { echo "FAIL: n6 was killed but has no db/.convert to resume"; exit 1; }
+        if [ ! -f "$WORK/n6/db/.convert" ]; then
+            if grep -aq 'conversion done' "$WORK/n6/stdout.log"; then
+                echo "FAIL: n6 finished its conversion before the kill, lower the batch"
+            else
+                echo "FAIL: n6 was killed but has no db/.convert to resume"
+            fi
+            exit 1
+        fi
+        convert_lines6=$(wc -l < "$WORK/n6/node.log")
         echo "convert test: n6 killed during its conversion to rocksdb, restarting it"
-        EXTRA_ARGS_6="--convert-db --convert-batch 200" start_node 6
-        # a later restart of n6 must not convert again
-        EXTRA_ARGS_6=
+        # the extra arguments are a temporary of this call only: a later restart of n6 does not convert again
+        EXTRA_ARGS_6="--convert-db --convert-batch 50" start_node 6
     fi
 
     if [ "$DISK_FULL_NODE" -gt 0 ] && [ "$disk_filled_at" -eq 0 ] && [ "$min" -ge "$DISK_FULL_AT" ]; then
@@ -746,7 +760,9 @@ if [ "$CONVERT_AT" -gt 0 ]; then
     done
     grep -aq 'resuming the conversion' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion"; exit 1; }
     for i in 4 6; do
-        after=$(awk '/conversion done/{f=1} f' "$WORK/n$i/stdout.log")
+        # QUICK START! goes to node.log (the file sink), not stdout.log; only the part since the restart
+        lines_var="convert_lines$i"
+        after=$(tail -n +"$(( ${!lines_var} + 1 ))" "$WORK/n$i/node.log")
         grep -aq 'QUICK START!' <<<"$after" || { echo "FAIL: n$i did not quick-start after the conversion"; exit 1; }
     done
     echo "convert test: n4 now lmdb, n6 now rocksdb (resumed after a kill), both quick-started"
