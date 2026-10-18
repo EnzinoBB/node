@@ -95,7 +95,7 @@ contracts=copied
 
 Then the node starts normally, or exits with `--convert-only`.
 
-**Disk.** Peak use is the old database plus one batch in the new format plus the compaction work space, about 1 GB on mainnet. Before starting, the node estimates this and refuses (exit 3) when the free space is lower, naming both numbers.
+**Disk.** With a berkeleydb source, peak use is the old database plus one batch in the new format plus the compaction work space, about 1 GB on mainnet. With an lmdb or rocksdb source the old files do not shrink during the conversion (LMDB never shrinks `data.mdb`, RocksDB deletes are tombstones compacted later), so the peak is about the old plus the whole new database, and the node checks for that much free space. Before starting, the node estimates this and refuses (exit 3) when the free space is lower, naming both numbers.
 
 **Pruned nodes.** The same procedure over the stored range `first_sequence()`..`last`; the converted node keeps its pruning settings.
 
