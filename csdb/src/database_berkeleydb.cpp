@@ -666,4 +666,45 @@ bool DatabaseBerkeleyDB::getContractData(const cs::Bytes& key, cs::Bytes& data) 
     return true;
 }
 
+bool DatabaseBerkeleyDB::forEachContractData(const ContractVisitor& fn) {
+    if (!db_contracts_) {
+        set_last_error(NotOpen);
+        return false;
+    }
+    Dbc* cursor = nullptr;
+    try {
+        int status = db_contracts_->cursor(nullptr, &cursor, 0);
+        if (status != 0) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+        auto g = cs::scopeGuard([&]() { cursor->close(); });
+        Dbt_safe k, v;
+        while ((status = cursor->get(&k, &v, DB_NEXT)) == 0) {
+            auto kb = static_cast<uint8_t*>(k.get_data());
+            auto vb = static_cast<uint8_t*>(v.get_data());
+            const bool goOn = fn(cs::Bytes(kb, kb + k.get_size()), cs::Bytes(vb, vb + v.get_size()));
+            // DB_DBT_MALLOC hands a new buffer on every get(): free this one before the next
+            free(kb);
+            free(vb);
+            k.set_data(nullptr);
+            v.set_data(nullptr);
+            if (!goOn) {
+                status = DB_NOTFOUND;
+                break;
+            }
+        }
+        if (status != DB_NOTFOUND) {
+            set_last_error_from_berkeleydb(status);
+            return false;
+        }
+    }
+    catch (const DbException& e) {
+        set_last_error_from_berkeleydb(e.get_errno());
+        return false;
+    }
+    set_last_error();
+    return true;
+}
+
 }  // namespace csdb

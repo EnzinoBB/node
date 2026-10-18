@@ -328,6 +328,38 @@ bool DatabaseLmdb::getContractData(const cs::Bytes& key, cs::Bytes& data) {
     return true;
 }
 
+bool DatabaseLmdb::forEachContractData(const ContractVisitor& fn) {
+    if (!is_open()) {
+        set_last_error(NotOpen);
+        return false;
+    }
+    Txn txn(env_, true);
+    if (txn.status() != 0) {
+        return fail(txn.status(), "txn_begin");
+    }
+    MDB_cursor* cursor = nullptr;
+    int status = mdb_cursor_open(txn.get(), contracts_, &cursor);
+    if (status != 0) {
+        return fail(status, "mdb_cursor_open");
+    }
+    MDB_val k, v;
+    cs::Bytes key, value;
+    for (status = mdb_cursor_get(cursor, &k, &v, MDB_FIRST); status == 0; status = mdb_cursor_get(cursor, &k, &v, MDB_NEXT)) {
+        assign(&key, k);
+        assign(&value, v);
+        if (!fn(key, value)) {
+            status = MDB_NOTFOUND;
+            break;
+        }
+    }
+    mdb_cursor_close(cursor);
+    if (status != MDB_NOTFOUND) {
+        return fail(status, "forEachContractData");
+    }
+    set_last_error();
+    return true;
+}
+
 // Walks the blocks in sequence order. It holds a read transaction, which keeps LMDB from reusing
 // the pages it sees: iterators are short-lived (the storage scan at start-up).
 class DatabaseLmdb::Iterator final : public Database::Iterator {
