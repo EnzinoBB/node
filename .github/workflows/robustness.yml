@@ -177,6 +177,8 @@ jobs:
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
           - name: storage-switch
             env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=2300 TARGET_SEQ=3300
+          - name: db-convert
+            env: DB_BACKEND=berkeleydb CONVERT_AT=1500 TARGET_SEQ=2500
     name: ${{ matrix.name }}
     # a manual run can pick scenarios; the others stop at once
     env:

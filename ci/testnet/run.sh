@@ -44,6 +44,9 @@
 #        first, so the restore must fail and that node syncs from block 0
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
+#        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
+#        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
+#        in the middle of the conversion and started again: it must resume and finish
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
 #        with pruned storage like PRUNE_NODE and must end with the same state digest
@@ -96,6 +99,7 @@ JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
+CONVERT_AT=${CONVERT_AT:-0}
 MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
@@ -281,7 +285,8 @@ start_node() {
     # core dumps (see core_pattern in the workflow) let a crash be traced afterwards
     local bin=$BIN
     if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then bin=$BIN_ALT; fi
-    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini </dev/null >> stdout.log 2>&1) &
+    local extra_var="EXTRA_ARGS_$i"
+    (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
     # marked for the network fault (its executor, started later, inherits the cgroup)
@@ -550,6 +555,42 @@ while :; do
         echo "storage switch: n5 full -> pruned, n6 pruned -> full at sequence $min (n6 had pruned up to ${pruned_before:-none})"
     fi
 
+    if [ "$CONVERT_AT" -gt 0 ] && [ "${converted:-0}" -eq 0 ] && [ "$min" -ge "$CONVERT_AT" ]; then
+        converted=1
+        for i in 4 6; do kill -TERM "${PIDS[$i]}"; done
+        for i in 4 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
+        sed -i 's/^db_backend=.*/db_backend=lmdb/' "$WORK/n4/config.ini"
+        sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$WORK/n6/config.ini"
+        t0=$(date +%s)
+        (cd "$WORK/n4" && "$BIN" --db-path db --config-file config.ini --convert-only --convert-batch 200 </dev/null >> stdout.log 2>&1) \
+            || { echo "FAIL: n4 conversion to lmdb failed"; tail -20 "$WORK/n4/stdout.log"; exit 1; }
+        echo "convert test: n4 berkeleydb -> lmdb at sequence $min in $(( $(date +%s) - t0 )) s"
+        # node.log is appended across restarts: remember where the start after the conversion begins
+        convert_lines4=$(wc -l < "$WORK/n4/node.log")
+        start_node 4
+        # a small batch for n6, so that many batches remain after the second one
+        (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) &
+        cpid=$!
+        until_t=$(( $(date +%s) + 300 ))
+        until [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -ge 2 ] || ! kill -0 "$cpid" 2>/dev/null; do
+            [ "$(date +%s)" -lt "$until_t" ] || { kill -KILL "$cpid" 2>/dev/null || true; echo "FAIL: n6 did not log two converted batches within 300 s"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+            sleep 0.2
+        done
+        kill -KILL "$cpid" 2>/dev/null || true; wait "$cpid" 2>/dev/null || true
+        if [ ! -f "$WORK/n6/db/.convert" ]; then
+            if grep -aq 'conversion done' "$WORK/n6/stdout.log"; then
+                echo "FAIL: n6 finished its conversion before the kill, lower the batch"
+            else
+                echo "FAIL: n6 was killed but has no db/.convert to resume"
+            fi
+            exit 1
+        fi
+        convert_lines6=$(wc -l < "$WORK/n6/node.log")
+        echo "convert test: n6 killed during its conversion to rocksdb, restarting it"
+        # the extra arguments are a temporary of this call only: a later restart of n6 does not convert again
+        EXTRA_ARGS_6="--convert-db --convert-batch 50" start_node 6
+    fi
+
     if [ "$DISK_FULL_NODE" -gt 0 ] && [ "$disk_filled_at" -eq 0 ] && [ "$min" -ge "$DISK_FULL_AT" ]; then
         dd if=/dev/zero of="$WORK/n$DISK_FULL_NODE/db/filler" bs=1M 2>/dev/null || true
         disk_filled_at=$(date +%s)
@@ -709,6 +750,32 @@ if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
         || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
     echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
 fi
+if [ "$CONVERT_AT" -gt 0 ]; then
+    for i in 4 6; do
+        want=$([ "$i" = 4 ] && echo lmdb || echo rocksdb)
+        [ "$(cat "$WORK/n$i/db/.backend" 2>/dev/null)" = "$want" ] || { echo "FAIL: n$i db/.backend is not $want"; exit 1; }
+        [ ! -e "$WORK/n$i/db/.convert" ] || { echo "FAIL: n$i still has db/.convert"; exit 1; }
+        [ ! -e "$WORK/n$i/db/blockchain.db" ] || { echo "FAIL: n$i still has its BerkeleyDB files"; exit 1; }
+        grep -aq 'conversion done' "$WORK/n$i/stdout.log" || { echo "FAIL: n$i did not finish its conversion"; exit 1; }
+    done
+    grep -aq 'resuming the conversion' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion"; exit 1; }
+    for i in 4 6; do
+        # QUICK START! goes to node.log (the file sink), not stdout.log; only the part since the restart
+        lines_var="convert_lines$i"
+        after=$(tail -n +"$(( ${!lines_var} + 1 ))" "$WORK/n$i/node.log")
+        grep -aq 'QUICK START!' <<<"$after" || { echo "FAIL: n$i did not quick-start after the conversion"; exit 1; }
+    done
+    echo "convert test: n4 now lmdb, n6 now rocksdb (resumed after a kill), both quick-started"
+fi
+# every node started from an empty db/: the start-up check must have stayed silent there (it prints
+# "block database:" only on a backend mismatch, a resume or --convert-only); n4 and n6 of the
+# convert test are checked up to their conversion only
+for i in $(seq 1 "$ALL_NODES"); do
+    first_start=$(awk '/conversion done|resuming the conversion/{exit} {print}' "$WORK/n$i/stdout.log")
+    if [ "$CONVERT_AT" -eq 0 ] || { [ "$i" != 4 ] && [ "$i" != 6 ]; }; then
+        ! grep -aq 'block database:' <<<"$first_start" || { echo "FAIL: n$i printed a block database message on a normal start"; exit 1; }
+    fi
+done
 
 # the round statistics of a node that applied a block twice no longer match its blockchain
 for i in $(seq 1 "$ALL_NODES"); do
