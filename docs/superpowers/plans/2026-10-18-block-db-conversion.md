@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** A node finds an existing block database of another format than `[storage] db_backend`, never overwrites it, and converts it in place (batch by batch, newest block first, verified, resumable) on confirmation.
+**Goal:** A node finds an existing block database of another format than `[storage] db_backend`, never overwrites it, and converts it in place (batch by batch, newest block first from berkeleydb and oldest first from the others, verified, resumable) on confirmation.
 
 **Architecture:** The conversion lives in csdb (`storage_convert.{hpp,cpp}`) and works on the `csdb::Database` interface the three backends already implement, plus one new method to enumerate contract data. Format detection and the `db/.backend` marker live in csdb too (`storage_backend.{hpp,cpp}`). The start-up decision (prompt, flags, exit codes) runs in `client/src/main.cpp` right after `Config::read`, before `cs::Peer` is built, through a small `client/src/dbcheck.{hpp,cpp}`; `csnode/` is not touched. Docker, the private-network runner and the upgrade test call the same node flags.
 
@@ -20,7 +20,7 @@
 - Exit code 3 when the node stops because of a format mismatch, a refused conversion, two formats in `db/`, or too little free space; nothing changed on disk in those cases.
 - Prompt (stdin is a terminal only): `Convert the block database from X to Y now? [y/N]`.
 - No-terminal message: `the block database is X, config.ini asks for Y: run the node with --convert-db to convert it, or set db_backend=X`.
-- Order: newest block first. Per batch: read → write new → flush → verify → record in `db/.convert` (temp file, fsync, rename) → remove from old → compact old. Removal only after the record.
+- Order: newest block first from berkeleydb (its compaction gives space back from the end of the file), oldest first from lmdb and rocksdb (a high first put into an empty berkeleydb target creates every lower Recno record at once); a pruned database is not converted to berkeleydb. See the spec, section 2. Per batch: read → write new → flush → verify → record in `db/.convert` (temp file, fsync, rename) → remove from old → compact old. Removal only after the record.
 - Contract data: copied and verified first, removed from the old database only at the end.
 - Peak disk: old database + one batch + compaction work space; refuse (exit 3) before starting when free space is lower than the estimate.
 - Docker: `CREDITS_CONVERT_DB=yes` makes the entrypoint pass `--convert-db`.
