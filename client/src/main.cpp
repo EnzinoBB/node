@@ -59,7 +59,7 @@ int main(int argc, char* argv[]) {
         ("db-path", po::value<std::string>(), "path to DB (default: \"db/\")")
         ("convert-db", "convert an existing block database to the configured db_backend without asking")
         ("convert-only", "convert the block database to the configured db_backend, then exit")
-        ("convert-batch", po::value<uint32_t>()->default_value(100000), "blocks per conversion batch")
+        ("convert-batch", po::value<uint32_t>()->default_value(100000), "blocks per conversion batch (1 to 1000000)")
         ("config-file", po::value<std::string>(), "path to configuration file (default: \"config.ini\")")
         ("public-key-file", po::value<std::string>(), "path to public key file (default: \"NodePublic.txt\")")
         ("private-key-file", po::value<std::string>(), "path to private key file (default: \"NodePrivate.txt\")")
