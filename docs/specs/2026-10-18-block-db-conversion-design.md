@@ -111,6 +111,11 @@ Then the node starts normally, or exits with `--convert-only`.
   - node 6 (berkeleydb, full) is converted to rocksdb and killed in the middle of the conversion, then started again with `--convert-db`: it must resume and finish;
   - pass: every node reaches the target sequence with the same state digests, both converted nodes quick-start from their existing checkpoint.
 - **Mainnet data** (`upgrade-compat.yml`): the official folder with the first million blocks is converted to lmdb and to rocksdb; sizes and times are reported; the converted node syncs on and its balances and histories are compared with the public monitor as today.
+- **Is it worth it** (same mainnet job): the conversion rate (blocks per second, separately for copy+verify and for removal+compaction) is measured on the sample and extrapolated to the full chain (~186 M blocks), next to the two alternatives on the same runner:
+  - a fresh sync from the network with the configured backend: the job measures it on the same block range, and the local pruned node gives a long-run reference (about 25–30 M blocks per day, about 7 days for the whole chain);
+  - for completeness, the community node's slow start from a local database (state rebuilt without downloading).
+
+  The report gives the estimated hours for the whole chain for each. The conversion is worth shipping only if it is clearly faster than the network sync (the expectation is hours against days); if it is not, the feature stops at detection and the hint to resync.
 - **Docker** (`test-entrypoint.sh`): mismatch without the variable refuses with the new hint; with `CREDITS_CONVERT_DB=yes` the node is called with `--convert-db`.
 
 ## Risks
