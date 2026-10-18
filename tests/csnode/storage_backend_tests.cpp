@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -50,6 +51,31 @@ TEST(StorageBackend, EmptyTargetDoesNotCount) {
     fill("berkeleydb", dir, 100);
     { auto lmdb = csdb::backend::open("lmdb", dir.string()); ASSERT_TRUE(lmdb); }  // opened, no blocks
     EXPECT_EQ(csdb::backend::detect(dir.string()), std::vector<std::string>{"berkeleydb"});
+    fs::remove_all(dir);
+}
+
+TEST(StorageBackend, EmptyRocksDbHasNoFormat) {
+    auto dir = freshDir("empty_rocksdb");
+    { auto db = csdb::backend::open("rocksdb", dir.string()); ASSERT_TRUE(db); }   // a fresh node's database
+    EXPECT_TRUE(csdb::backend::detect(dir.string()).empty());
+    fs::remove_all(dir);
+}
+
+TEST(StorageBackend, SingleFormatIsReadFromTheFiles) {
+    // opening RocksDB writes a new MANIFEST and OPTIONS file: a detect that did not open leaves the
+    // folder as it was
+    auto dir = freshDir("single_no_open");
+    fill("rocksdb", dir, 100);
+    { auto db = csdb::backend::open("rocksdb", dir.string()); ASSERT_TRUE(db); }   // moves the WAL into a table file
+    auto names = [&] {
+        std::vector<std::string> n;
+        for (const auto& e : fs::directory_iterator(dir)) n.push_back(e.path().filename().string());
+        std::sort(n.begin(), n.end());
+        return n;
+    };
+    const auto before = names();
+    EXPECT_EQ(csdb::backend::detect(dir.string()), std::vector<std::string>{"rocksdb"});
+    EXPECT_EQ(names(), before);
     fs::remove_all(dir);
 }
 
