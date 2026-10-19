@@ -125,7 +125,7 @@ jobs:
           - name: rocksdb-power-cut
             env: DB_BACKEND=rocksdb CRASH_ALL_AT=600
           - name: rocksdb-disk-full
-            env: DB_BACKEND=rocksdb DISK_FULL_NODE=6
+            env: DB_BACKEND=rocksdb DISK_FULL_NODE=6 DISK_FULL_STOP=1
           - name: lmdb-disk-full
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6
           - name: berkeleydb-disk-full

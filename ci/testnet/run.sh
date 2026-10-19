@@ -74,7 +74,8 @@
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
-#        state digest (needs sudo)
+#        state digest (needs sudo). With DISK_FULL_STOP=1 the node gets SIGTERM halfway through the
+#        full-disk period and must exit within 120 s, as an operator would stop it
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -143,6 +144,7 @@ done | tr '\n' ' ')
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
+DISK_FULL_STOP=${DISK_FULL_STOP:-0}
 DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
 NET_FAULT=${NET_FAULT:-}
 NET_FAULT_NODES=${NET_FAULT_NODES:-}
@@ -700,6 +702,23 @@ while :; do
         dd if=/dev/zero of="$WORK/n$DISK_FULL_NODE/db/filler" bs=1M 2>/dev/null || true
         disk_filled_at=$(date +%s)
         echo "disk-full test: n$DISK_FULL_NODE block DB filled at sequence $min ($(df -h "$WORK/n$DISK_FULL_NODE/db" | tail -1 | awk '{print $4}') left)"
+    fi
+    if [ "$DISK_FULL_STOP" = 1 ] && [ "$disk_filled_at" -gt 0 ] && [ "${disk_stop_done:-0}" -eq 0 ] \
+        && [ "$(date +%s)" -ge $((disk_filled_at + DISK_FULL_SECONDS / 2)) ]; then
+        disk_stop_done=1
+        if kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+            kill -TERM "${PIDS[$DISK_FULL_NODE]}"
+            stop_t0=$(date +%s)
+            while kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null && [ $(( $(date +%s) - stop_t0 )) -lt 120 ]; do sleep 1; done
+            if kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+                echo "FAIL: n$DISK_FULL_NODE did not stop on SIGTERM within 120 s while its disk was full"
+                kill -KILL "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null || true
+                exit 1
+            fi
+            wait "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$DISK_FULL_NODE " 2>/dev/null || true
+            echo "disk-full test: n$DISK_FULL_NODE stopped on SIGTERM in $(( $(date +%s) - stop_t0 )) s with its disk full"
+        fi
     fi
     if [ "$disk_filled_at" -gt 0 ] && [ "$disk_freed" -eq 0 ] && [ "$(date +%s)" -ge $((disk_filled_at + DISK_FULL_SECONDS)) ]; then
         rm -f "$WORK/n$DISK_FULL_NODE/db/filler"
