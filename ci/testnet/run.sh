@@ -71,6 +71,10 @@
 #        again each time and end with the same state digests
 #        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
 #        network restarted, as after a power cut; the nodes must agree again
+#        APPLY_FAIL_AT (default 0 = off, a CREDITS_TESTNET build): at that sequence node
+#        APPLY_FAIL_NODE (default 3) is told to fail applying a block 20 blocks later to its caches
+#        (./testnet-fail-apply); it must stop within 120 s, saving no checkpoint, and after a restart
+#        catch up with the same state digests, never logging "Pool already present"
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -96,6 +100,8 @@ FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
 LOAD_SECONDS=${LOAD_SECONDS:-300}
 DISK_FULL_NODE=${DISK_FULL_NODE:-0}
+APPLY_FAIL_AT=${APPLY_FAIL_AT:-0}
+APPLY_FAIL_NODE=${APPLY_FAIL_NODE:-3}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
@@ -713,6 +719,27 @@ while :; do
         fi
     fi
 
+    if [ "$APPLY_FAIL_AT" -gt 0 ] && [ "${apply_fail_set:-0}" -eq 0 ] && [ "$min" -ge "$APPLY_FAIL_AT" ]; then
+        apply_fail_set=1
+        af=$APPLY_FAIL_NODE
+        af_seq=$(( $(seq_of "$af") + 20 ))
+        echo "$af_seq" > "$WORK/n$af/testnet-fail-apply"
+        af_lines=$(wc -l < "$WORK/n$af/node.log")
+        af_t0=$(date +%s)
+        echo "apply-fail test: n$af fails to apply block $af_seq"
+        while kill -0 "${PIDS[$af]}" 2>/dev/null && [ $(( $(date +%s) - af_t0 )) -lt 240 ]; do sleep 1; done
+        if kill -0 "${PIDS[$af]}" 2>/dev/null; then
+            echo "FAIL: n$af did not stop after failing to apply block $af_seq"
+            tail -n +"$((af_lines + 1))" "$WORK/n$af/node.log" | grep -aE "failed to apply|Couldn't save block|Pool already present" | head -5
+            exit 1
+        fi
+        wait "${PIDS[$af]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$af " 2>/dev/null || true
+        echo "apply-fail test: n$af stopped $(( $(date +%s) - af_t0 )) s after the marker, restarting it"
+        sleep 5
+        start_node "$af"
+    fi
+
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
@@ -756,6 +783,15 @@ if [ -n "$CONTRACTS_PID" ]; then
 elif [ "$CONTRACTS" = "1" ]; then
     echo "FAIL: contracts.py never started"
     exit 1
+fi
+
+if [ "$APPLY_FAIL_AT" -gt 0 ]; then
+    after=$(tail -n +"$((af_lines + 1))" "$WORK/n$APPLY_FAIL_NODE/node.log")
+    grep -aq "failed to apply to the caches" <<<"$after" || { echo "FAIL: n$APPLY_FAIL_NODE never hit the injected failure"; exit 1; }
+    ! grep -aq "Pool already present" <<<"$after" || { echo "FAIL: n$APPLY_FAIL_NODE offered a stored block again"; exit 1; }
+    ! grep -aq "caches for QUICK START saved" <<<"$(awk '/failed to apply to the caches/{f=1} f' <<<"$after" | awk '/QUICK START!/{exit} {print}')" \
+        || { echo "FAIL: n$APPLY_FAIL_NODE saved its caches after the failure"; exit 1; }
+    echo "apply-fail test: n$APPLY_FAIL_NODE stopped without a checkpoint and caught up after a restart"
 fi
 
 if [ -n "$FUND_PID" ]; then

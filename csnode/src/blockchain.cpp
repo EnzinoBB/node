@@ -1,6 +1,8 @@
 #include <base58.h>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
+#include <stdexcept>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
 #include <lib/system/logger.hpp>
@@ -955,6 +957,18 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
     // former updateFromNextBlock(pool) method:
     try {
         std::lock_guard lock(cacheMutex_);
+#ifdef CREDITS_TESTNET
+        // test-network builds only: fail once on the block named in ./testnet-fail-apply, after the
+        // transaction index and the wallet ids took it (ci/testnet/run.sh APPLY_FAIL_AT)
+        if (std::ifstream marker("testnet-fail-apply"); marker) {
+            cs::Sequence failAt = 0;
+            if (marker >> failAt && failAt == pool.sequence()) {
+                marker.close();
+                std::remove("testnet-fail-apply");
+                throw std::runtime_error("test: failure injected while applying block " + std::to_string(failAt));
+            }
+        }
+#endif
         // currently block stores own round confidants, not next round:
         const auto& currentRoundConfidants = pool.confidants();
         walletsCacheUpdater_->loadNextBlock(pool, currentRoundConfidants, *this);

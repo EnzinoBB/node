@@ -145,6 +145,11 @@ jobs:
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 TARGET_SEQ=3000
           - name: berkeleydb-term-kill
             env: DB_BACKEND=berkeleydb TERM_KILL_NODE=3
+          # a block fails to apply to the caches: the node stops, saves no checkpoint, catches up after a restart
+          - name: apply-fail
+            env: DB_BACKEND=lmdb APPLY_FAIL_AT=400
+          - name: apply-fail-rocksdb
+            env: DB_BACKEND=rocksdb APPLY_FAIL_AT=400
           # a node that lost its transaction index rebuilds it from its blocks after a quick start
           - name: lmdb-pruned-index-loss
             env: DB_BACKEND=lmdb PRUNE_NODE=6 INDEX_LOSS_AT=2300 TARGET_SEQ=3000
