@@ -231,7 +231,8 @@ bool TransactionsIndex::rebuildDeferred() const {
     return rebuildDeferred_;
 }
 
-void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load) {
+bool TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load,
+                                    const std::function<bool()>& stopRequested) {
     reset();
     init();
     if (db_->isOpen()) {
@@ -242,9 +243,27 @@ void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::fu
     recreate_ = true;
     lapoos_.clear();
     lastIndexedPool_ = kWrongSequence;
+    // the walk writes the watermark block by block: until it ends the index is marked incomplete, so
+    // that a stop or a kill in the middle makes the next start rebuild it again
+    indexIncomplete_ = true;
+    updateIncompleteFlag();
     size_t walked = 0;
     size_t missing = 0;
+    constexpr Sequence kProgressEvery = 1'000'000;
+    cslog() << "trxIndex: rebuilding from the stored blocks " << first << ".." << last;
     for (Sequence seq = first; first <= last && seq <= last; ++seq) {
+        if (seq % kProgressEvery == 0 && seq != first) {
+            if (stopRequested && stopRequested()) {
+                // the index stays marked incomplete: the next start rebuilds it again
+                recreate_ = false;
+                rebuildDeferred_ = false;
+                lapoos_.clear();
+                db_->flush();
+                cslog() << "trxIndex: rebuild stopped at block " << seq;
+                return false;
+            }
+            cslog() << "trxIndex: rebuilt up to block " << seq << " of " << last;
+        }
         const csdb::Pool pool = load(seq);
         if (!pool.is_valid()) {
             ++missing;
@@ -267,6 +286,7 @@ void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::fu
         cswarning() << "trxIndex: " << missing << " blocks of " << first << ".." << last << " could not be read";
     }
     cslog() << "trxIndex rebuilt from the stored blocks " << first << ".." << last << " (" << walked << " blocks)";
+    return true;
 }
 
 void TransactionsIndex::pinFloor(Sequence floor) {
