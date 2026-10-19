@@ -41,6 +41,11 @@ bool BlockHashes::update(const csdb::Pool& block) {
     if (cachedHash == hash) {
         return true;
     }
+    if (!cachedHash.is_empty()) {
+        // the block at this sequence was replaced (e.g. the deferred block got more signatures, which
+        // changes its hash): the old hash no longer names a stored block
+        hashDb_->remove(cachedHash.to_binary());
+    }
 
     seqDb_->insert(seq, hash.to_binary());
     hashDb_->insert(hash.to_binary(), seq);
@@ -100,12 +105,14 @@ bool BlockHashes::consistentWith(cs::Sequence first, cs::Sequence last,
         return true;
     }
     // a crash can leave a few blocks written here ahead of the storage, or a pruning step not
-    // yet removed: tolerate that much, not more
+    // yet removed: tolerate that much, not more. hashdb may hold more: earlier builds left the old
+    // hash of every replaced block in it, harmless since nothing maps to it any more; only missing
+    // entries matter (a damaged hashdb is caught by its failures and by the samples below)
     constexpr size_t kSlack = 128;
     const size_t blocks = last - first + 1;
     const size_t seqs = seqDb_->size();
     const size_t hashes = hashDb_->size();
-    if (seqs < blocks || seqs > blocks + kSlack || hashes < blocks || hashes > blocks + kSlack) {
+    if (seqs < blocks || seqs > blocks + kSlack || hashes < blocks) {
         cswarning() << "blockHashes: " << seqs << " sequences and " << hashes << " hashes for the "
                     << blocks << " stored blocks " << first << ".." << last;
         return false;
