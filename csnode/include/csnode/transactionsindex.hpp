@@ -44,12 +44,14 @@ public:
     // wipe lastIndexedPool_ and arm recreate_ so the next slow-start fully repopulates.
     void forceRebuild();
 
-    // pruned storage has no old blocks for a slow start: after a quick start the index is rebuilt
-    // from the blocks the node stores. deferRebuild() makes the start-up read of the database leave
-    // the index alone; rebuildFrom() then walks first..last and marks the index complete.
+    // a rebuild without a slow start: after a quick start the index is rebuilt from the blocks the
+    // node stores. deferRebuild() makes the start-up read of the database leave the index alone;
+    // rebuildFrom() then walks first..last and marks the index complete. It returns false when
+    // stopRequested() stopped it: the index stays marked incomplete and is rebuilt at the next start.
     void deferRebuild();
     bool rebuildDeferred() const;
-    void rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load);
+    bool rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load,
+                     const std::function<bool()>& stopRequested);
 
     Sequence getPrevTransBlock(const csdb::Address& _addr, Sequence _curr) const;
 
@@ -79,6 +81,8 @@ private:
     // the watermark of the old last_indexed file (earlier builds, the official node): true if a
     // valid value was loaded into lastIndexedPool_
     bool loadLastIndexedFromLegacyFile();
+    // true if the index holds at least one entry (not only its watermark and flags)
+    bool hasIndexEntries() const;
 
     void setPrevTransBlock(const PublicKey&, cs::Sequence _curr, cs::Sequence _prev);
     void removeLastTransBlock(const PublicKey&, cs::Sequence _curr);

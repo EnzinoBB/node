@@ -68,10 +68,10 @@ TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, 
         db_->insert(kSchemaVersionKey, kCurrentSchema);
     }
     if (indexIncomplete_) {
-        cslog() << "TRACE: trxIndex __incomplete__ flag set on load — Trusted role gated until slow-start rebuilds the index";
+        cslog() << "TRACE: trxIndex __incomplete__ flag set on load — Trusted role gated until the index is rebuilt at this start";
     }
     if (!indexComplete_ && !recreate_ && lastIndexedPool_ >= 1000) {
-        cslog() << "TRACE: trxIndex has no completion sentinel — pre-patch indexdb suspected, will be rebuilt by slow-start";
+        cslog() << "TRACE: trxIndex has no completion flag (an earlier build, or trimmed after an unclean stop); it is kept";
     }
 }
 
@@ -231,7 +231,8 @@ bool TransactionsIndex::rebuildDeferred() const {
     return rebuildDeferred_;
 }
 
-void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load) {
+bool TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load,
+                                    const std::function<bool()>& stopRequested) {
     reset();
     init();
     if (db_->isOpen()) {
@@ -242,9 +243,27 @@ void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::fu
     recreate_ = true;
     lapoos_.clear();
     lastIndexedPool_ = kWrongSequence;
+    // the walk writes the watermark block by block: until it ends the index is marked incomplete, so
+    // that a stop or a kill in the middle makes the next start rebuild it again
+    indexIncomplete_ = true;
+    updateIncompleteFlag();
     size_t walked = 0;
     size_t missing = 0;
+    constexpr Sequence kProgressEvery = 1'000'000;
+    cslog() << "trxIndex: rebuilding from the stored blocks " << first << ".." << last;
     for (Sequence seq = first; first <= last && seq <= last; ++seq) {
+        if (seq % kProgressEvery == 0 && seq != first) {
+            if (stopRequested && stopRequested()) {
+                // the index stays marked incomplete: the next start rebuilds it again
+                recreate_ = false;
+                rebuildDeferred_ = false;
+                lapoos_.clear();
+                db_->flush();
+                cslog() << "trxIndex: rebuild stopped at block " << seq;
+                return false;
+            }
+            cslog() << "trxIndex: rebuilt up to block " << seq << " of " << last;
+        }
         const csdb::Pool pool = load(seq);
         if (!pool.is_valid()) {
             ++missing;
@@ -267,6 +286,7 @@ void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::fu
         cswarning() << "trxIndex: " << missing << " blocks of " << first << ".." << last << " could not be read";
     }
     cslog() << "trxIndex rebuilt from the stored blocks " << first << ".." << last << " (" << walked << " blocks)";
+    return true;
 }
 
 void TransactionsIndex::pinFloor(Sequence floor) {
@@ -280,8 +300,7 @@ void TransactionsIndex::pinFloor(Sequence floor) {
         // gap left unwalked → consensus would propose a divergent trx set. gate Trusted.
         if (recreate_ || prev + 1 < floor) {
             indexIncomplete_ = true;
-            cslog() << "TRACE: trxIndex marked __incomplete__ — Trusted role gated; "
-                       "wipe " << rootPath_ << kDbPath << " and restart for slow-start to clear";
+            cslog() << "TRACE: trxIndex marked __incomplete__ — Trusted role gated until the next start rebuilds it";
             updateIncompleteFlag();
         }
         lastIndexedPool_ = floor;
@@ -471,8 +490,39 @@ bool TransactionsIndex::loadLastIndexedFromLegacyFile() {
     if (!db_->isOpen()) {
         return false;
     }
+    // the file stays when caches/indexdb is removed: its watermark holds only for the index the
+    // official node left, not for an empty one
+    if (!hasIndexEntries()) {
+        cslog() << "trxIndex: the legacy last_indexed file names block " << v << ", but the index is empty";
+        return false;
+    }
     lastIndexedPool_ = v;
     return true;
+}
+
+bool TransactionsIndex::hasIndexEntries() const {
+    if (!db_->isOpen()) {
+        return false;
+    }
+    try {
+        auto& env = db_->env();
+        auto txn = lmdb::txn::begin(env, nullptr, MDB_RDONLY);
+        auto dbi = lmdb::dbi::open(txn, nullptr);
+        auto cur = lmdb::cursor::open(txn, dbi);
+        lmdb::val k, v;
+        bool found = false;
+        if (cur.get(k, v, MDB_FIRST)) {
+            do {
+                found = k.size() == kTrxIndexKeySize;
+            } while (!found && cur.get(k, v, MDB_NEXT));
+        }
+        cur.close();
+        txn.abort();
+        return found;
+    } catch (const std::exception& e) {
+        cswarning() << "trxIndex: cannot read the index: " << e.what();
+        return false;
+    }
 }
 
 bool TransactionsIndex::loadLastIndexedFromDb() {
