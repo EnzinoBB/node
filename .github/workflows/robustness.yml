@@ -216,7 +216,7 @@ jobs:
         if: env.SELECTED == 'true'
         run: |
           git submodule update --init -- third-party/lmdb
-          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_dump
+          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_dump mdb_stat
           sudo apt-get install -y -qq zstd
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-nacl python3-base58 gdb
