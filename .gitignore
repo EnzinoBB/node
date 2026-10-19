@@ -12,3 +12,7 @@ js-client/js/*
 /CMakeLists.txt.user.4.10-pre1
 /build*
 *.swp
+
+# Python bytecode of the CI scripts
+__pycache__/
+*.pyc
