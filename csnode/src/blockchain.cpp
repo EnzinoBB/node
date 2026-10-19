@@ -134,12 +134,21 @@ bool BlockChain::init(
     bool successfulQuickStart = false;
 
     if (newBlockchainTop == cs::kWrongSequence) {
+        // the index alone does not need a slow start: quick-start from the checkpoint, then rebuild the
+        // index from the stored blocks (a pruned node could not slow-start at all, its old blocks are
+        // gone). A slow start stays the way when there is no usable checkpoint.
         if (trxIndex_->recreate() || !trxIndex_->isReady() || trxIndex_->looksEmpty()) {
-            cswarning() << "trxIndex needs rebuild — skipping QuickStart, slow-start will populate it";
-            if (!trxIndex_->recreate()) {
-                trxIndex_->forceRebuild();
+            successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
+            if (successfulQuickStart) {
+                cswarning() << "trxIndex needs rebuild — QUICK START, then rebuild it from the stored blocks";
+                trxIndex_->deferRebuild();
             }
-            bindSerializationManToCaches(serializationManPtr, initialConfidants);
+            else {
+                cswarning() << "trxIndex needs rebuild — no usable checkpoint, slow-start will populate it";
+                if (!trxIndex_->recreate()) {
+                    trxIndex_->forceRebuild();
+                }
+            }
         }
         else {
             successfulQuickStart = tryQuickStart(serializationManPtr, initialConfidants);
@@ -153,7 +162,9 @@ bool BlockChain::init(
     if (successfulQuickStart) {
         if (lastSequence_ != 0) {
             firstBlockToReadInDatabase = lastSequence_ + 1;
-            trxIndex_->pinFloor(lastSequence_.load());
+            if (!trxIndex_->rebuildDeferred()) {
+                trxIndex_->pinFloor(lastSequence_.load());
+            }
             emit successfullQuickStartEvent(csdb::Amount(blockRewardIntegral_, blockRewardFraction_), csdb::Amount(miningCoefficientIntegral_, miningCoefficientFraction_), miningOn_, stakingOn_, TimeMinStage1_);
         }
 
@@ -177,7 +188,7 @@ bool BlockChain::init(
         }
         if (checkTrxIndexRecreate) {
           checkTrxIndexRecreate = false;
-          if (trxIndex_->recreate() && successfulQuickStart) {
+          if (trxIndex_->recreate() && successfulQuickStart && !trxIndex_->rebuildDeferred()) {
               cslog() << "Blockchain: TrxIndex must be recreated, cancel QUICK START... Restart NODE, please";
               trxIndex_->invalidate();
               return true;
@@ -231,6 +242,15 @@ bool BlockChain::init(
     else {
         if (!postInitFromDB(successfulQuickStart)) {
             return false;
+        }
+    }
+
+    if (trxIndex_->rebuildDeferred()) {
+        const bool rebuilt = trxIndex_->rebuildFrom(firstStoredSeq_.load(), lastSequence_.load(),
+            [this](cs::Sequence seq) { return storage_.pool_load(seq); },
+            [this] { return stop_.load(); });
+        if (!rebuilt) {
+            cslog() << kLogPrefix << "shutdown requested, the transaction index is rebuilt at the next start";
         }
     }
 

@@ -40,7 +40,9 @@ private:
 
     bool updateContractData(const cs::Bytes& key, const cs::Bytes& data) override;
     bool getContractData(const cs::Bytes& key, cs::Bytes& data) override;
+    bool forEachContractData(const ContractVisitor& fn) override;
     bool compact() override;
+    bool flush() override;
 
     void logfile_routine();
 

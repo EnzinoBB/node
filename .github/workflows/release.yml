@@ -215,8 +215,8 @@ jobs:
           - JDK: ojdkbuild 11.0.4, the one the official release ships
 
           Full or pruned storage: the packages differ only in config.ini (pruned storage runs on LMDB).
-          Two builds of the same code: `linux-x64` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
-          `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
+          Two builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
+          \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
           each package. Verify with SHA256SUMS.
           EOF
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

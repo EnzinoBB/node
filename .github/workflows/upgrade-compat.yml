@@ -7,6 +7,10 @@ name: Upgrade compatibility
 #      checkpoints or rebuild its state (slow start), and does it keep syncing? Balances of wallets
 #      untouched since its last block are compared with the public monitor;
 #   3. the official node starts again on the folder the community node left.
+#   2a. the community node again, without its transaction index: it quick-starts and rebuilds the
+#      index from the stored blocks; the rebuild is timed against the slow start of phase 2.
+#   2b/2c. between 2 and 3 the folder is converted to LMDB (community node runs on it), RocksDB and back
+#      to BerkeleyDB, timed against the network sync; phase 3 then proves the official node opens it.
 # The community node is built from this commit for Ubuntu 20.04 (build-compat.yml), and both nodes
 # run in an Ubuntu 20.04 container, the system the official build targets.
 on:
@@ -75,6 +79,12 @@ jobs:
               "./$1" --db-path db --config-file config.ini >/dev/null
             sleep $(( $2 * 60 ))
           }
+          # rate <blocks> <secs> -> blocks per second; chain <blocks> <secs> -> time for 186 M blocks at that pace
+          rate() { awk -v b="$1" -v s="$2" 'BEGIN{printf "%.1f", b/s}'; }
+          # ts <pattern> <node log text> -> epoch seconds of the last matching line ("[date time] [level] ...");
+          # the last one, as the rotated files still hold earlier phases
+          ts() { grep -a -- "$1" <<<"$2" | tail -1 | sed -nE 's/^\[([^]]+)\].*/\1/p' | xargs -r -I{} date -d {} +%s.%N; }
+          chain() { awk -v b="$1" -v s="$2" 'BEGIN{t=186000000*s/b; if (t<3600) printf "%.0f min", t/60; else printf "%.1f h", t/3600}'; }
           stop() {
             docker stop -t 120 credits >/dev/null; docker logs credits > "$node/docker-$1.log" 2>&1; docker rm credits >/dev/null
             pkill -f '[c]ontract-executor[.]jar' || true
@@ -84,6 +94,8 @@ jobs:
           phase node-official 30
           s1=$(seq_now); echo "official node reached block ${s1:-none}"
           [ "${s1:-0}" -gt 1000 ] || { docker logs --tail 40 credits; exit 1; }
+          [[ "$s1" =~ ^[0-9]+$ && "$s1" -gt 0 ]] || { echo "FAIL: phase 1 block count is not a positive number: '$s1'"; exit 1; }
+          echo "TIMING network sync: $s1 blocks in 1800 s ($(rate "$s1" 1800) blocks/s)"
           stop official-1
           ls "$node/qs"
           lines1=$(cat "$node"/log/log_*.txt | wc -l)
@@ -107,13 +119,92 @@ jobs:
             || { echo "FAIL: transaction histories differ from the monitor"; exit 1; }
           stop community
           lines2=$(cat "$node"/log/log_*.txt | wc -l)
+          # the node starts its log file over at the next start: keep this phase's slow start
+          slow_t=$(cat "$node"/log/log_*.txt)
+
+          echo "== phase 2a: community node without its transaction index"
+          rm -rf "$node/caches/indexdb"
+          docker run -d --name credits --network host --user "$(id -u)" -v "$node:/node" -w /node ubuntu:20.04 \
+            ./node-community --db-path db --config-file config.ini >/dev/null
+          until_t=$(( $(date +%s) + 30 * 60 ))
+          until docker logs credits 2>&1 | grep -aq 'trxIndex rebuilt from the stored blocks\|Node is not good'; do
+            [ "$(date +%s)" -lt "$until_t" ] || { echo "FAIL: no index rebuild within 30 min"; docker logs --tail 40 credits; exit 1; }
+            sleep 5
+          done
+          sleep 120   # some sync after the rebuild, for the checks below
+          idx_t=$(cat "$node"/log/log_*.txt)
+          grep -aE 'QUICK START!|SLOW START|trxIndex' <<<"$idx_t" | tail -8
+          docker logs credits 2>&1 | grep -aq 'QUICK START!' || { echo "FAIL: no quick start without the index"; exit 1; }
+          python3 ci/snapshot/check_node.py history --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
+            || { echo "FAIL: histories differ from the monitor after the index rebuild"; exit 1; }
+          rebuilt=$(grep -a 'trxIndex rebuilt from the stored blocks' <<<"$idx_t" | tail -1 | sed -nE 's/.*\(([0-9]+) blocks\).*/\1/p')
+          rsecs=$(awk -v a="$(ts 'trxIndex: rebuilding from' "$idx_t")" -v b="$(ts 'trxIndex rebuilt from' "$idx_t")" 'BEGIN{printf "%.0f", b-a}')
+          loaded=$(grep -a 'DB is opened, loaded' <<<"$slow_t" | tail -1 | sed -nE "s/.*loaded ([0-9']+) blocks.*/\1/p" | tr -d "'")
+          ssecs=$(awk -v a="$(ts 'SLOW START' "$slow_t")" -v b="$(ts 'DB is opened, loaded' "$slow_t")" 'BEGIN{printf "%.0f", b-a}')
+          [[ "$rebuilt" =~ ^[0-9]+$ && "$loaded" =~ ^[0-9]+$ ]] || { echo "FAIL: no block counts (rebuilt '$rebuilt', slow start '$loaded')"; exit 1; }
+          [ "$rsecs" -ge 1 ] || rsecs=1; [ "$ssecs" -ge 1 ] || ssecs=1
+          echo "TIMING index rebuild: $rebuilt blocks in $rsecs s ($(rate "$rebuilt" "$rsecs") blocks/s), whole chain $(chain "$rebuilt" "$rsecs")"
+          echo "TIMING slow start: $loaded blocks in $ssecs s ($(rate "$loaded" "$ssecs") blocks/s), whole chain $(chain "$loaded" "$ssecs")"
+          {
+            echo "### Transaction index: rebuild after a quick start vs slow start"
+            echo "| start | blocks | time | blocks/s | whole chain, 186 M blocks (est.) |"
+            echo "|---|---|---|---|---|"
+            echo "| slow start (phase 2) | $loaded | $ssecs s | $(rate "$loaded" "$ssecs") | $(chain "$loaded" "$ssecs") |"
+            echo "| quick start + index rebuild (phase 2a) | $rebuilt | $rsecs s | $(rate "$rebuilt" "$rsecs") | $(chain "$rebuilt" "$rsecs") |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          stop community-index
+
+          # conversion of the official folder: BerkeleyDB -> LMDB -> RocksDB -> BerkeleyDB
+          cp "$node/config.ini" "$node/config.ini.orig"   # the official config has no [storage] section
+          convert() {  # convert <backend>; prints and appends a TIMING line
+            sed -i "/^\[storage\]/,/^\[/{/^db_backend=/d}" "$node/config.ini"
+            grep -q '^\[storage\]' "$node/config.ini" || printf '\n[storage]\n' >> "$node/config.ini"
+            sed -i "/^\[storage\]/a db_backend=$1" "$node/config.ini"
+            before=$(du -sb "$node/db" | cut -f1); t0=$(date +%s)
+            docker run --rm --network host --user "$(id -u)" -v "$node:/node" -w /node ubuntu:20.04 \
+              ./node-community --db-path db --config-file config.ini --convert-only > "$node/convert-$1.log" 2>&1 \
+              || { echo "FAIL: conversion to $1"; tail -20 "$node/convert-$1.log"; exit 1; }
+            secs=$(( $(date +%s) - t0 )); size_after=$(du -sb "$node/db" | cut -f1)
+            line=$(grep -a 'conversion done' "$node/convert-$1.log" | tail -1 || true)
+            blocks=$(sed -nE 's/.*conversion done: ([0-9]+) blocks.*/\1/p' <<<"$line")
+            [[ "$blocks" =~ ^[0-9]+$ ]] || { echo "FAIL: no 'conversion done' line for $1"; tail -20 "$node/convert-$1.log"; exit 1; }
+            [ "$blocks" -gt 0 ] || { echo "FAIL: conversion to $1 reports 0 blocks"; exit 1; }
+            note=""; [ "$secs" -ge 1 ] || { secs=1; note=" (min. 1 s)"; }
+            echo "TIMING convert to $1: $blocks blocks in $secs s ($(rate "$blocks" "$secs") blocks/s), $((before >> 20)) MB -> $((size_after >> 20)) MB, whole chain $(chain "$blocks" "$secs")"
+            echo "| to $1 | $blocks | $secs s$note | $(rate "$blocks" "$secs") | $((before >> 20)) MB -> $((size_after >> 20)) MB | $(chain "$blocks" "$secs") |" >> "$GITHUB_STEP_SUMMARY"
+          }
+          {
+            echo "### Block database conversion vs network sync"
+            echo "| step | blocks | time | blocks/s | size | whole chain, 186 M blocks (est.) |"
+            echo "|---|---|---|---|---|---|"
+            echo "| network sync (phase 1) | $s1 | 30 min | $(rate "$s1" 1800) | | $(chain "$s1" 1800) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "== phase 2b: convert the official folder to lmdb, run the community node 5 minutes"
+          convert lmdb
+          phase node-community 5
+          after=$(docker logs credits 2>&1)
+          grep -aq 'QUICK START!' <<<"$after" || { echo "FAIL: no quick start after the conversion"; docker logs --tail 40 credits; exit 1; }
+          python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
+            || { echo "FAIL: balances differ from the monitor after the conversion"; exit 1; }
+          python3 ci/snapshot/check_node.py history --api 127.0.0.1:9090 --count 10 --tries 40 --min-compared 3 \
+            || { echo "FAIL: histories differ from the monitor after the conversion"; exit 1; }
+          s2b=$(seq_now); echo "community node (lmdb) reached block ${s2b:-none}"
+          [[ "$s2b" =~ ^[0-9]+$ ]] || { echo "FAIL: no block reached by the community node after the conversion"; exit 1; }
+          stop community-lmdb
+
+          echo "== phase 2c: lmdb -> rocksdb -> berkeleydb, back to the official format"
+          convert rocksdb
+          convert berkeleydb
+          echo "_Indicative only: both estimates extrapolate linearly from the first few million blocks, and later blocks are larger._" >> "$GITHUB_STEP_SUMMARY"
+          cp "$node/config.ini.orig" "$node/config.ini"   # the official node gets its own config back
 
           echo "== phase 3: official node again, 10 minutes"
           phase node-official 10
           after=$(docker logs credits 2>&1)
           grep -aE 'QUICK START!|SLOW START|Caches for QUICK START loaded|schema|quarantin|rebuild|Couldn.t open' <<<"$after" | head -20
           s3=$(seq_now); echo "official node reached block ${s3:-none}"
-          [ "${s3:-0}" -gt "$s2" ] || { echo "FAIL: the official node did not go past block $s2"; docker logs --tail 40 credits; exit 1; }
+          [ "${s3:-0}" -gt "$s2b" ] || { echo "FAIL: the official node did not go past block $s2b"; docker logs --tail 40 credits; exit 1; }
           stop official-2
           echo "PASS: official $s1 -> community $s2 -> official $s3"
 
