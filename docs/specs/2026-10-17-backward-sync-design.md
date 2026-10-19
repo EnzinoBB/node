@@ -1,6 +1,6 @@
 # Backward sync: design
 
-Status: draft for review, 2026-10-17.
+Status: draft for review, 2026-10-17, updated 2026-10-19 (see **Since the first draft**). No implementation plan yet.
 
 ## Goal
 
@@ -14,12 +14,24 @@ Out of scope:
 - Serving snapshots from node to node.
 - The full/pruned ratio guard.
 
+## Since the first draft
+
+What changed on master between 2026-10-17 and 2026-10-19, and what it changes here:
+
+- **The fixes of section 8 shipped** in 4.2.532-community.5: the genesis crash (#45) and `TransactionsListGet` on pruned blocks (#46).
+- **No pruned snapshot is published yet.** The release `pruned-snapshot` does not exist: the first snapshot comes by hand from a pruned mainnet node still syncing. Backward sync starts from a snapshot, so its mainnet test, and its use, wait for it.
+- **The transaction index can be rebuilt from the stored blocks after a quick start** (#53 for pruned nodes, #54 for all nodes, 4.2.532-community.7), about 2.4 times faster than a slow start on mainnet data (~15 min extrapolated to the whole chain, optimistic since the first blocks are nearly empty). Section 6 now relies on it instead of linking the index backwards block by block.
+- **Block database conversion** (#49–#52). A full node whose first block is above 0 counts as pruned for it: it cannot be converted to berkeleydb before the backfill reaches block 0 (section 1).
+- **BerkeleyDB Recno.** The conversion showed that a first put far above record 1 into an empty Recno table creates every lower record at once and runs out of locks. Backward sync never does that: it writes records below existing ones (section 4).
+
 ## Compatibility
 
 - **No protocol change.** Blocks are requested with the existing `BlockRequest` message, so official 4.2.532 nodes, all full, serve the history as they serve any sync today. Their replies (`RequestedBlock`) are handled on a separate path in our node.
 - **No change to blocks or consensus.** Backfilled blocks are stored, never applied to the wallet caches. The state already comes from the snapshot.
 
-## What the code does today (investigation, file:line on master)
+## What the code does today (investigation, file:line on master of 2026-10-17)
+
+The line numbers are those of the first draft; the implementation plan refreshes them.
 
 - **Requests and replies.** The request is an arbitrary list of sequences (`nodecore.hpp:42`). The responder serves any stored block of any age and skips missing ones (`node.cpp:1777-1829`).
 - **Peers.** Our requester tracks only peers ahead of it (`poolsynchronizer.cpp:288-295`).
@@ -41,6 +53,7 @@ Out of scope:
   - Switching a pruned node to full starts the backfill. The Docker entrypoint, which today refuses pruned to full, allows it from this release on.
 - It runs only while the node is synced with the network. Forward sync and consensus come first: backward sync pauses whenever forward sync is running.
 - `[storage] backfill=off` disables it. It is on by default for full nodes.
+- **Backends.** A node from a snapshot runs on LMDB (or RocksDB after a conversion) and backfills there. A BerkeleyDB node can backfill only if it was a pruned BerkeleyDB node from block 0 switched to full: the conversion refuses a database whose first block is above 0 to berkeleydb, until the backfill has reached block 0.
 
 ### 2. Requests
 
@@ -71,7 +84,8 @@ A block that fails any check is dropped and its batch is requested again from an
   - it writes the block through the backend's `put`, and for RocksDB through the write queue;
   - it leaves `last_hash`, the head and `pools_cache` untouched;
   - it runs under the same lock as forward saves.
-- **Strictly downwards.** After a crash the stored range has no hole. On start, `first_sequence()` is where backward sync resumes; no other watermark is needed.
+- **Strictly downwards.** After a crash the stored range has no hole.
+- **BerkeleyDB.** The block table is a Recno table opened without `DB_RENUMBER`: pruning leaves the records below the first stored block deleted and numbers do not shift. Each backfilled block fills the record just below the lowest stored one, so no put ever lands far above the existing records (the lock exhaustion seen in the conversion cannot happen). On start, `first_sequence()` is where backward sync resumes; no other watermark is needed.
 - `count_pool` (`storage.size()`) grows with each backfilled block, so the API counts stay right.
 
 ### 5. Caches
@@ -82,24 +96,24 @@ A block that fails any check is dropped and its batch is requested again from an
 
 ### 6. Transaction index
 
-The index links each wallet's transactions by a pointer to its previous block. Backwards, that pointer is known only when the older block arrives, so:
+The index links each wallet's transactions by a pointer to its previous block. During the backfill it is left as the snapshot brought it, and live blocks keep updating it as on any node:
 
-- a map `pending[address] = newest backfilled block of that address whose pointer is not yet known`, persisted in the index database every 10,000 blocks;
-- for each backfilled block `k` and each address `A` in it: if `pending[A]` exists, write `(A, pending[A]) -> k`, then set `pending[A] = k`;
-- the entry `(A, s)` of the oldest stored block, which today points into the pruned range, is completed the same way. Its target block just becomes loadable;
-- at block 0, every pending address gets "no previous block".
+- an API history follows the pointers down to the oldest block whose own entry exists, so it stops at the snapshot's range: truncated but correct, as on a pruned node;
+- at block 0 the node records in the index database that the index must be rebuilt at the next start (a key of its own: the incomplete flag would keep the node from the Trusted role until then). The next start quick-starts and rebuilds the whole index from the stored blocks, as #54 does for a lost index. The log line "full history stored" says so.
 
-Until the index reaches block 0, an API history stops at the oldest block it can follow: truncated but correct.
+Rejected: completing the index backwards with a persisted map of pending pointers (the first draft). It kept a second, incremental way of building the index next to the forward one, with its own crash cases, for a result the rebuild after a quick start already gives in minutes.
 
 ### 7. Progress and completion
 
 - **Visibility.** A log line every 100,000 blocks with the lowest stored block, the rate and the estimated time left. No API change in this version.
-- **At block 0:** a log line "full history stored", and the slow-start check (`storage.cpp:297-306`) accepts the database again.
+- **At block 0:** a log line "full history stored, the transaction index is rebuilt at the next start", and the slow-start check (`storage.cpp:297-306`) accepts the database again.
 
-### 8. Fixes found on the way (separate commits, cherry-pickable)
+### 8. Fixes found on the way
 
-- **Genesis crash.** A one-block reply for block 0 erases `end()` of an empty vector (`node.cpp:1856` → `5116-5119`), because `neededSequence_` is always 0.
-- **`TransactionsListGet` on an invalid pool.** It reads `rbegin() + offset` on the empty pool of a pruned block (`apihandler.cpp:2727-2760`).
+Shipped on their own in 4.2.532-community.5:
+
+- **Genesis crash** (#45). A one-block reply for block 0 erased `end()` of an empty vector, because `neededSequence_` is always 0.
+- **`TransactionsListGet` on an invalid pool** (#46). It read `rbegin() + offset` on the empty pool of a pruned block.
 
 ## Tests
 
@@ -114,11 +128,12 @@ Until the index reaches block 0, an API history stops at the oldest block it can
 | `backfill-mixed` | Master (official-like) nodes as the only full peers | The history comes from nodes without this code |
 | `backfill-order35` | Special order 35 sets `syncroChangeRound`, activating the responders' anti-duplicate log | The pacing keeps the backfill moving |
 
-**Index.** After the backfill, the transaction history of every wallet through the API equals a full node's.
+**Index.** During the backfill, API histories stop at the snapshot's range and never show a wrong entry. After block 0 and one restart, the transaction history of every wallet through the API equals a full node's.
 
 **Mainnet.** A Docker node from a snapshot, switched to full, backfills for a day without slowing forward sync. Balances and histories are compared with the monitor, as in the upgrade test.
 
 ## Open points
 
-- Whether official mainnet nodes have order 35 active. The pacing works either way; only the rate differs.
-- The order of releases: the two fixes of section 8 can ship first, on their own.
+- **Rate.** With the pacing of section 2 the whole chain takes about 13 days, longer than a full sync from block 0 (35 to 42 hours at the 1,200–1,500 blocks/s of the upgrade test). The gain is a node that works at once, not an earlier full history. Whether official mainnet nodes have order 35 active decides whether the pacing can be relaxed: without it, the anti-duplicate log is off and batches can follow each other faster.
+- **The first published snapshot** is a prerequisite for the mainnet test (see **Since the first draft**).
+- **Docker.** The entrypoint still refuses pruned to full (`entrypoint.sh:110`, "this node pruned its old blocks, so it cannot become a full node"); it must allow it, and say that the node backfills, in the release that ships backward sync.
