@@ -151,6 +151,11 @@ jobs:
           # a full node without its transaction index: quick start, then the index from its blocks
           - name: berkeleydb-index-loss
             env: DB_BACKEND=berkeleydb INDEX_LOSS_NODE=3 INDEX_LOSS_AT=600
+          # a damaged block hashes database is rebuilt from the stored blocks
+          - name: hashdb-damage
+            env: DB_BACKEND=lmdb HASHDB_DAMAGE_AT=500 TARGET_SEQ=1100
+          - name: hashdb-loss-pruned
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 HASHDB_DAMAGE_NODE=6 HASHDB_DAMAGE=remove HASHDB_DAMAGE_AT=2300 TARGET_SEQ=3000
           # network faults on two nodes (tc netem on everything they send and on what is sent to them)
           - name: net-loss
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5
@@ -211,7 +216,7 @@ jobs:
         if: env.SELECTED == 'true'
         run: |
           git submodule update --init -- third-party/lmdb
-          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy
+          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_dump mdb_stat
           sudo apt-get install -y -qq zstd
           sudo apt-get update -qq
           sudo apt-get install -y -qq python3-nacl python3-base58 gdb
