@@ -68,10 +68,10 @@ TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, 
         db_->insert(kSchemaVersionKey, kCurrentSchema);
     }
     if (indexIncomplete_) {
-        cslog() << "TRACE: trxIndex __incomplete__ flag set on load — Trusted role gated until slow-start rebuilds the index";
+        cslog() << "TRACE: trxIndex __incomplete__ flag set on load — Trusted role gated until the index is rebuilt at this start";
     }
     if (!indexComplete_ && !recreate_ && lastIndexedPool_ >= 1000) {
-        cslog() << "TRACE: trxIndex has no completion sentinel — pre-patch indexdb suspected, will be rebuilt by slow-start";
+        cslog() << "TRACE: trxIndex has no completion flag (an earlier build, or trimmed after an unclean stop); it is kept";
     }
 }
 
@@ -300,8 +300,7 @@ void TransactionsIndex::pinFloor(Sequence floor) {
         // gap left unwalked → consensus would propose a divergent trx set. gate Trusted.
         if (recreate_ || prev + 1 < floor) {
             indexIncomplete_ = true;
-            cslog() << "TRACE: trxIndex marked __incomplete__ — Trusted role gated; "
-                       "wipe " << rootPath_ << kDbPath << " and restart for slow-start to clear";
+            cslog() << "TRACE: trxIndex marked __incomplete__ — Trusted role gated until the next start rebuilds it";
             updateIncompleteFlag();
         }
         lastIndexedPool_ = floor;
@@ -491,8 +490,39 @@ bool TransactionsIndex::loadLastIndexedFromLegacyFile() {
     if (!db_->isOpen()) {
         return false;
     }
+    // the file stays when caches/indexdb is removed: its watermark holds only for the index the
+    // official node left, not for an empty one
+    if (!hasIndexEntries()) {
+        cslog() << "trxIndex: the legacy last_indexed file names block " << v << ", but the index is empty";
+        return false;
+    }
     lastIndexedPool_ = v;
     return true;
+}
+
+bool TransactionsIndex::hasIndexEntries() const {
+    if (!db_->isOpen()) {
+        return false;
+    }
+    try {
+        auto& env = db_->env();
+        auto txn = lmdb::txn::begin(env, nullptr, MDB_RDONLY);
+        auto dbi = lmdb::dbi::open(txn, nullptr);
+        auto cur = lmdb::cursor::open(txn, dbi);
+        lmdb::val k, v;
+        bool found = false;
+        if (cur.get(k, v, MDB_FIRST)) {
+            do {
+                found = k.size() == kTrxIndexKeySize;
+            } while (!found && cur.get(k, v, MDB_NEXT));
+        }
+        cur.close();
+        txn.abort();
+        return found;
+    } catch (const std::exception& e) {
+        cswarning() << "trxIndex: cannot read the index: " << e.what();
+        return false;
+    }
 }
 
 bool TransactionsIndex::loadLastIndexedFromDb() {

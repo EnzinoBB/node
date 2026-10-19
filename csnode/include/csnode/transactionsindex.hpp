@@ -81,6 +81,8 @@ private:
     // the watermark of the old last_indexed file (earlier builds, the official node): true if a
     // valid value was loaded into lastIndexedPool_
     bool loadLastIndexedFromLegacyFile();
+    // true if the index holds at least one entry (not only its watermark and flags)
+    bool hasIndexEntries() const;
 
     void setPrevTransBlock(const PublicKey&, cs::Sequence _curr, cs::Sequence _prev);
     void removeLastTransBlock(const PublicKey&, cs::Sequence _curr);
