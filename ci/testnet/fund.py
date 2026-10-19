@@ -210,6 +210,7 @@ def main():
     parser.add_argument("--dpos-at", type=int, default=0)
     parser.add_argument("--reward-round", type=int, default=0)
     parser.add_argument("--min-stake", type=int, default=0)
+    parser.add_argument("--syncro-round", type=int, default=0)
     parser.add_argument("--delegations", action="store_true")
     parser.add_argument("--delegation-seconds", type=int, default=240)
     parser.add_argument("--reconnect-seconds", type=int, default=600)
@@ -237,6 +238,9 @@ def main():
                        struct.pack("<HBQiQiQ", 37, 3, args.reward_round, 1, 0, 0, 0)))
     if args.min_stake:
         orders.append(("order 22 (MinStakeValue = %d)" % args.min_stake, struct.pack("<HiQ", 22, args.min_stake, 0)))
+    if args.syncro_round:
+        # Consensus::syncroChangeRound: from that round the sync answers (AwaitAnswer, NoSuchBlocks...) count
+        orders.append(("order 35 (syncroChangeRound = %d)" % args.syncro_round, struct.pack("<HQ", 35, args.syncro_round)))
     if orders:
         for name, cmd in orders:
             ok, message = send(client, master, SPECIAL_TARGET, 0, managing=cmd)

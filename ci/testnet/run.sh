@@ -11,6 +11,9 @@
 #        (default 30) and then keeps random transfers flowing for LOAD_SECONDS (default 300)
 #        DPOS_AT / REWARD_ROUND (default 0 = off, needs FUND=1): the master key, which is also the
 #        starter key, moves StartingDPOS and turns block rewards on (special orders 9 and 37)
+#        SYNCRO_ROUND (default 0 = off, needs FUND=1): special order 35 makes the sync answers count
+#        from that round (Consensus::syncroChangeRound), as on a network that issued it
+#        JOIN_FULL=1: the node of JOIN_PRUNED_AT syncs from block 0 as a full node instead
 #        MIN_STAKE (default 0 = off, needs FUND=1): special order 22 sets the minimum stake; with the
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
@@ -100,6 +103,8 @@ DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+SYNCRO_ROUND=${SYNCRO_ROUND:-0}
+JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
 PRUNE_NODE=${PRUNE_NODE:-0}
 NODE_STORAGE=${NODE_STORAGE:-}
@@ -138,7 +143,7 @@ if [ -n "$NODE_STORAGE" ]; then
 fi
 # every node with pruned storage: the PRUNE_NODE, the joining node, and those of NODE_STORAGE
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
-    if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ] || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
+    if [ "$i" -eq "$PRUNE_NODE" ] || { [ "$i" -eq "$JOIN_NODE" ] && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
@@ -716,7 +721,7 @@ while :; do
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
-            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" \
+            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" --syncro-round "$SYNCRO_ROUND" \
             $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
