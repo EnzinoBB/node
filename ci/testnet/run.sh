@@ -71,6 +71,11 @@
 #        again each time and end with the same state digests
 #        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
 #        network restarted, as after a power cut; the nodes must agree again
+#        CHECKPOINT_AHEAD_AT (default 0 = off): at that sequence node CHECKPOINT_AHEAD_NODE (default 3,
+#        a checkpoint a minute, 3 kept) is killed, started once offline with --set-bc-top a few blocks
+#        before its second newest checkpoint, and killed again: its two newest checkpoints are then
+#        ahead of the blocks on disk. It is restarted on every exit, at most 5 times: it must set
+#        those checkpoints aside, quick-start from the older one and end with the same state digests
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -96,6 +101,8 @@ FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
 LOAD_SECONDS=${LOAD_SECONDS:-300}
 DISK_FULL_NODE=${DISK_FULL_NODE:-0}
+CHECKPOINT_AHEAD_AT=${CHECKPOINT_AHEAD_AT:-0}
+CHECKPOINT_AHEAD_NODE=${CHECKPOINT_AHEAD_NODE:-3}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
@@ -252,7 +259,7 @@ storage_section() {
         # pruning follows the periodic checkpoints only: it starts at #2000; a checkpoint a minute as
         # well, so that kills of a pruned node land right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
-    elif [ "$i" -eq "$CRASH_NODE" ]; then
+    elif [ "$i" -eq "$CRASH_NODE" ] || { [ "$CHECKPOINT_AHEAD_AT" -gt 0 ] && [ "$i" -eq "$CHECKPOINT_AHEAD_NODE" ]; }; then
         # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
@@ -713,6 +720,49 @@ while :; do
         fi
     fi
 
+    if [ "$CHECKPOINT_AHEAD_AT" -gt 0 ] && [ "${ca_done:-0}" -eq 0 ] && [ "$min" -ge "$CHECKPOINT_AHEAD_AT" ]; then
+        ca=$CHECKPOINT_AHEAD_NODE; ca_dir="$WORK/n$ca"
+        ca_cps=$(ls "$ca_dir/qs" | grep -E '^[1-9][0-9]*$' | sort -n | tail -2)
+        if [ "$(wc -w <<<"$ca_cps")" -ge 2 ]; then
+            ca_done=1
+            ca_top=$(( $(head -1 <<<"$ca_cps") - 5 ))
+            kill -KILL "${PIDS[$ca]}" 2>/dev/null || true; wait "${PIDS[$ca]}" 2>/dev/null || true
+            pkill -KILL -f "cs.testnet.node=n$ca " 2>/dev/null || true
+            # offline (a host nobody listens on) with --set-bc-top, killed once the database is cut
+            echo "127.0.0.1:9 11111111111111111111111111111111" > "$ca_dir/hosts-none.txt"
+            awk -v port=$((BASE_PORT + 500 + ca)) '
+                /^\[/ { section = $0 }
+                /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
+                section == "[host_input]" && /^port=/ { print "port=" port; next }
+                { print }' "$ca_dir/config.ini" > "$ca_dir/config-offline.ini"
+            ca_before=$(grep -ac 'Changing consensus settings to' "$ca_dir/node.log" || true)
+            (cd "$ca_dir" && exec "$BIN" --db-path db --config-file config-offline.ini --set-bc-top "$ca_top" </dev/null >> stdout.log 2>&1) &
+            ca_pid=$!
+            ca_t0=$(date +%s)
+            until [ "$(grep -ac 'Changing consensus settings to' "$ca_dir/node.log" || true)" -gt "${ca_before:-0}" ] \
+                || ! kill -0 "$ca_pid" 2>/dev/null || [ $(( $(date +%s) - ca_t0 )) -ge 120 ]; do sleep 1; done
+            kill -KILL "$ca_pid" 2>/dev/null || true; wait "$ca_pid" 2>/dev/null || true
+            pkill -KILL -f "cs.testnet.node=n$ca " 2>/dev/null || true
+            echo "checkpoint-ahead test: n$ca cut to block $ca_top, its checkpoints $(tr '\n' ' ' <<<"$ca_cps")are ahead of it"
+            ca_lines=$(wc -l < "$ca_dir/node.log")
+            ca_restarts=0
+            start_node "$ca"
+        fi
+    fi
+    if [ "${ca_done:-0}" -eq 1 ] && ! kill -0 "${PIDS[$CHECKPOINT_AHEAD_NODE]}" 2>/dev/null; then
+        wait "${PIDS[$CHECKPOINT_AHEAD_NODE]}" 2>/dev/null || true
+        pkill -KILL -f "cs.testnet.node=n$CHECKPOINT_AHEAD_NODE " 2>/dev/null || true
+        ca_restarts=$((ca_restarts + 1))
+        if [ "$ca_restarts" -gt 5 ]; then
+            echo "FAIL: n$CHECKPOINT_AHEAD_NODE stopped at every start ($ca_restarts times) with checkpoints ahead of its blocks"
+            tail -n +"$((ca_lines + 1))" "$WORK/n$CHECKPOINT_AHEAD_NODE/node.log" | grep -aE 'startSequence|ahead of the blocks|Couldn.t open|QUICK START' | tail -6
+            exit 1
+        fi
+        echo "checkpoint-ahead test: n$CHECKPOINT_AHEAD_NODE exited, start $ca_restarts"
+        sleep 3
+        start_node "$CHECKPOINT_AHEAD_NODE"
+    fi
+
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
@@ -756,6 +806,14 @@ if [ -n "$CONTRACTS_PID" ]; then
 elif [ "$CONTRACTS" = "1" ]; then
     echo "FAIL: contracts.py never started"
     exit 1
+fi
+
+if [ "$CHECKPOINT_AHEAD_AT" -gt 0 ]; then
+    [ "${ca_done:-0}" = 1 ] || { echo "FAIL: the checkpoint-ahead test did not run (fewer than 2 checkpoints)"; exit 1; }
+    after=$(tail -n +"$((ca_lines + 1))" "$WORK/n$CHECKPOINT_AHEAD_NODE/node.log")
+    grep -aq 'is ahead of the blocks on disk, moving it to' <<<"$after" \
+        || { echo "FAIL: n$CHECKPOINT_AHEAD_NODE set no checkpoint aside"; exit 1; }
+    echo "checkpoint-ahead test: n$CHECKPOINT_AHEAD_NODE set $(grep -ac 'is ahead of the blocks on disk, moving it to' <<<"$after") checkpoint(s) aside in $ca_restarts failed start(s), then caught up"
 fi
 
 if [ -n "$FUND_PID" ]; then

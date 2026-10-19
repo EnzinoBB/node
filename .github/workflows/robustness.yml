@@ -145,6 +145,9 @@ jobs:
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 TARGET_SEQ=3000
           - name: berkeleydb-term-kill
             env: DB_BACKEND=berkeleydb TERM_KILL_NODE=3
+          # quick-start checkpoints ahead of the blocks on disk are set aside, not retried for ever
+          - name: checkpoint-ahead
+            env: DB_BACKEND=lmdb CHECKPOINT_AHEAD_AT=700 TARGET_SEQ=1300
           # a node that lost its transaction index rebuilds it from its blocks after a quick start
           - name: lmdb-pruned-index-loss
             env: DB_BACKEND=lmdb PRUNE_NODE=6 INDEX_LOSS_AT=2300 TARGET_SEQ=3000
