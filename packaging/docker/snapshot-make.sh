@@ -7,14 +7,15 @@
 # then started once more, so that its last log line "STATE DIGEST #<seq> <hex> wallets <n>" is the
 # digest of its head. Writes <out>/credits-pruned-<seq>.tar.zst and <out>/latest.json. The snapshot
 # holds db/lmdb, caches/ (but poolcachedb), qs/, roundstat.dat and smartcontracts.dat; every LMDB environment is
-# copied with mdb_copy -c, which writes only the live pages, and each copy must read through with
-# mdb_dump (next to mdb_copy): a corrupt environment stops the script, so that it never reaches the
-# nodes that restore the snapshot. Keys, configuration and logs stay out.
+# copied with mdb_copy -c, which writes only the live pages, and each copy must pass lmdb-check.sh
+# (with mdb_dump and mdb_stat next to mdb_copy): a corrupt environment stops the script, so that it
+# never reaches the nodes that restore the snapshot. Keys, configuration and logs stay out.
 set -euo pipefail
 
 node=$1 out=$2 mdb_copy=$3 run=${4:-}
-mdb_dump=$(dirname "$mdb_copy")/mdb_dump
-[ -x "$mdb_dump" ] || { echo "no mdb_dump next to $mdb_copy" >&2; exit 1; }
+tools=$(dirname "$mdb_copy")
+here=$(cd "$(dirname "$0")" && pwd)
+[ -x "$tools/mdb_dump" ] && [ -x "$tools/mdb_stat" ] || { echo "no mdb_dump and mdb_stat next to $mdb_copy" >&2; exit 1; }
 [ -d "$node/db/lmdb" ] || { echo "no $node/db/lmdb: not a pruned LMDB node" >&2; exit 1; }
 [ -d "$node/qs" ] || { echo "no $node/qs: no checkpoint" >&2; exit 1; }
 
@@ -36,8 +37,8 @@ copy_env() {
     mkdir -p "$stage/$1"
     "$mdb_copy" -c "$node/$1" "$stage/$1" 2>/dev/null \
         || { echo "cannot copy the LMDB environment $1: it is corrupt or in use" >&2; exit 1; }
-    "$mdb_dump" -a "$stage/$1" >/dev/null 2>&1 \
-        || { echo "the LMDB environment $1 is corrupt: it does not read through" >&2; exit 1; }
+    "$here/lmdb-check.sh" "$tools" "$stage/$1" 2>/dev/null \
+        || { echo "the LMDB environment $1 is corrupt: $("$here/lmdb-check.sh" "$tools" "$stage/$1" 2>&1 | sed "s|$stage/||")" >&2; exit 1; }
 }
 copy_env db/lmdb
 for env in "$node"/caches/*/; do

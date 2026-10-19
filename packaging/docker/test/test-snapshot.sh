@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests snapshot-make.sh and snapshot-restore.sh on a fake pruned node directory.
-# Usage: test-snapshot.sh <dir with mdb_copy, mdb_load and mdb_dump>
+# Usage: test-snapshot.sh <dir with mdb_copy, mdb_load, mdb_dump and mdb_stat>
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 tools=$(cd "$1" && pwd)
@@ -63,6 +63,20 @@ if "$here/snapshot-make.sh" "$bad" "$bad_out" "$tools/mdb_copy" 2>"$work/bad.err
 fi
 grep -q 'caches/hashdb' "$work/bad.err" || fail "the refusal does not name the environment: $(cat "$work/bad.err")"
 ! ls "$bad_out"/*.tar.zst >/dev/null 2>&1 || fail "an archive was left behind for a corrupt environment"
+
+# every page after the meta pages zeroed: mdb_dump alone reads that as an empty tree, with no error
+"$here/lmdb-check.sh" "$tools" "$node/caches/seqdb" || fail "lmdb-check refuses a whole environment"
+cp -a "$node" "$work/zero-node"
+python3 -c 'import sys
+for i in range(5000): sys.stdout.write(" %064x\n %s\n" % (i * 7919, str(i).encode().hex()))' \
+    | { printf 'VERSION=3\nformat=bytevalue\ntype=btree\nHEADER=END\n'; cat; printf 'DATA=END\n'; } \
+    > "$work/hashdb.dump"
+rm -rf "$work/zero-node/caches/hashdb"; mkdir -p "$work/zero-node/caches/hashdb"
+"$tools/mdb_load" -f "$work/hashdb.dump" "$work/zero-node/caches/hashdb"
+used=$("$tools/mdb_stat" -e "$work/zero-node/caches/hashdb" | sed -nE 's/.*Number of pages used: ([0-9]+).*/\1/p')
+dd if=/dev/zero of="$work/zero-node/caches/hashdb/data.mdb" bs=4096 seek=2 count=$((used - 2)) conv=notrunc 2>/dev/null
+"$tools/mdb_dump" "$work/zero-node/caches/hashdb" >/dev/null 2>&1 || fail "the zeroed environment was expected to dump without error"
+! "$here/lmdb-check.sh" "$tools" "$work/zero-node/caches/hashdb" 2>/dev/null || fail "lmdb-check accepts a zeroed environment"
 
 # restore into an empty data dir from the manifest file
 data="$work/data"
