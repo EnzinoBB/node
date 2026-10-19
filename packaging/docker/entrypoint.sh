@@ -32,6 +32,13 @@ for v in "$API" "$EXECUTOR"; do case "$v" in on|off) ;; *) log "CREDITS_API and 
 
 cd "$DATA"
 rm -rf .restore-tmp
+# a restore interrupted while it moved its files: what it moved is the snapshot's, not this node's (a
+# restore only runs on a data directory without a database), so remove it and restore again below
+if [ -e .restore-incomplete ]; then
+    log "an interrupted snapshot restore left part of a snapshot: removing it to restore again"
+    rm -rf db caches qs roundstat.dat smartcontracts.dat snapshot.json snapshot.verified
+    rm -f .restore-incomplete
+fi
 
 # config.ini from the package's template: no [storage] section from the template, ports, absolute
 # executor paths, one executor per container
@@ -119,7 +126,11 @@ elif [ "$cfg_mode" = pruned ] && [ "$SNAPSHOT" = auto ]; then
         log "snapshots hold an LMDB database, this node uses $cfg_backend: syncing from block 0"
     else
         log "restoring the latest snapshot from $SNAPSHOT_URL"
-        "$OPT/snapshot-restore.sh" "$DATA" "$SNAPSHOT_URL" || log "syncing from block 0 instead"
+        restore_rc=0
+        "$OPT/snapshot-restore.sh" "$DATA" "$SNAPSHOT_URL" || restore_rc=$?
+        # interrupted while moving its files: part of a snapshot is in place, start nothing on it
+        [ ! -e .restore-incomplete ] || refuse "the snapshot restore stopped while it moved its files (exit $restore_rc); start again to retry it" 5
+        [ "$restore_rc" = 0 ] || log "syncing from block 0 instead"
     fi
 fi
 echo "mode=$cfg_mode backend=$cfg_backend" > .storage
@@ -145,11 +156,15 @@ if [ -f snapshot.json ] && [ ! -f snapshot.verified ]; then
         refuse "snapshot.json has no valid block number and digest" 4
     fi
     node_pid=$$
+    # only a line the node writes from now on counts: the rotated logs of an earlier run (a reset and
+    # the same snapshot restored again) may name the same block
+    grep -ah 'STATE DIGEST #' log/log_*.txt > .digest-before 2>/dev/null || true
     (
         deadline=$(( $(date +%s) + DIGEST_WAIT ))
         while [ "$(date +%s)" -lt "$deadline" ]; do
             # the start-up digest: a checkpoint saved at shutdown labels it one block higher (S + 1)
-            line=$(cat log/log_*.txt 2>/dev/null | grep -a -E "STATE DIGEST #($snap_seq|$((snap_seq + 1))) " | tail -1 || true)
+            line=$(cat $(ls -tr log/log_*.txt 2>/dev/null) /dev/null 2>/dev/null | grep -a -E "STATE DIGEST #($snap_seq|$((snap_seq + 1))) " \
+                   | grep -avxF -f .digest-before | tail -1 || true)
             if [ -n "$line" ]; then
                 got=$(sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' <<<"$line")
                 if [ "${got,,}" = "${snap_digest,,}" ]; then

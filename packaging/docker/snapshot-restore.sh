@@ -6,7 +6,9 @@
 # Reads the manifest (latest.json), downloads the archive it names from the same location, checks
 # its SHA-256, extracts it into <data>/.restore-tmp and only then moves db/, caches/, qs/ and the
 # .dat files into <data>, with the manifest as <data>/snapshot.json. Exit 0: restored. Exit 2: not
-# restored, with the reason on stderr; <data> is left as it was.
+# restored, with the reason on stderr; <data> is left as it was. Any other failure happens while the
+# files are moved into <data>: <data>/.restore-incomplete then stays, and what was moved is the
+# snapshot's, to be removed before the next attempt (the entrypoint does so).
 set -euo pipefail
 
 data=$1 manifest=$2
@@ -46,9 +48,13 @@ mkdir -p "$tmp/x"
 zstd -q -dc "$tmp/$file" | tar -C "$tmp/x" -xf - || give_up "cannot extract $file"
 [ -d "$tmp/x/db/lmdb" ] && [ -d "$tmp/x/qs" ] || give_up "$file has no db/lmdb or qs"
 
+# from here on <data> changes: the marker stays until the last move, so that an interrupted restore is
+# redone and never taken for the node's own data
+touch "$data/.restore-incomplete"
 for p in db caches qs roundstat.dat smartcontracts.dat; do
     [ ! -e "$tmp/x/$p" ] || { rm -rf "${data:?}/$p"; mv "$tmp/x/$p" "$data/$p"; }
 done
 mv "$tmp/latest.json" "$data/snapshot.json"
+rm -f "$data/.restore-incomplete"
 rm -rf "$tmp"
 echo "snapshot restored: block $seq from $file"
