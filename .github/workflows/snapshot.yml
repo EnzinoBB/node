@@ -39,7 +39,7 @@ jobs:
       - name: Tools
         run: |
           git submodule update --init -- third-party/lmdb third-party/thrift-interface-definitions
-          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy
+          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_dump
           sudo apt-get install -y -qq zstd python3-nacl python3-base58
           python3 -m pip install --user --quiet --break-system-packages thriftpy2
 
