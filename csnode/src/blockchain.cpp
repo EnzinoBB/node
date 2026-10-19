@@ -1626,7 +1626,7 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
         cachesTainted_ = true;
         cserror() << kLogPrefix << "block #" << pool_seq << " failed to apply to the caches: stopping the node without "
                   << "saving a checkpoint; the next start reads the blocks again from the last checkpoint";
-        Node::requestStop();
+        Node::stopOnError();
         return std::nullopt;
     }
     //========================================
@@ -2238,7 +2238,7 @@ cs::Sequence BlockChain::getPreviousPoolSeq(const csdb::Address& addr, cs::Seque
             cserror() << kLogPrefix << "Node will be stopped due to index error. Please restart it.";
 
             trxIndex_->invalidate();
-            Node::requestStop();
+            Node::stopOnError();
         }
 
         return kWrongSequence;
