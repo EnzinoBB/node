@@ -102,6 +102,8 @@ public:
         // 0 = leave Storage defaults (5000 / 100) untouched.
         size_t asyncWriteQueueMax = 0;
         size_t writeBatchSize = 0;
+        // blocks are written by a writer thread, as for RocksDB (the path overload of open sets it)
+        bool asyncWrites = false;
     };
 
     struct OpenProgress {

@@ -490,6 +490,9 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     if (opt.writeBatchSize > 0) {
         d->writeBatchSize_ = opt.writeBatchSize;
     }
+    if (opt.asyncWrites) {
+        d->async_writes = true;
+    }
 
     // Start async writer (idempotent: re-opens won't spawn a second thread).
     if (d->async_writes && !d->write_thread.joinable()) {
