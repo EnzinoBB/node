@@ -105,7 +105,7 @@ void TransactionsIndex::forceRebuild() {
 }
 
 void TransactionsIndex::onStartReadFromDb(Sequence _lastWrittenPoolSeq) {
-    if (recreate_) {
+    if (recreate_ || rebuildDeferred_) {
         return;
     }
     if (lastIndexedPool_ == kWrongSequence) {
@@ -125,6 +125,9 @@ void TransactionsIndex::onStartReadFromDb(Sequence _lastWrittenPoolSeq) {
 }
 
 void TransactionsIndex::onReadFromDb(const csdb::Pool& _pool) {
+    if (rebuildDeferred_) {
+        return;
+    }
     if (_pool.sequence() == 0 && recreate_) {
         reset();
         init();
@@ -136,6 +139,9 @@ void TransactionsIndex::onReadFromDb(const csdb::Pool& _pool) {
 }
 
 void TransactionsIndex::onDbReadFinished() {
+    if (rebuildDeferred_) {
+        return;
+    }
     if (recreate_) {
         recreate_ = false;
         if (indexIncomplete_) {
@@ -215,6 +221,52 @@ void TransactionsIndex::flush() {
     if (db_->isOpen()) {
         db_->flush();
     }
+}
+
+void TransactionsIndex::deferRebuild() {
+    rebuildDeferred_ = true;
+}
+
+bool TransactionsIndex::rebuildDeferred() const {
+    return rebuildDeferred_;
+}
+
+void TransactionsIndex::rebuildFrom(Sequence first, Sequence last, const std::function<csdb::Pool(Sequence)>& load) {
+    reset();
+    init();
+    if (db_->isOpen()) {
+        db_->insert(kSchemaVersionKey, kCurrentSchema);
+    }
+    // the walk of a slow start, over the stored blocks only: an address's oldest entry then names
+    // no previous block, as the entries pruning leaves behind
+    recreate_ = true;
+    lapoos_.clear();
+    lastIndexedPool_ = kWrongSequence;
+    size_t walked = 0;
+    size_t missing = 0;
+    for (Sequence seq = first; first <= last && seq <= last; ++seq) {
+        const csdb::Pool pool = load(seq);
+        if (!pool.is_valid()) {
+            ++missing;
+            continue;
+        }
+        updateFromNextBlock(pool);
+        ++walked;
+    }
+    recreate_ = false;
+    rebuildDeferred_ = false;
+    lapoos_.clear();
+    lastIndexedPool_ = last;
+    indexIncomplete_ = false;
+    updateIncompleteFlag();
+    indexComplete_ = true;
+    updateCompleteFlag();
+    updateLastIndexed();
+    db_->flush();
+    if (missing > 0) {
+        cswarning() << "trxIndex: " << missing << " blocks of " << first << ".." << last << " could not be read";
+    }
+    cslog() << "trxIndex rebuilt from the stored blocks " << first << ".." << last << " (" << walked << " blocks)";
 }
 
 void TransactionsIndex::pinFloor(Sequence floor) {

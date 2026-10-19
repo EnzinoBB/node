@@ -47,6 +47,10 @@
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
 #        in the middle of the conversion and started again: it must resume and finish
+#        INDEX_LOSS_AT (default 0 = off, needs PRUNE_NODE): at that sequence, once the pruned node has
+#        pruned, it is stopped, its transaction index (caches/indexdb) is removed and it is started
+#        again: it cannot slow-start without its old blocks, so it must quick-start and rebuild the
+#        index from the blocks it stores
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
 #        with pruned storage like PRUNE_NODE and must end with the same state digest
@@ -55,6 +59,11 @@
 #        CRASH_NODE (default 0 = off): that node is killed with SIGKILL CRASH_TIMES times (default 6)
 #        from sequence CRASH_FROM (default 150) and restarted each time; it saves a checkpoint every
 #        minute, and every other kill lands right after one; it must end with the same state digests
+#        TERM_KILL_NODE (default 0 = off): that node is stopped as docker stop does when the node is
+#        slow to stop: SIGTERM, then SIGKILL while it shuts down, TERM_KILL_TIMES times (default 4)
+#        from sequence TERM_KILL_FROM (default 150). Odd kills land while the block storage closes
+#        (right after STOP REQUESTED), even ones while the quick-start caches are saved; it must start
+#        again each time and end with the same state digests
 #        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
 #        network restarted, as after a power cut; the nodes must agree again
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
@@ -93,6 +102,9 @@ DB_BACKEND=${DB_BACKEND:-}
 CRASH_NODE=${CRASH_NODE:-0}
 CRASH_TIMES=${CRASH_TIMES:-6}
 CRASH_FROM=${CRASH_FROM:-150}
+TERM_KILL_NODE=${TERM_KILL_NODE:-0}
+TERM_KILL_TIMES=${TERM_KILL_TIMES:-4}
+TERM_KILL_FROM=${TERM_KILL_FROM:-150}
 CRASH_ALL_AT=${CRASH_ALL_AT:-0}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
@@ -100,6 +112,7 @@ SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
+INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
 MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
@@ -402,6 +415,9 @@ deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 restarted=0
 stopped_at=0
 crashes=0
+term_kills=0
+term_kill_next=0
+term_kill_during_save=0
 crash_wait_qs=""
 crash_next=0
 crashed_all=0
@@ -591,6 +607,54 @@ while :; do
         EXTRA_ARGS_6="--convert-db --convert-batch 50" start_node 6
     fi
 
+    if [ "$INDEX_LOSS_AT" -gt 0 ] && [ "${index_lost:-0}" -eq 0 ] && [ "$min" -ge "$INDEX_LOSS_AT" ] \
+        && grep -aq 'pruned storage: blocks before .* removed' "$WORK/n$PRUNE_NODE/node.log"; then
+        index_lost=1
+        kill -TERM "${PIDS[$PRUNE_NODE]}"; wait "${PIDS[$PRUNE_NODE]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$PRUNE_NODE " 2>/dev/null || true
+        rm -rf "$WORK/n$PRUNE_NODE/caches/indexdb"
+        index_lines=$(wc -l < "$WORK/n$PRUNE_NODE/node.log")
+        start_node "$PRUNE_NODE"
+        echo "index loss test: n$PRUNE_NODE restarted without its transaction index at sequence $min"
+    fi
+
+    # SIGTERM, then SIGKILL in the middle of the shutdown, as docker stop after its timeout
+    if [ "$TERM_KILL_NODE" -gt 0 ] && [ "$term_kills" -lt "$TERM_KILL_TIMES" ] && [ "$min" -ge "$TERM_KILL_FROM" ] \
+        && [ "$(date +%s)" -ge "$term_kill_next" ]; then
+        term_kills=$((term_kills + 1))
+        tk_k=$TERM_KILL_NODE
+        tk_log="$WORK/n$tk_k/node.log"
+        if [ $((term_kills % 2)) -eq 1 ]; then tk_mark='STOP REQUESTED'; else tk_mark='try to save caches for QUICK START'; fi
+        tk_before_mark=$(grep -ac "$tk_mark" "$tk_log" || true)
+        tk_before_saved=$(grep -ac 'caches for QUICK START saved' "$tk_log" || true)
+        tk_at=$(seq_of "$tk_k")
+        kill -TERM "${PIDS[$tk_k]}" 2>/dev/null || true
+        tk_deadline=$(( $(date +%s) + 120 ))
+        while [ "$(grep -ac "$tk_mark" "$tk_log" || true)" -le "${tk_before_mark:-0}" ] && kill -0 "${PIDS[$tk_k]}" 2>/dev/null \
+            && [ "$(date +%s)" -lt "$tk_deadline" ]; do
+            sleep 0.02
+        done
+        # odd kills: a little later, so that the storage is closing; even ones: at once
+        [ $((term_kills % 2)) -eq 1 ] && sleep "0.$((RANDOM % 5))"
+        if kill -0 "${PIDS[$tk_k]}" 2>/dev/null; then
+            kill -KILL "${PIDS[$tk_k]}" 2>/dev/null || true
+            if [ "$(grep -ac 'caches for QUICK START saved' "$tk_log" || true)" -le "${tk_before_saved:-0}" ]; then
+                term_kill_during_save=$((term_kill_during_save + 1))
+                tk_landed="before the caches were saved"
+            else
+                tk_landed="after the caches were saved"
+            fi
+        else
+            tk_landed="too late: the node had already exited"
+        fi
+        wait "${PIDS[$tk_k]}" 2>/dev/null || true
+        pkill -KILL -f "cs.testnet.node=n$tk_k " 2>/dev/null || true
+        echo "term-kill test: SIGTERM then SIGKILL n$tk_k (kill $term_kills of $TERM_KILL_TIMES, after \"$tk_mark\") at sequence $tk_at, $tk_landed"
+        sleep 5
+        start_node "$tk_k"
+        term_kill_next=$(( $(date +%s) + 60 + RANDOM % 40 ))
+    fi
+
     if [ "$DISK_FULL_NODE" -gt 0 ] && [ "$disk_filled_at" -eq 0 ] && [ "$min" -ge "$DISK_FULL_AT" ]; then
         dd if=/dev/zero of="$WORK/n$DISK_FULL_NODE/db/filler" bs=1M 2>/dev/null || true
         disk_filled_at=$(date +%s)
@@ -766,6 +830,19 @@ if [ "$CONVERT_AT" -gt 0 ]; then
         grep -aq 'QUICK START!' <<<"$after" || { echo "FAIL: n$i did not quick-start after the conversion"; exit 1; }
     done
     echo "convert test: n4 now lmdb, n6 now rocksdb (resumed after a kill), both quick-started"
+fi
+if [ "$TERM_KILL_NODE" -gt 0 ]; then
+    [ "$term_kills" -eq "$TERM_KILL_TIMES" ] || { echo "FAIL: only $term_kills of $TERM_KILL_TIMES term-kills ran"; exit 1; }
+    [ "$term_kill_during_save" -gt 0 ] || { echo "FAIL: no SIGKILL landed before n$TERM_KILL_NODE saved its caches"; exit 1; }
+    echo "term-kill test: n$TERM_KILL_NODE was killed $term_kills time(s) while stopping, $term_kill_during_save before its caches were saved"
+fi
+if [ "$INDEX_LOSS_AT" -gt 0 ]; then
+    [ "${index_lost:-0}" = 1 ] || { echo "FAIL: n$PRUNE_NODE never pruned, the index loss test did not run"; exit 1; }
+    after=$(tail -n +"$((index_lines + 1))" "$WORK/n$PRUNE_NODE/node.log")
+    grep -aq 'QUICK START!' <<<"$after" || { echo "FAIL: n$PRUNE_NODE did not quick-start without its index"; exit 1; }
+    grep -aq 'trxIndex rebuilt from the stored blocks' <<<"$after" \
+        || { echo "FAIL: n$PRUNE_NODE did not rebuild its transaction index"; exit 1; }
+    echo "index loss test: n$PRUNE_NODE quick-started and rebuilt its index: $(grep -a -m1 'trxIndex rebuilt from the stored blocks' <<<"$after" | sed 's/.*trxIndex/trxIndex/')"
 fi
 # every node started from an empty db/: the start-up check must have stayed silent there (it prints
 # "block database:" only on a backend mismatch, a resume or --convert-only); n4 and n6 of the
