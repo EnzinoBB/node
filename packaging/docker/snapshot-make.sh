@@ -6,7 +6,7 @@
 # <node dir> is the working directory of a pruned LMDB node that has been stopped cleanly and was
 # then started once more, so that its last log line "STATE DIGEST #<seq> <hex> wallets <n>" is the
 # digest of its head. Writes <out>/credits-pruned-<seq>.tar.zst and <out>/latest.json. The snapshot
-# holds db/lmdb, caches/, qs/, roundstat.dat and smartcontracts.dat; every LMDB environment is
+# holds db/lmdb, caches/ (but poolcachedb), qs/, roundstat.dat and smartcontracts.dat; every LMDB environment is
 # copied with mdb_copy -c, which writes only the live pages, and each copy must read through with
 # mdb_dump (next to mdb_copy): a corrupt environment stops the script, so that it never reaches the
 # nodes that restore the snapshot. Keys, configuration and logs stay out.
@@ -42,6 +42,8 @@ copy_env() {
 copy_env db/lmdb
 for env in "$node"/caches/*/; do
     rel=caches/$(basename "$env")
+    # the node wipes poolcachedb at every start: nothing in it is worth shipping
+    [ "$rel" != caches/poolcachedb ] || continue
     if [ -e "$env/data.mdb" ]; then copy_env "$rel"; else mkdir -p "$stage/caches" && cp -a "$env" "$stage/$rel"; fi
 done
 cp -a "$node/qs" "$stage/qs"

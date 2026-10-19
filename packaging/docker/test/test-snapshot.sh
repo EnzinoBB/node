@@ -43,6 +43,7 @@ assert m["run"] == "https://example/run/1", m
 PY
 tar -I zstd -tf "$archive" | grep -q 'keys/' && fail "keys in the snapshot"
 tar -I zstd -tf "$archive" | grep -q 'log/' && fail "logs in the snapshot"
+tar -I zstd -tf "$archive" | grep -q 'poolcachedb' && fail "poolcachedb in the snapshot"
 
 # a corrupt LMDB environment in caches/ stops the script, and no archive is written
 bad="$work/bad-node"
@@ -67,7 +68,7 @@ grep -q 'caches/hashdb' "$work/bad.err" || fail "the refusal does not name the e
 data="$work/data"
 mkdir -p "$data"
 "$here/snapshot-restore.sh" "$data" "$out/latest.json" || fail "restore exit $?"
-for p in db/lmdb/data.mdb caches/hashdb/data.mdb qs/1000/walletscache.dat roundstat.dat smartcontracts.dat snapshot.json; do
+for p in db/lmdb/data.mdb caches/hashdb/data.mdb caches/seqdb/data.mdb caches/indexdb/data.mdb qs/1000/walletscache.dat roundstat.dat smartcontracts.dat snapshot.json; do
     [ -e "$data/$p" ] || fail "restored $p missing"
 done
 [ -e "$data/.restore-tmp" ] && fail "restore temp left behind"
