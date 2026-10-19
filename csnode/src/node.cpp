@@ -14,6 +14,7 @@
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
 #include <csnode/node.hpp>
+#include <csnode/blockrequest.hpp>
 #include <csnode/nodecore.hpp>
 #include <csnode/nodeutils.hpp>
 #include <csnode/poolsynchronizer.hpp>
@@ -1796,8 +1797,10 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
     csdebug() << "NODE> got request for " << sequences.size() << " block(s) from " << cs::Utils::byteStreamToHex(sender.data(), sender.size());
 
 
-    if (sequences.front() > blockChain_.getLastSeq()) {
-        csdebug() << "NODE> Get block request> The requested block: " << sequences.front() << " is beyond my last block";
+    if (cs::answerBlockRequest(sequences.front(), blockChain_.getFirstStoredSequence(), blockChain_.getLastSeq())
+            != cs::BlockRequestAnswer::Serve) {
+        csdebug() << "NODE> Get block request> The requested block: " << sequences.front() << " is not stored here (blocks "
+                  << blockChain_.getFirstStoredSequence() << ".." << blockChain_.getLastSeq() << ")";
         sendSyncroMessage(cs::SyncroMessage::NoSuchBlocks, sender);
         return;
     }
@@ -1825,6 +1828,12 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
         }
     }
 
+    if (poolsBlock.empty()) {
+        // AwaitAnswer was sent: say there is nothing, so that the requester frees this neighbour
+        // (an empty reply is not sent at all)
+        sendSyncroMessage(cs::SyncroMessage::NoSuchBlocks, sender);
+        return;
+    }
     sendReply();
 }
 
