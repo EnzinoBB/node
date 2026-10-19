@@ -122,7 +122,7 @@ INDEX_LOSS_NODE=${INDEX_LOSS_NODE:-$PRUNE_NODE}
 HASHDB_DAMAGE_AT=${HASHDB_DAMAGE_AT:-0}
 HASHDB_DAMAGE_NODE=${HASHDB_DAMAGE_NODE:-3}
 HASHDB_DAMAGE=${HASHDB_DAMAGE:-zero}
-MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
+MDB_COPY=${MDB_COPY:-$REPO/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
 declare -a STORE_BACKEND STORE_PRUNED
@@ -640,8 +640,8 @@ while :; do
             pages=$("$(dirname "$MDB_COPY")/mdb_stat" -e "$WORK/n$hd/caches/hashdb" | sed -nE 's/.*Number of pages used: ([0-9]+).*/\1/p')
             [ "${pages:-0}" -gt 4 ] || { echo "FAIL: n$hd hashdb has only ${pages:-no} pages in use"; exit 1; }
             dd if=/dev/zero of="$WORK/n$hd/caches/hashdb/data.mdb" bs=4096 seek=2 count=$(( pages - 2 )) conv=notrunc 2>/dev/null
-            if "$(dirname "$MDB_COPY")/mdb_dump" "$WORK/n$hd/caches/hashdb" >/dev/null 2>&1; then
-                echo "FAIL: n$hd hashdb still reads after the damage"; exit 1
+            if "$REPO/packaging/docker/lmdb-check.sh" "$(dirname "$MDB_COPY")" "$WORK/n$hd/caches/hashdb" 2>/dev/null; then
+                echo "FAIL: n$hd hashdb is still whole after the damage"; exit 1
             fi
         fi
         hashdb_lines=$(wc -l < "$WORK/n$hd/node.log")
