@@ -51,6 +51,11 @@
 #        stopped, its transaction index (caches/indexdb) is removed and it is started again; a pruned
 #        node waits until it has pruned. It must quick-start and rebuild the index from the blocks it
 #        stores (a pruned node cannot slow-start without its old blocks; a full one no longer has to)
+#        HASHDB_DAMAGE_AT (default 0 = off): at that sequence node HASHDB_DAMAGE_NODE (default 3) is
+#        stopped and its block hashes database caches/hashdb is damaged, HASHDB_DAMAGE=zero (default:
+#        pages in the middle of data.mdb overwritten with zeros, checked with mdb_dump) or remove (the
+#        folder removed); it is started again, and once more 150 blocks later if it has not rebuilt the
+#        databases yet. It must rebuild them from its blocks and log no database failure afterwards
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
 #        with pruned storage like PRUNE_NODE and must end with the same state digest
@@ -114,6 +119,9 @@ STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
 INDEX_LOSS_NODE=${INDEX_LOSS_NODE:-$PRUNE_NODE}
+HASHDB_DAMAGE_AT=${HASHDB_DAMAGE_AT:-0}
+HASHDB_DAMAGE_NODE=${HASHDB_DAMAGE_NODE:-3}
+HASHDB_DAMAGE=${HASHDB_DAMAGE:-zero}
 MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
@@ -620,6 +628,37 @@ while :; do
         echo "index loss test: n$INDEX_LOSS_NODE restarted without its transaction index at sequence $min"
     fi
 
+    if [ "$HASHDB_DAMAGE_AT" -gt 0 ] && [ "${hashdb_damaged:-0}" -eq 0 ] && [ "$min" -ge "$HASHDB_DAMAGE_AT" ]; then
+        hashdb_damaged=1
+        hd=$HASHDB_DAMAGE_NODE
+        kill -TERM "${PIDS[$hd]}"; wait "${PIDS[$hd]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$hd " 2>/dev/null || true
+        if [ "$HASHDB_DAMAGE" = remove ]; then
+            rm -rf "$WORK/n$hd/caches/hashdb"
+        else
+            # zeros over the pages after the two meta pages, up to the end of the data written so far
+            pages=$(( $(du -B4096 "$WORK/n$hd/caches/hashdb/data.mdb" | cut -f1) ))
+            [ "$pages" -gt 4 ] || { echo "FAIL: n$hd hashdb has only $pages pages"; exit 1; }
+            dd if=/dev/zero of="$WORK/n$hd/caches/hashdb/data.mdb" bs=4096 seek=2 count=$(( pages - 2 )) conv=notrunc 2>/dev/null
+            if "$(dirname "$MDB_COPY")/mdb_dump" "$WORK/n$hd/caches/hashdb" >/dev/null 2>&1; then
+                echo "FAIL: n$hd hashdb still reads after the damage"; exit 1
+            fi
+        fi
+        hashdb_lines=$(wc -l < "$WORK/n$hd/node.log")
+        hashdb_restart_at=$((min + 150))
+        start_node "$hd"
+        echo "hashdb test: n$hd restarted with its block hashes database damaged ($HASHDB_DAMAGE) at sequence $min"
+    fi
+    if [ "${hashdb_damaged:-0}" -eq 1 ] && [ -n "${hashdb_restart_at:-}" ] && [ "$min" -ge "$hashdb_restart_at" ]; then
+        hashdb_restart_at=""
+        if ! tail -n +"$((hashdb_lines + 1))" "$WORK/n$HASHDB_DAMAGE_NODE/node.log" | grep -aq 'blockHashes rebuilt from the stored blocks'; then
+            kill -TERM "${PIDS[$HASHDB_DAMAGE_NODE]}"; wait "${PIDS[$HASHDB_DAMAGE_NODE]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$HASHDB_DAMAGE_NODE " 2>/dev/null || true
+            start_node "$HASHDB_DAMAGE_NODE"
+            echo "hashdb test: n$HASHDB_DAMAGE_NODE restarted once more at sequence $min, it had not rebuilt yet"
+        fi
+    fi
+
     # SIGTERM, then SIGKILL in the middle of the shutdown, as docker stop after its timeout
     if [ "$TERM_KILL_NODE" -gt 0 ] && [ "$term_kills" -lt "$TERM_KILL_TIMES" ] && [ "$min" -ge "$TERM_KILL_FROM" ] \
         && [ "$(date +%s)" -ge "$term_kill_next" ]; then
@@ -837,6 +876,16 @@ if [ "$TERM_KILL_NODE" -gt 0 ]; then
     [ "$term_kills" -eq "$TERM_KILL_TIMES" ] || { echo "FAIL: only $term_kills of $TERM_KILL_TIMES term-kills ran"; exit 1; }
     [ "$term_kill_during_save" -gt 0 ] || { echo "FAIL: no SIGKILL landed before n$TERM_KILL_NODE saved its caches"; exit 1; }
     echo "term-kill test: n$TERM_KILL_NODE was killed $term_kills time(s) while stopping, $term_kill_during_save before its caches were saved"
+fi
+if [ "$HASHDB_DAMAGE_AT" -gt 0 ]; then
+    [ "${hashdb_damaged:-0}" = 1 ] || { echo "FAIL: the hashdb test did not run"; exit 1; }
+    after=$(tail -n +"$((hashdb_lines + 1))" "$WORK/n$HASHDB_DAMAGE_NODE/node.log")
+    grep -aq 'blockHashes rebuilt from the stored blocks' <<<"$after" \
+        || { echo "FAIL: n$HASHDB_DAMAGE_NODE did not rebuild its block hashes databases"; exit 1; }
+    since=$(awk '/blockHashes rebuilt from the stored blocks/{found=NR} END{print found}' <<<"$after")
+    failures=$(tail -n +"$((since + 1))" <<<"$after" | grep -ac 'block hashes database exception' || true)
+    [ "${failures:-0}" -eq 0 ] || { echo "FAIL: n$HASHDB_DAMAGE_NODE logged $failures block hashes failures after the rebuild"; exit 1; }
+    echo "hashdb test: n$HASHDB_DAMAGE_NODE $(grep -a 'blockHashes rebuilt from the stored blocks' <<<"$after" | tail -1 | sed 's/.*blockHashes/blockHashes/'), no failure since"
 fi
 if [ "$INDEX_LOSS_AT" -gt 0 ]; then
     [ "${index_lost:-0}" = 1 ] || { echo "FAIL: the index loss test did not run on n$INDEX_LOSS_NODE"; exit 1; }
