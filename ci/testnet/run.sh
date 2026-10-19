@@ -636,9 +636,9 @@ while :; do
         if [ "$HASHDB_DAMAGE" = remove ]; then
             rm -rf "$WORK/n$hd/caches/hashdb"
         else
-            # zeros over the pages after the two meta pages, up to the end of the data written so far
-            pages=$(( $(du -B4096 "$WORK/n$hd/caches/hashdb/data.mdb" | cut -f1) ))
-            [ "$pages" -gt 4 ] || { echo "FAIL: n$hd hashdb has only $pages pages"; exit 1; }
+            # zeros over the pages after the two meta pages, up to the last page in use
+            pages=$("$(dirname "$MDB_COPY")/mdb_stat" -e "$WORK/n$hd/caches/hashdb" | sed -nE 's/.*Number of pages used: ([0-9]+).*/\1/p')
+            [ "${pages:-0}" -gt 4 ] || { echo "FAIL: n$hd hashdb has only ${pages:-no} pages in use"; exit 1; }
             dd if=/dev/zero of="$WORK/n$hd/caches/hashdb/data.mdb" bs=4096 seek=2 count=$(( pages - 2 )) conv=notrunc 2>/dev/null
             if "$(dirname "$MDB_COPY")/mdb_dump" "$WORK/n$hd/caches/hashdb" >/dev/null 2>&1; then
                 echo "FAIL: n$hd hashdb still reads after the damage"; exit 1
