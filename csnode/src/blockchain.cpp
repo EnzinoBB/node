@@ -254,6 +254,21 @@ bool BlockChain::init(
         }
     }
 
+    // the block hashes databases are caches of the stored blocks: rebuild them when a failure asked
+    // for it, or when they no longer match the stored range
+    if (!stop_ && !storage_.last_hash().is_empty()) {
+        const cs::Sequence first = firstStoredSeq_.load();
+        const cs::Sequence last = lastSequence_.load();
+        const bool requested = blockHashes_->rebuildRequested();
+        if (requested || !blockHashes_->consistentWith(first, last, [this](cs::Sequence seq) { return storage_.pool_load(seq).hash(); })) {
+            cswarning() << kLogPrefix << "block hashes databases " << (requested ? "failed before" : "do not match the stored blocks")
+                        << ": rebuilding them";
+            blockHashes_->rebuild(first, last,
+                [this](cs::Sequence seq) { return storage_.pool_load(seq); },
+                [this] { return stop_.load(); });
+        }
+    }
+
     if (!successfulQuickStart && !stop_ && serializationManPtr_) {
         serializationManPtr_->setCompletedFromGenesis();
     }

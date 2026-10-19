@@ -1,7 +1,10 @@
 #ifndef BLOCKHASHES_HPP
 #define BLOCKHASHES_HPP
 
+#include <functional>
 #include <map>
+#include <memory>
+#include <string>
 
 #include <csdb/pool.hpp>
 #include <lmdb.hpp>
@@ -31,14 +34,32 @@ public:
     bool remove(cs::Sequence);
     bool remove(const csdb::PoolHash& hash);
 
+    // The first failure of either database is reported once and leaves the file blockhashes.rebuild
+    // in the caches folder: the next start rebuilds both databases from the stored blocks.
+    bool rebuildRequested() const;
+
+    // true if the databases hold the blocks first..last: their entry counts match (within a few
+    // blocks written ahead of the storage), and the first, the middle and the last block map to
+    // their hash both ways
+    bool consistentWith(cs::Sequence first, cs::Sequence last,
+                        const std::function<csdb::PoolHash(cs::Sequence)>& hashOf) const;
+
+    // removes both databases and writes them again from the stored blocks first..last; false when
+    // stopRequested() stopped it, and the rebuild is then requested again for the next start
+    bool rebuild(cs::Sequence first, cs::Sequence last, const std::function<csdb::Pool(cs::Sequence)>& load,
+                 const std::function<bool()>& stopRequested);
+
 private slots:
     void onDbFailed(const cs::LmdbException& exception);
 
 private:
     void initialization();
+    void requestRebuild();
 
-    cs::Lmdb seqDb_;
-    cs::Lmdb hashDb_;
+    std::string path_;
+    std::unique_ptr<cs::Lmdb> seqDb_;
+    std::unique_ptr<cs::Lmdb> hashDb_;
+    size_t failures_ = 0;
 };
 }  // namespace cs
 
