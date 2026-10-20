@@ -135,6 +135,10 @@ jobs:
           # pruning starts at the periodic checkpoint #2000 (checkpoint_every + prune_keep_blocks <= 2000)
           - name: rocksdb-pruned-join
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=2300
+          # a full node syncs from block 0 among mostly pruned peers, with special order 35 active: the pruned
+          # peers must answer NoSuchBlocks, not AwaitAnswer and then nothing
+          - name: pruned-peers-join
+            env: NODE_STORAGE=lmdb,lmdb,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
           # kills that land while the node prunes, or right after a checkpoint it prunes from
           - name: rocksdb-pruned-crash
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
