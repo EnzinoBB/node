@@ -638,8 +638,11 @@ while :; do
             [ ! -e "$WORK/n6/testnet-convert-kill" ] || { echo "FAIL: n6 did not read testnet-convert-kill"; exit 1; }
         }
         convert6 2
-        [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -eq 2 ] || { echo "FAIL: n6 was not killed after its second batch"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
-        grep -aq '^done_down_to=[1-9]' "$WORK/n6/db/.convert" || { echo "FAIL: n6 db/.convert does not record a partial conversion"; cat "$WORK/n6/db/.convert"; exit 1; }
+        # the kill comes as the second batch leaves the old database, before its "converted blocks" line:
+        # one line, and two batches of 50 recorded below the last block
+        n6last=$(sed -n 's/^last=//p' "$WORK/n6/db/.convert")
+        [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -eq 1 ] && grep -aq "^done_down_to=$(( n6last - 99 ))\$" "$WORK/n6/db/.convert" \
+            || { echo "FAIL: n6 was not killed after its second batch"; cat "$WORK/n6/db/.convert"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
         convert6 checked
         grep -aq '^done_down_to=0$' "$WORK/n6/db/.convert" && grep -aq '^phase=blocks$' "$WORK/n6/db/.convert" \
             || { echo "FAIL: n6 was not killed with every block converted"; cat "$WORK/n6/db/.convert"; exit 1; }
