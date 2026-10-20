@@ -175,6 +175,7 @@ if [ -f snapshot.json ] && [ ! -f snapshot.verified ]; then
                     log "SNAPSHOT DIGEST MISMATCH at block $snap_seq: snapshot $snap_digest, node $got; stopping"
                     kill -TERM "$node_pid" 2>/dev/null || true
                 fi
+                rm -f .digest-before
                 exit 0
             fi
             sleep 5
