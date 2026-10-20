@@ -760,7 +760,7 @@ bool Storage::pool_save(Pool pool) {
         });
         // refuse only while blocks still wait for the failing database: once removals emptied the
         // queue nothing is failing any more, and the next block is written (or fails) on its own
-        if (d->write_failing && !d->write_queue.empty()) {
+        if (d->write_failing && (!d->write_queue.empty() || !d->in_flight.empty())) {
             // as in the synchronous path: not stored, so not counted, and the caches do not run ahead
             d->set_last_error(DatabaseError, "%s: cannot queue pool %llu, the database does not accept writes", funcName(),
                               static_cast<unsigned long long>(pool.sequence()));
