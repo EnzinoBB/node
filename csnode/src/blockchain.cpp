@@ -214,6 +214,11 @@ bool BlockChain::init(
                        static_cast<uint64_t>(storageCfg.rocksdbMemtableMb) << 20,
                        storageCfg.dbBackend)) {
         cserror() << kLogPrefix << "Couldn't open database at " << path;
+        checkpointAheadOfBlocks_ = successfulQuickStart && storage_.last_error() == csdb::Storage::StartAfterLastBlock;
+        if (checkpointAheadOfBlocks_) {
+            cserror() << kLogPrefix << "the QUICK START checkpoint continues after the last block on disk ("
+                      << storage_.last_error_message() << ")";
+        }
         return false;
     }
     if (const auto first = storage_.first_sequence(); first != std::numeric_limits<cs::Sequence>::max()) {
