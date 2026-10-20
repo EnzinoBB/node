@@ -287,3 +287,26 @@ TEST(StorageWriter, RecoversWhenWritesSucceedAgain) {
     EXPECT_EQ(storage.size(), 3u);
     storage.close();
 }
+
+// The only block waiting for a failing database is removed (fork resolution): nothing fails any more,
+// so once the disk is freed the next block must be accepted, not refused until a restart.
+TEST(StorageWriter, RemovingTheLastQueuedBlockEndsTheFailure) {
+    auto db = std::make_shared<MemoryDb>();
+    csdb::Storage storage;
+    ASSERT_TRUE(openAsync(storage, db));
+    const auto pools = chain(2);
+
+    db->fail(true);
+    ASSERT_TRUE(storage.pool_save(pools[0]));
+    ASSERT_TRUE(db->waitCalls(1));
+    EXPECT_FALSE(storage.flush());
+    const csdb::Pool removed = storage.pool_remove_last();
+    EXPECT_EQ(removed.hash(), pools[0].hash());
+    EXPECT_EQ(storage.size(), 0u);
+    db->fail(false);
+
+    ASSERT_TRUE(storage.pool_save(pools[0])) << "the storage still refuses writes after the queue emptied";
+    ASSERT_TRUE(storage.flush());
+    EXPECT_TRUE(db->has(pools[0].hash()));
+    storage.close();
+}

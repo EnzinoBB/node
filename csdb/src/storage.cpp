@@ -401,17 +401,19 @@ void Storage::priv::write_routine() {
                          std::make_move_iterator(write_queue.begin() + static_cast<std::ptrdiff_t>(take)));
         write_queue.erase(write_queue.begin(), write_queue.begin() + static_cast<std::ptrdiff_t>(take));
 
-        // Build payloads outside the lock; one put_batch coalesces 2*N puts into a single WriteBatch.
+        // Build payloads outside the lock (a pool shares its data, the copy is cheap); one put_batch
+        // coalesces 2*N puts into a single WriteBatch.
+        const std::vector<Pool> batch = in_flight;
+        lock.unlock();
         std::vector<Database::PendingWrite> requests;
-        requests.reserve(in_flight.size());
-        for (auto& pool : in_flight) {
+        requests.reserve(batch.size());
+        for (const auto& pool : batch) {
             requests.push_back(Database::PendingWrite{
                 pool.hash().to_binary(),
                 static_cast<uint32_t>(pool.sequence()),
                 pool.to_binary()
             });
         }
-        lock.unlock();
 
         const bool written = db->put_batch(requests);
 
@@ -682,7 +684,7 @@ bool Storage::flush() {
         d->queue_space_cond.wait(lock, [this] {
             return (d->write_queue.empty() && d->in_flight.empty()) || d->write_failing || !d->write_thread.joinable();
         });
-        if (d->write_failing || !d->write_queue.empty() || !d->in_flight.empty()) {
+        if (!d->write_queue.empty() || !d->in_flight.empty()) {
             d->set_last_error(DatabaseError, "%s: %zu block(s) wait in the write queue, the database does not accept writes",
                               funcName(), d->write_queue.size() + d->in_flight.size());
             return false;
@@ -756,7 +758,9 @@ bool Storage::pool_save(Pool pool) {
         d->queue_space_cond.wait(lock, [this] {
             return d->write_queue.size() < d->asyncWriteQueueMax_ || d->write_failing;
         });
-        if (d->write_failing) {
+        // refuse only while blocks still wait for the failing database: once removals emptied the
+        // queue nothing is failing any more, and the next block is written (or fails) on its own
+        if (d->write_failing && !d->write_queue.empty()) {
             // as in the synchronous path: not stored, so not counted, and the caches do not run ahead
             d->set_last_error(DatabaseError, "%s: cannot queue pool %llu, the database does not accept writes", funcName(),
                               static_cast<unsigned long long>(pool.sequence()));
@@ -868,6 +872,9 @@ bool Storage::write_queue_pop(Pool& res_pool) {
     if (!d->write_queue.empty()) {
         res_pool = d->write_queue.back();
         d->write_queue.pop_back();
+        if (d->write_queue.empty()) {
+            d->write_failing = false;    // nothing waits for the database any more
+        }
         d->queue_space_cond.notify_all();
         return true;
     }
@@ -888,6 +895,9 @@ bool Storage::write_queue_pop_last(const PoolHash& hash, bool& queued) {
     }
     const Pool last = d->write_queue.back();
     d->write_queue.pop_back();
+    if (d->write_queue.empty()) {
+        d->write_failing = false;    // nothing waits for the database any more
+    }
     d->queue_space_cond.notify_all();
     lock.unlock();
 
