@@ -71,6 +71,10 @@
 #        again each time and end with the same state digests
 #        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
 #        network restarted, as after a power cut; the nodes must agree again
+#        API_LOAD_NODE (default 0 = off): that node opens its public API (port 9100 + node) and, from
+#        sequence API_LOAD_FROM (default 1500), api_load.py reads random blocks among the last 1,500
+#        through it with 4 threads until the end, so that API threads read blocks while the node
+#        prunes; the node must keep up, and the load must have made at least 1,000 calls
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
@@ -97,6 +101,8 @@ FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
 LOAD_SECONDS=${LOAD_SECONDS:-300}
 DISK_FULL_NODE=${DISK_FULL_NODE:-0}
+API_LOAD_NODE=${API_LOAD_NODE:-0}
+API_LOAD_FROM=${API_LOAD_FROM:-1500}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
@@ -209,6 +215,11 @@ fi
 api_settings() {
     local i=$1
     if [ "$CONTRACTS" != "1" ]; then
+        if [ "$i" -eq "$API_LOAD_NODE" ]; then
+            echo "port=$((9100 + i))"
+            echo "apiexec_port=0"
+            return
+        fi
         echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
         echo "apiexec_port=0"
         return
@@ -347,6 +358,7 @@ net_fault_stats() {
 }
 
 stop_all() {
+    [ -z "${API_LOAD_PID:-}" ] || kill -TERM "$API_LOAD_PID" 2>/dev/null || true
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
     done
@@ -732,6 +744,12 @@ while :; do
         fi
     fi
 
+    if [ "$API_LOAD_NODE" -gt 0 ] && [ -z "${API_LOAD_PID:-}" ] && [ "$min" -ge "$API_LOAD_FROM" ]; then
+        python3 "$HERE/api_load.py" "127.0.0.1:$((9100 + API_LOAD_NODE))" "$WORK/api_load.stats" > "$WORK/api_load.log" 2>&1 &
+        API_LOAD_PID=$!
+        echo "api load: reading random blocks through n$API_LOAD_NODE's API from sequence $min"
+    fi
+
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
@@ -775,6 +793,16 @@ if [ -n "$CONTRACTS_PID" ]; then
 elif [ "$CONTRACTS" = "1" ]; then
     echo "FAIL: contracts.py never started"
     exit 1
+fi
+
+if [ -n "${API_LOAD_PID:-}" ]; then
+    kill -TERM "$API_LOAD_PID" 2>/dev/null || true
+    wait "$API_LOAD_PID" 2>/dev/null || true
+    API_LOAD_PID=
+    stats=$(cat "$WORK/api_load.stats" 2>/dev/null || echo "calls=0 errors=0")
+    echo "api load: $stats"
+    load_calls=$(sed -nE 's/.*calls=([0-9]+).*/\1/p' <<<"$stats")
+    [ "${load_calls:-0}" -ge 1000 ] || { echo "FAIL: the API load made only ${load_calls:-0} calls"; tail -20 "$WORK/api_load.log"; exit 1; }
 fi
 
 if [ -n "$FUND_PID" ]; then
