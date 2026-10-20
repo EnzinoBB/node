@@ -1277,6 +1277,10 @@ void BlockChain::close() {
     }
 
     cs::Lock lock(dbLock_);
+    // the caches hold the head block: they may only become a checkpoint if every block up to it is in
+    // the database. Not so when the deferred block could not be flushed, or when blocks still wait for
+    // a database that refuses writes (RocksDB with a full disk)
+    const bool blocksOnDisk = !deferredBlock_.is_valid() && storage_.flush();
     storage_.close();
     cs::Connector::disconnect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
     blockHashes_->close();
@@ -1284,6 +1288,12 @@ void BlockChain::close() {
 
     if (!serializationManPtr_) {
         csinfo() << "Blockchain: no serialization manager provided to save caches for QUICK START.";
+        return;
+    }
+
+    if (!blocksOnDisk) {
+        cswarning() << "Blockchain: block " << headInfo.sequence << " is not in the database, no caches saved for QUICK START; "
+                    << "the next start continues from an earlier checkpoint";
         return;
     }
 
