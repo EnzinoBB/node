@@ -18,8 +18,10 @@ here=$(cd "$(dirname "$0")" && pwd)
 [ -x "$tools/mdb_dump" ] && [ -x "$tools/mdb_stat" ] || { echo "no mdb_dump and mdb_stat next to $mdb_copy" >&2; exit 1; }
 [ -d "$node/db/lmdb" ] || { echo "no $node/db/lmdb: not a pruned LMDB node" >&2; exit 1; }
 [ -d "$node/qs" ] || { echo "no $node/qs: no checkpoint" >&2; exit 1; }
-# a running node holds db/.lock: its database, caches and checkpoints would not match each other
-flock -n "$node/db/.lock" true 2>/dev/null || { echo "the node in $node is running: stop it first" >&2; exit 1; }
+# a running node holds db/.lock: its database, caches and checkpoints would not match each other.
+# The lock is held until the script ends, so that the node cannot start while it is copied
+exec 9>>"$node/db/.lock" || { echo "cannot open $node/db/.lock" >&2; exit 1; }
+flock -n 9 || { echo "the node in $node is running: stop it first" >&2; exit 1; }
 
 # the logs oldest first by modification time: by name log_10 would come before log_9
 digest=$(cat $(ls -tr "$node"/log/log_*.txt 2>/dev/null) "$node"/node.log /dev/null 2>/dev/null | grep -a 'STATE DIGEST #' | tail -1 || true)
