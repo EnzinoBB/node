@@ -178,7 +178,7 @@ bool writeState(const std::string& dbPath, const State& s) {
     return syncWrite(fs::path(dbPath) / kStateFile, o.str());
 }
 
-uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, uint32_t batch) {
+uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, const std::string& to, uint32_t batch) {
     const auto files = backend::files(from, dbPath);
     if (files.empty()) return 0;    // opening would create an empty database
     uint64_t bytes = 0;
@@ -191,7 +191,10 @@ uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, u
         std::error_code ec;
         const fs::path dir(dbPath);
         const uint64_t done = fs::exists(dir / kStateFile, ec) ? folderBytes(dir / kNewDir) : 0;
-        return (bytes > done ? bytes - done : 0) + kMargin;
+        // the new database in its own format: RocksDB's compressed blocks take several times their
+        // size in LMDB or BerkeleyDB
+        const uint64_t target = (from == "rocksdb" && to != "rocksdb") ? bytes * kExpansionFromRocksDb : bytes;
+        return (target > done ? target - done : 0) + kMargin;
     }
     auto db = backend::open(from, dbPath);
     if (!db) return bytes;
