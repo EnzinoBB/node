@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,12 @@ private:
 
     bool write_queue_search(const PoolHash& hash, Pool& res_pool) const;
     bool write_queue_pop(Pool& res_pool);
+    // removes the last block from the write queue if it waits there and its hash is `hash` (queued is
+    // then true); queued is false when the queue is empty and the last block is in the database.
+    // false when the last queued block is another one.
+    bool write_queue_pop_last(const PoolHash& hash, bool& queued);
+    // waits until the writer holds no batch; the caller holds the write lock
+    void wait_for_in_flight(std::unique_lock<std::mutex>& lock);
 
 public:
     using WeakPtr = ::std::weak_ptr<priv>;
@@ -102,6 +109,8 @@ public:
         // 0 = leave Storage defaults (5000 / 100) untouched.
         size_t asyncWriteQueueMax = 0;
         size_t writeBatchSize = 0;
+        // blocks are written by a writer thread, as for RocksDB (the path overload of open sets it)
+        bool asyncWrites = false;
     };
 
     struct OpenProgress {
