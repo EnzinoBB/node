@@ -59,7 +59,7 @@ bool isKnown(const std::string& name) {
     return name == "berkeleydb" || name == "lmdb" || name == "rocksdb";
 }
 
-std::vector<std::string> detect(const std::string& dbPath) {
+std::vector<std::string> detect(const std::string& dbPath, bool openEngines) {
     const fs::path dir(dbPath);
     std::vector<std::string> found;
     std::error_code ec;
@@ -70,8 +70,9 @@ std::vector<std::string> detect(const std::string& dbPath) {
     // this small may be an empty database (a fresh LMDB file is 12 KB) or one holding a few blocks
     // (a node stopped early), which must count, or a backend change would start a second, empty
     // database next to it
+    // Opening BerkeleyDB runs recovery: never on an environment another process holds open
     auto holds = [&](const fs::path& file, const std::string& name) {
-        return fs::is_regular_file(file, ec) && (bigger(file) || hasBlocks(name, dbPath));
+        return fs::is_regular_file(file, ec) && (bigger(file) || !openEngines || hasBlocks(name, dbPath));
     };
     if (fs::exists(dir / "sequence.db", ec) && holds(dir / "blockchain.db", "berkeleydb")) found.push_back("berkeleydb");
     if (holds(dir / "lmdb" / "data.mdb", "lmdb")) found.push_back("lmdb");
@@ -83,11 +84,11 @@ std::vector<std::string> detect(const std::string& dbPath) {
         for (const auto& e : fs::directory_iterator(dir, ec)) {
             if (e.path().extension() == ".sst") { tables = true; break; }
         }
-        if (tables || hasBlocks("rocksdb", dbPath)) found.push_back("rocksdb");
+        if (tables || !openEngines || hasBlocks("rocksdb", dbPath)) found.push_back("rocksdb");
         return found;
     }
     if (rocksdb) found.push_back("rocksdb");
-    if (found.size() > 1) {
+    if (found.size() > 1 && openEngines) {
         // two formats only decide something when both hold blocks: an empty one, e.g. a target
         // created by a node started with the other backend, does not count
         found.erase(std::remove_if(found.begin(), found.end(),

@@ -83,6 +83,23 @@ TEST(StorageBackend, SeqNoIsTheSequencePut) {
     }
 }
 
+// another process holds the folder: detect() opens no engine (BerkeleyDB would run recovery on a live
+// environment and create files), a small database still counts
+TEST(StorageBackend, DetectWithoutOpeningEngines) {
+    auto dir = freshDir("no_open_berkeleydb");
+    fill("berkeleydb", dir, 1);
+    auto names = [&] {
+        std::vector<std::string> n;
+        for (const auto& e : fs::directory_iterator(dir)) n.push_back(e.path().filename().string());
+        std::sort(n.begin(), n.end());
+        return n;
+    };
+    const auto before = names();
+    EXPECT_EQ(csdb::backend::detect(dir.string(), false), std::vector<std::string>{"berkeleydb"});
+    EXPECT_EQ(names(), before) << "detect() opened the engine";
+    fs::remove_all(dir);
+}
+
 TEST(StorageBackend, EmptyRocksDbHasNoFormat) {
     auto dir = freshDir("empty_rocksdb");
     { auto db = csdb::backend::open("rocksdb", dir.string()); ASSERT_TRUE(db); }   // a fresh node's database
