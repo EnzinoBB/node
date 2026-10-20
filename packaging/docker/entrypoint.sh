@@ -24,7 +24,13 @@ DIGEST_WAIT=${CREDITS_DIGEST_WAIT:-600}
 CONVERT_ARGS=()
 
 log() { echo "[entrypoint] $*"; }
-refuse() { log "NOT STARTING: $*"; log "To start over (the current data is moved to $DATA/old-<date>, not deleted), set CREDITS_RESET=1 once."; exit "${2:-3}"; }
+# refuse <message> [exit code]; the reset hint is no answer to an interrupted restore (5), which a
+# plain restart retries, and following it would move the data aside for nothing
+refuse() {
+    log "NOT STARTING: $1"
+    [ "${2:-3}" = 5 ] || log "To start over (the current data is moved to $DATA/old-<date>, not deleted), set CREDITS_RESET=1 once."
+    exit "${2:-3}"
+}
 case "$BACKEND" in berkeleydb|lmdb|rocksdb) ;; *) log "CREDITS_DB_BACKEND must be berkeleydb, lmdb or rocksdb"; exit 2 ;; esac
 case "$SNAPSHOT" in auto|off) ;; *) log "CREDITS_SNAPSHOT must be auto or off"; exit 2 ;; esac
 for v in "$API" "$EXECUTOR"; do case "$v" in on|off) ;; *) log "CREDITS_API and CREDITS_EXECUTOR must be on or off"; exit 2 ;; esac; done

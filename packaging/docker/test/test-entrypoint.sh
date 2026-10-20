@@ -114,6 +114,9 @@ pass "leftover restore directory wiped"
 
 # 6b. a restore that stops while it moves its files: the node is not started on part of a snapshot,
 # and the next start removes that part and restores again
+if [ "$(id -u)" = 0 ]; then
+    echo "skipped: interrupted restore (as root chmod cannot block the move)"
+else
 d=$(newdata 6b)
 mkdir -p "$d/caches/blocker"
 touch "$d/caches/blocker/f"
@@ -122,6 +125,7 @@ set +e; out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json); rc=$?; set -e
 chmod 755 "$d/caches/blocker"
 [ "$rc" = 5 ] || { echo "$out"; fail "interrupted restore: exit $rc, expected 5"; }
 grep -q 'stopped while it moved its files' <<<"$out" || { echo "$out"; fail "interrupted restore not reported"; }
+grep -q 'CREDITS_RESET' <<<"$out" && { echo "$out"; fail "an interrupted restore suggests a reset"; }
 [ -f "$d/stub-args" ] && fail "the node was started on part of a snapshot"
 out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
 grep -q 'removing it to restore again' <<<"$out" || { echo "$out"; fail "the partial restore was not removed"; }
@@ -129,6 +133,7 @@ grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "no sec
 [ -f "$d/snapshot.verified" ] || { echo "$out"; fail "second restore not verified"; }
 [ -e "$d/.restore-incomplete" ] && fail "restore marker left"
 pass "interrupted restore redone at the next start"
+fi
 
 # 6c. an older run's log naming the same block with another digest does not count
 d=$(newdata 6c)
