@@ -125,7 +125,7 @@ jobs:
           - name: rocksdb-power-cut
             env: DB_BACKEND=rocksdb CRASH_ALL_AT=600
           - name: rocksdb-disk-full
-            env: DB_BACKEND=rocksdb DISK_FULL_NODE=6
+            env: DB_BACKEND=rocksdb DISK_FULL_NODE=6 DISK_FULL_STOP=1
           - name: lmdb-disk-full
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6
           - name: berkeleydb-disk-full
@@ -140,6 +140,9 @@ jobs:
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           - name: lmdb-pruned-crash
             env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
+          # API threads read blocks while the node prunes (the pool cache is shared)
+          - name: lmdb-pruned-api
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 API_LOAD_NODE=6 TARGET_SEQ=3000
           # docker stop with a short timeout: SIGTERM, then SIGKILL while the node shuts down
           - name: lmdb-pruned-term-kill
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 TARGET_SEQ=3000

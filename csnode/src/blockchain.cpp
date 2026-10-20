@@ -318,34 +318,39 @@ void BlockChain::pruneStep() {
         return;
     }
     const cs::Sequence end = std::min(pruneUpTo_, from + kBlocksPerStep);
-    std::vector<csdb::PoolHash> hashes;
-    hashes.reserve(end - from);
-    for (cs::Sequence seq = from; seq < end; ++seq) {
-        // the block itself tells which transaction index entries it owns
-        const csdb::Pool pool = storage_.pool_load(seq);
-        csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(seq);
-        if (pool.is_valid() && trxIndex_) {
-            trxIndex_->onPruneBlock(pool);
+    {
+        // the storage's pool cache is not thread safe: every storage call holds dbLock_, as the API
+        // threads do when they load blocks. The compaction below needs no lock: only the engine is touched
+        std::lock_guard lock(dbLock_);
+        std::vector<csdb::PoolHash> hashes;
+        hashes.reserve(end - from);
+        for (cs::Sequence seq = from; seq < end; ++seq) {
+            // the block itself tells which transaction index entries it owns
+            const csdb::Pool pool = storage_.pool_load(seq);
+            csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(seq);
+            if (pool.is_valid() && trxIndex_) {
+                trxIndex_->onPruneBlock(pool);
+            }
+            if (hash.is_empty()) {
+                csdebug() << kLogPrefix << "pruned storage: block " << seq << " not found";
+            }
+            else {
+                hashes.push_back(hash);
+            }
         }
-        if (hash.is_empty()) {
-            csdebug() << kLogPrefix << "pruned storage: block " << seq << " not found";
+        // the whole step in one storage transaction where the engine allows it (LMDB)
+        if (!hashes.empty() && !storage_.pool_prune_batch(hashes)) {
+            // the blocks are there but could not be removed now (e.g. the storage is short of buffer
+            // cache during a fast sync): keep them and retry this step with the next block
+            cswarning() << kLogPrefix << "pruned storage: blocks " << from << ".." << end - 1 << " not removed yet, will retry";
+            return;
         }
-        else {
-            hashes.push_back(hash);
+        for (; from < end; ++from) {
+            // getHashBySequence() then answers an empty hash, as for any block not stored
+            blockHashes_->remove(from);
         }
+        firstStoredSeq_ = from;
     }
-    // the whole step in one storage transaction where the engine allows it (LMDB)
-    if (!hashes.empty() && !storage_.pool_prune_batch(hashes)) {
-        // the blocks are there but could not be removed now (e.g. the storage is short of buffer
-        // cache during a fast sync): keep them and retry this step with the next block
-        cswarning() << kLogPrefix << "pruned storage: blocks " << from << ".." << end - 1 << " not removed yet, will retry";
-        return;
-    }
-    for (; from < end; ++from) {
-        // getHashBySequence() then answers an empty hash, as for any block not stored
-        blockHashes_->remove(from);
-    }
-    firstStoredSeq_ = from;
     if (from == pruneUpTo_) {
         const bool compacted = storage_.compact();
         cslog() << kLogPrefix << "pruned storage: blocks before " << WithDelimiters(from) << " removed"
@@ -1291,6 +1296,10 @@ void BlockChain::close() {
     }
 
     cs::Lock lock(dbLock_);
+    // the caches hold the head block: they may only become a checkpoint if every block up to it is in
+    // the database. Not so when the deferred block could not be flushed, or when blocks still wait for
+    // a database that refuses writes (RocksDB with a full disk)
+    const bool blocksOnDisk = !deferredBlock_.is_valid() && storage_.flush();
     storage_.close();
     cs::Connector::disconnect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
     blockHashes_->close();
@@ -1303,6 +1312,12 @@ void BlockChain::close() {
 
     if (cachesTainted_) {
         cswarning() << "Blockchain: the caches failed to apply a block, no caches saved for QUICK START.";
+        return;
+    }
+
+    if (!blocksOnDisk) {
+        cswarning() << "Blockchain: block " << headInfo.sequence << " is not in the database, no caches saved for QUICK START; "
+                    << "the next start continues from an earlier checkpoint";
         return;
     }
 
