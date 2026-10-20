@@ -114,7 +114,7 @@ uint64_t sizeOf(const std::string& name, const std::string& dbPath) {
 }
 
 int convertNow(const std::string& dbPath, const std::string& from, const std::string& to, bool convertOnly, uint32_t batch) {
-    const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, batch);
+    const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, to, batch);
     const uint64_t have = freeSpace(dbPath);
     if (have < need) {
         say() << "not enough free space: the conversion needs about " << mb(need) << ", " << mb(have) << " available" << std::endl;
@@ -238,7 +238,7 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
             if (inUse(lock, dbPath)) {
                 return 3;
             }
-            const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, batch);
+            const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, configured, batch);
             say() << "found " << from << ", configured " << configured << std::endl;
             say() << "database size " << mb(sizeOf(from, dbPath)) << ", estimated peak disk use " << mb(need)
                   << ", free space " << mb(freeSpace(dbPath)) << std::endl;

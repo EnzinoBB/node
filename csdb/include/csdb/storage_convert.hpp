@@ -50,8 +50,11 @@ struct State {                          // db/.convert
 
 bool readState(const std::string& dbPath, State& out);    // false if absent or malformed
 bool writeState(const std::string& dbPath, const State& s);
-// free space the conversion needs; a resumed conversion from lmdb or rocksdb counts what .convert-new holds
-uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, uint32_t batch);
+// free space the conversion from `from` to `to` needs; a resumed conversion from lmdb or rocksdb counts
+// what .convert-new holds. RocksDB compresses its blocks: from rocksdb to an uncompressed backend the
+// new database is several times the size of the old one (kExpansionFromRocksDb)
+constexpr uint64_t kExpansionFromRocksDb = 4;   // measured 3.5x on mainnet (rocksdb 3,274 MB -> berkeleydb 11,568 MB)
+uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, const std::string& to, uint32_t batch);
 Result run(const Options& opt);         // starts a new conversion or resumes db/.convert
 
 }  // namespace csdb::convert

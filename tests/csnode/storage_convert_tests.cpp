@@ -547,13 +547,27 @@ TEST(Convert, EstimateCoversTheWholeCopyUnlessTheSourceShrinks) {
     const auto lmdbDir = writeDb("lmdb", "estimate_lmdb", chain);
     const auto bdbDir = writeDb("berkeleydb", "estimate_bdb", chain);
     // batch 1: in so small a database BerkeleyDB's environment files (MBs) dominate the size per block
-    const auto lmdbEstimate = csdb::convert::estimatePeakBytes(lmdbDir.string(), "lmdb", 1);
-    const auto bdbEstimate = csdb::convert::estimatePeakBytes(bdbDir.string(), "berkeleydb", 1);
+    const auto lmdbEstimate = csdb::convert::estimatePeakBytes(lmdbDir.string(), "lmdb", "rocksdb", 1);
+    const auto bdbEstimate = csdb::convert::estimatePeakBytes(bdbDir.string(), "berkeleydb", "lmdb", 1);
     // LMDB keeps its file size while blocks leave it: the new copy needs room for all of it
     EXPECT_GE(lmdbEstimate, sourceBytes("lmdb", lmdbDir));
     EXPECT_LT(bdbEstimate, lmdbEstimate);
     fs::remove_all(lmdbDir);
     fs::remove_all(bdbDir);
+}
+
+// RocksDB compresses its blocks: converted to an uncompressed backend they take several times the room
+TEST(Convert, EstimateFromRocksDbCountsItsCompression) {
+    const auto chain = makeChain(0, 500);
+    const auto dir = writeDb("rocksdb", "estimate_rocks", chain);
+    constexpr uint64_t margin = 256ULL << 20;
+    const uint64_t source = sourceBytes("rocksdb", dir);
+    EXPECT_GE(csdb::convert::estimatePeakBytes(dir.string(), "rocksdb", "berkeleydb", 1),
+              source * csdb::convert::kExpansionFromRocksDb + margin);
+    EXPECT_GE(csdb::convert::estimatePeakBytes(dir.string(), "rocksdb", "lmdb", 1),
+              source * csdb::convert::kExpansionFromRocksDb + margin);
+    EXPECT_EQ(csdb::convert::estimatePeakBytes(dir.string(), "rocksdb", "rocksdb", 1), source + margin);
+    fs::remove_all(dir);
 }
 
 TEST(Convert, ResumedEstimateCountsTheConvertedPart) {
@@ -574,7 +588,7 @@ TEST(Convert, ResumedEstimateCountsTheConvertedPart) {
         if (e.is_regular_file()) converted += e.file_size();
     }
     ASSERT_GT(converted, 0u);
-    const auto resumed = csdb::convert::estimatePeakBytes(dir.string(), "lmdb", 100);
+    const auto resumed = csdb::convert::estimatePeakBytes(dir.string(), "lmdb", "rocksdb", 100);
     EXPECT_EQ(resumed, (old > converted ? old - converted : 0) + margin);
     EXPECT_LT(resumed, old + margin);
     EXPECT_GE(resumed, margin);     // never below the margin
