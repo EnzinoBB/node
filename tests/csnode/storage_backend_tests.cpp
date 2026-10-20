@@ -54,6 +54,35 @@ TEST(StorageBackend, EmptyTargetDoesNotCount) {
     fs::remove_all(dir);
 }
 
+// a node stopped after a few blocks: its database files are small, but they hold blocks
+TEST(StorageBackend, SmallDatabasesWithBlocksAreDetected) {
+    for (std::string b : {"berkeleydb", "lmdb", "rocksdb"}) {
+        auto dir = freshDir("small_" + b);
+        fill(b, dir, 1);
+        EXPECT_EQ(csdb::backend::detect(dir.string()), std::vector<std::string>{b}) << b;
+        fs::remove_all(dir);
+    }
+}
+
+// every backend answers the sequence of a block by its hash as it was put, 0-based
+TEST(StorageBackend, SeqNoIsTheSequencePut) {
+    for (std::string b : {"berkeleydb", "lmdb", "rocksdb"}) {
+        auto dir = freshDir("seqno_" + b);
+        fill(b, dir, 10);
+        auto db = csdb::backend::open(b, dir.string());
+        ASSERT_TRUE(db && db->is_open()) << b;
+        for (uint32_t s : {0u, 7u, 9u}) {
+            cs::Bytes key(32, 0);
+            key[0] = static_cast<cs::Byte>(s);
+            uint32_t seq = 12345;
+            ASSERT_TRUE(db->seq_no(key, &seq)) << b;
+            EXPECT_EQ(seq, s) << b;
+        }
+        db.reset();
+        fs::remove_all(dir);
+    }
+}
+
 TEST(StorageBackend, EmptyRocksDbHasNoFormat) {
     auto dir = freshDir("empty_rocksdb");
     { auto db = csdb::backend::open("rocksdb", dir.string()); ASSERT_TRUE(db); }   // a fresh node's database

@@ -66,9 +66,15 @@ std::vector<std::string> detect(const std::string& dbPath) {
     if (!fs::is_directory(dir, ec)) {
         return found;   // first start: no db/ yet
     }
-    // fingerprints from the files alone; an engine is opened only where the files cannot tell
-    if (bigger(dir / "blockchain.db") && fs::exists(dir / "sequence.db")) found.push_back("berkeleydb");
-    if (bigger(dir / "lmdb" / "data.mdb")) found.push_back("lmdb");     // a fresh LMDB file is 12 KB
+    // fingerprints from the files alone; an engine is opened only where the files cannot tell: a file
+    // this small may be an empty database (a fresh LMDB file is 12 KB) or one holding a few blocks
+    // (a node stopped early), which must count, or a backend change would start a second, empty
+    // database next to it
+    auto holds = [&](const fs::path& file, const std::string& name) {
+        return fs::is_regular_file(file, ec) && (bigger(file) || hasBlocks(name, dbPath));
+    };
+    if (fs::exists(dir / "sequence.db", ec) && holds(dir / "blockchain.db", "berkeleydb")) found.push_back("berkeleydb");
+    if (holds(dir / "lmdb" / "data.mdb", "lmdb")) found.push_back("lmdb");
     const bool rocksdb = fs::exists(dir / "CURRENT") && anyMatching(dir, "MANIFEST-");
     if (found.empty() && rocksdb) {
         // a fresh, empty RocksDB has CURRENT and a MANIFEST too, but no table file yet: only then

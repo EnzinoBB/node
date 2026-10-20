@@ -319,7 +319,13 @@ bool DatabaseBerkeleyDB::seq_no(const cs::Bytes& key, uint32_t* value) {
         return false;
     }
     
-    *value = *static_cast<uint32_t*>(db_seq_no.get_data());
+    // the table holds sequence + 1 (record numbers start at 1); the interface is 0-based, as LMDB's
+    const uint32_t stored = *static_cast<uint32_t*>(db_seq_no.get_data());
+    if (stored == 0) {
+        set_last_error(Corruption, "seq_no entry 0");
+        return false;
+    }
+    *value = stored - 1;
     return true;
 }
 
