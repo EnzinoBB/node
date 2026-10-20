@@ -149,8 +149,9 @@ TEST(DatabaseLmdb, FailedTableOpenLeavesItClosed) {
         ASSERT_EQ(mdb_txn_commit(txn), 0);
         mdb_env_close(env);
     }
-    csdb::DatabaseLmdb db;
-    EXPECT_FALSE(db.open(dir.string()));
-    EXPECT_FALSE(db.is_open());
+    auto lmdb = std::make_shared<csdb::DatabaseLmdb>();
+    EXPECT_FALSE(lmdb->open(dir.string()));
+    std::shared_ptr<csdb::Database> db = lmdb;    // the interface the storage checks
+    EXPECT_FALSE(db->is_open());
     std::filesystem::remove_all(dir);
 }
