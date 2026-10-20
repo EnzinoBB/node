@@ -14,7 +14,8 @@ awk '
     section == "[host_input]" && /^port=/ { print "port=19510"; next }
     section == "[api]" && /^port=/ { print "port=0"; next }
     { print }' config.ini > config-offline.ini
-logs() { cat log/log_*.txt 2>/dev/null || true; }
+# oldest first by modification time: by name log_10 would come before log_9
+logs() { cat $(ls -tr log/log_*.txt 2>/dev/null) /dev/null 2>/dev/null || true; }
 before=$(logs | grep -ac 'STATE DIGEST #' || true)
 ./node --db-path db --config-file config-offline.ini </dev/null > offline.out 2>&1 &
 pid=$!

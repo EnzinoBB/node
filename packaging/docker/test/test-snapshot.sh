@@ -78,6 +78,27 @@ dd if=/dev/zero of="$work/zero-node/caches/hashdb/data.mdb" bs=4096 seek=2 count
 "$tools/mdb_dump" "$work/zero-node/caches/hashdb" >/dev/null 2>&1 || fail "the zeroed environment was expected to dump without error"
 ! "$here/lmdb-check.sh" "$tools" "$work/zero-node/caches/hashdb" 2>/dev/null || fail "lmdb-check accepts a zeroed environment"
 
+# the digest comes from the newest log by modification time, not by name (log_10 sorts before log_9)
+rot="$work/rotated-node"
+cp -a "$node" "$rot"
+rm -f "$rot"/log/log_*.txt
+echo "[1] [info] STATE DIGEST #1000 abababababababababababababababababababababababababababababababab wallets 5" > "$rot/log/log_9.txt"
+touch -d '2 minutes ago' "$rot/log/log_9.txt"
+echo "[2] [info] STATE DIGEST #1200 cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd wallets 6" > "$rot/log/log_10.txt"
+"$here/snapshot-make.sh" "$rot" "$work/rot-out" "$tools/mdb_copy" >/dev/null
+python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); sys.exit(0 if m["seq"] == 1200 else 1)' "$work/rot-out/latest.json" \
+    || fail "the manifest took an older digest: $(cat "$work/rot-out/latest.json")"
+
+# a running node (it holds db/.lock) is refused
+flock "$node/db/.lock" sleep 30 &
+locker=$!
+sleep 1
+if "$here/snapshot-make.sh" "$node" "$work/run-out" "$tools/mdb_copy" 2>"$work/run.err"; then
+    kill "$locker"; fail "a snapshot was made from a running node"
+fi
+kill "$locker" 2>/dev/null || true; wait "$locker" 2>/dev/null || true
+grep -q 'is running' "$work/run.err" || fail "the refusal does not say the node is running: $(cat "$work/run.err")"
+
 # restore into an empty data dir from the manifest file
 data="$work/data"
 mkdir -p "$data"

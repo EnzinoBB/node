@@ -18,6 +18,7 @@ A pruned node (the default) first downloads the latest snapshot, published every
 | `db/`, `caches/`, `qs/`, `*.dat` | Blocks, caches and checkpoints. |
 | `log/` | Node logs (10 × 50 MB) and executor logs (kept 7 days). |
 | `snapshot.json` | The snapshot this node started from. |
+| `.restore-incomplete` | Present only while a snapshot restore moves its files into place. If the container stops then, the next start removes what was moved and restores again (a restore runs only without a database). |
 
 The container runs as uid 1000: the directory must be writable by it (`sudo chown -R 1000 ~/.credits`), or set `user:` in the compose file to your own uid.
 
