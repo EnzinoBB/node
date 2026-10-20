@@ -86,6 +86,10 @@ public:
     // anchor buffered writes to disk at checkpoint boundaries; default no-op (BDB has its own loop)
     virtual bool flush() { return true; }
 
+    // makes every write so far durable in the data files, so that opening the database after a crash
+    // has nothing to replay; flush() where the engine keeps no separate log
+    virtual bool checkpoint() { return flush(); }
+
     class Iterator {
     protected:
         Iterator();

@@ -158,6 +158,28 @@ bool DatabaseBerkeleyDB::flush() {
     }
 }
 
+// Writes the log and every dirty page, so that recovery has nothing to replay. compact() with
+// DB_FREE_SPACE truncates the files at once while the log records describing it may still be in the
+// buffer: a process killed in between leaves a log that recovery cannot replay on the shorter files.
+bool DatabaseBerkeleyDB::checkpoint() {
+    if (panicked_) {
+        set_last_error(Corruption, "the BerkeleyDB environment needs recovery");
+        return false;
+    }
+    try {
+        const int status = env_.txn_checkpoint(0, 0, DB_FORCE);
+        set_last_error_from_berkeleydb(status);
+        return status == 0;
+    }
+    catch (const std::exception& e) {
+        if (needsRecovery(e)) {
+            panic("checkpoint", e);    // throws
+        }
+        set_last_error(UnknownError, "checkpoint: %s", e.what());
+        return false;
+    }
+}
+
 void DatabaseBerkeleyDB::set_last_error_from_berkeleydb(int status) {
     Error err = UnknownError;
     if (status == 0) {

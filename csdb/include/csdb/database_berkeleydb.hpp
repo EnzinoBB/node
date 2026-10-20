@@ -47,6 +47,7 @@ private:
     bool forEachContractData(const ContractVisitor& fn) override;
     bool compact() override;
     bool flush() override;
+    bool checkpoint() override;
 
     void logfile_routine();
 
