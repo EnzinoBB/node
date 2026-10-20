@@ -15,6 +15,15 @@
 
 namespace csdb {
 
+bool needsRecovery(const std::exception& e) {
+    if (dynamic_cast<const DbRunRecoveryException*>(&e) != nullptr) {
+        return true;
+    }
+    const auto* db = dynamic_cast<const DbException*>(&e);
+    return db != nullptr && db->get_errno() == DB_RUNRECOVERY;
+}
+
+
 namespace {
 template <typename T>
 struct Dbt_copy : public Dbt {
@@ -134,6 +143,10 @@ void DatabaseBerkeleyDB::logfile_routine() {
 // Write and sync the log, or a checkpoint saved after this call could name blocks that a killed
 // process never put on disk, and the next start would refuse the database.
 bool DatabaseBerkeleyDB::flush() {
+    if (panicked_) {
+        set_last_error(Corruption, "the BerkeleyDB environment needs recovery");
+        return false;
+    }
     try {
         const int status = env_.log_flush(nullptr);
         set_last_error_from_berkeleydb(status);
@@ -267,6 +280,9 @@ bool DatabaseBerkeleyDB::inTransaction(const char* what, Body body) {
     catch (const std::exception& e) {
         if (tid) {
             try { tid->abort(); } catch (...) {}
+        }
+        if (needsRecovery(e)) {
+            panic(what, e);    // throws
         }
         set_last_error(UnknownError, "%s: %s", what, e.what());
         return false;
@@ -403,6 +419,9 @@ bool DatabaseBerkeleyDB::remove(const cs::Bytes &key) {
         }
     }
     catch (const std::exception& e) {
+        if (needsRecovery(e)) {
+            panic("remove", e);    // throws
+        }
         set_last_error(UnknownError, "remove: %s", e.what());
         return false;
     }
@@ -447,6 +466,9 @@ bool DatabaseBerkeleyDB::compact() {
         }
     }
     catch (const std::exception& e) {
+        if (needsRecovery(e)) {
+            panic("compact", e);    // throws
+        }
         set_last_error(UnknownError, "compact: %s", e.what());
         return false;
     }
@@ -689,11 +711,23 @@ bool DatabaseBerkeleyDB::forEachContractData(const ContractVisitor& fn) {
         }
     }
     catch (const DbException& e) {
+        if (needsRecovery(e)) {
+            panic("forEachContractData", e);    // throws
+        }
         set_last_error_from_berkeleydb(e.get_errno());
         return false;
     }
     set_last_error();
     return true;
+}
+
+void DatabaseBerkeleyDB::panic(const char* what, const std::exception& e) {
+    // the environment is unusable until a process opens it again with DB_RECOVER: report it and let
+    // the exception out, so that the node stops (and its supervisor restarts it) instead of failing
+    // every write for ever, and a conversion stops with its state resumable
+    panicked_ = true;
+    set_last_error(Corruption, "%s: the BerkeleyDB environment needs recovery (restart the node): %s", what, e.what());
+    throw DbRunRecoveryException(e.what());
 }
 
 }  // namespace csdb

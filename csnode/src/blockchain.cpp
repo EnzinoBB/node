@@ -1249,6 +1249,20 @@ bool BlockChain::addNewWalletsToPool(csdb::Pool& pool) {
     return true;
 }
 
+bool BlockChain::saveDeferredBlock() {
+    try {
+        return deferredBlock_.save();
+    }
+    catch (const std::exception& e) {
+        // the storage can throw only when its engine is unusable until a restart (a BerkeleyDB
+        // environment that needs recovery): stop, the next start recovers it and reads the blocks again
+        cserror() << kLogPrefix << "block #" << deferredBlock_.sequence() << " cannot be stored, the database must be "
+                  << "recovered: " << e.what() << "; stopping the node";
+        Node::stopOnError();
+        return false;
+    }
+}
+
 void BlockChain::tryFlushDeferredBlock() {
     cs::Lock lock(dbLock_);
     if (deferredBlock_.is_valid() && deferredBlock_.is_read_only()) {
@@ -1258,7 +1272,7 @@ void BlockChain::tryFlushDeferredBlock() {
         auto mask = cs::Utils::bitsToMask(deferredBlock_.numberTrusted(), deferredBlock_.realTrusted());
         if (NodeUtils::checkGroupSignature(deferredBlock_.confidants(), mask, deferredBlock_.signatures(), tempHash)) {
             deferredBlock_.set_storage(storage_);
-            if (deferredBlock_.save()) {
+            if (saveDeferredBlock()) {
 #ifdef DBSQL
                 dbsql::saveConfidants(deferredBlock_.sequence(), deferredBlock_.confidants(), deferredBlock_.realTrusted());
 #endif
@@ -1593,7 +1607,7 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
 
             deferredBlock_.set_storage(storage_);
 
-            if (deferredBlock_.save()) {
+            if (saveDeferredBlock()) {
 #ifdef DBSQL
                 dbsql::saveConfidants(pool_seq, deferredBlock_.confidants(), deferredBlock_.realTrusted());
 #endif
