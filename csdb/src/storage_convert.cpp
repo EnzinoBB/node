@@ -351,7 +351,7 @@ Result run(const Options& opt) {
             if (!pool.is_valid() || pool.sequence() != seq) return failed(r, at + " does not parse");
             auto key = pool.hash().to_binary();
             // the hash index must lead to this very block: removal goes by hash. Compared by bytes,
-            // as seq_no() returns sequence + 1 on BerkeleyDB and RocksDB and the sequence on LMDB
+            // independent of how each backend stores the sequence
             cs::Bytes byKey;
             if (!oldDb->get(key, &byKey) || byKey != bytes) return failed(r, at + " is stored under another hash");
             if (st.ascending) {

@@ -89,16 +89,24 @@ bool DatabaseLmdb::open(const std::string& path) {
         return fail(status, "env_open");
     }
 
-    Txn txn(env_, false);
-    if (txn.status() != 0) {
-        return fail(txn.status(), "txn_begin");
-    }
-    status = mdb_dbi_open(txn.get(), "blocks", MDB_CREATE | MDB_INTEGERKEY, &blocks_);
-    status = status ? status : mdb_dbi_open(txn.get(), "seq_no", MDB_CREATE, &seqNo_);
-    status = status ? status : mdb_dbi_open(txn.get(), "contracts", MDB_CREATE, &contracts_);
-    status = status ? status : txn.commit();
+    const char* step = "txn_begin";
+    {
+        Txn txn(env_, false);
+        status = txn.status();
+        if (status == 0) {
+            step = "dbi_open";
+            status = mdb_dbi_open(txn.get(), "blocks", MDB_CREATE | MDB_INTEGERKEY, &blocks_);
+            status = status ? status : mdb_dbi_open(txn.get(), "seq_no", MDB_CREATE, &seqNo_);
+            status = status ? status : mdb_dbi_open(txn.get(), "contracts", MDB_CREATE, &contracts_);
+            status = status ? status : txn.commit();
+        }
+    }   // an uncommitted transaction is aborted here, before the environment is closed
     if (status != 0) {
-        return fail(status, "dbi_open");
+        // without its tables the environment is of no use: close it, so that is_open() is false and
+        // the storage refuses to start instead of running on handles every call rejects
+        mdb_env_close(env_);
+        env_ = nullptr;
+        return fail(status, step);
     }
 
     set_last_error();

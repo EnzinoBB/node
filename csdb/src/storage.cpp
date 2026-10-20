@@ -632,7 +632,10 @@ bool Storage::open(
     if (dbBackend == "lmdb") {
         // LMDB reuses the space of removed blocks, which suits pruned storage
         auto lmdb = std::make_shared<DatabaseLmdb>();
-        lmdb->open(path + "/lmdb");
+        if (!lmdb->open(path + "/lmdb")) {
+            d->set_last_error(DatabaseError, "Error open database: %s", lmdb->last_error_message().c_str());
+            return false;
+        }
         OpenOptions opt{lmdb, newBlockchainTop, startReadFrom};
         const bool ok = open(opt, callback);
         if (ok) {

@@ -53,7 +53,10 @@ TransactionsIndex::TransactionsIndex(BlockChain& _bc, const std::string& _path, 
         // an index written by an earlier build, or by the official node, keeps its watermark in the
         // old last_indexed file: take it over instead of rebuilding the index (and slow-starting).
         // pinFloor() marks the index incomplete if that watermark lags the quick-start checkpoint.
-        if (loadLastIndexedFromLegacyFile()) {
+        // Not when this index has a watermark of its own that invalidate() cleared: it was found
+        // inconsistent and must be rebuilt, whatever the old file says.
+        const bool invalidated = db_->isOpen() && db_->isKeyExists(kLastIndexedKey);
+        if (!invalidated && loadLastIndexedFromLegacyFile()) {
             cslog() << "trxIndex: last indexed block " << lastIndexedPool_
                     << " taken over from the legacy last_indexed file";
             updateLastIndexed();

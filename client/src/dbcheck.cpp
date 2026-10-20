@@ -204,7 +204,9 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
     }
     else {
         try {
-            f.found = csdb::backend::detect(dbPath);
+            // with another process on the folder no engine is opened (BerkeleyDB would run recovery
+            // on its live environment)
+            f.found = csdb::backend::detect(dbPath, lock != Lock::Busy);
         }
         catch (const std::exception& e) {
             say() << "cannot inspect " << dbPath << ": " << e.what() << std::endl;

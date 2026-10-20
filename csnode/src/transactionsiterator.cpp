@@ -30,6 +30,12 @@ TransactionsIterator::TransactionsIterator(const BlockChain& bc, const csdb::Add
 void TransactionsIterator::setFromTransId(const csdb::TransactionID& lTrans) {
     if (lTrans.is_valid()) {
         lapoo_ = bc_.loadBlock(lTrans.pool_seq());
+        // on pruned storage a wallet's last transaction may lie in a block no longer stored: the
+        // history then has nothing to walk (and the offset below would point before an empty vector)
+        if (!lapoo_.is_valid() || lTrans.index() >= lapoo_.transactions().size()) {
+            lapoo_ = csdb::Pool{};
+            return;
+        }
         it_ = lapoo_.transactions().rbegin()
             + (lapoo_.transactions().size() - lTrans.index() - 1);
     }
