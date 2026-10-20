@@ -51,6 +51,10 @@ private:
 
 private:
     void set_last_error_from_berkeleydb(int status);
+    // runs body(DbTxn*) -> BerkeleyDB status in a transaction, committed only on 0; exceptions become
+    // a false result with the error set
+    template <typename Body>
+    bool inTransaction(const char* what, Body body);
 
 private:
     DbEnv env_;
