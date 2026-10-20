@@ -4095,6 +4095,11 @@ void Node::requestStop() {
     emit stopRequested();
 }
 
+void Node::stopOnError() {
+    gSignalStatus = 1;
+    requestStop();
+}
+
 void Node::onStopRequested() {
     blockChain_.requestStop();
 

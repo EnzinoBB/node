@@ -76,10 +76,19 @@
 #        before its second newest checkpoint, and killed again: its two newest checkpoints are then
 #        ahead of the blocks on disk. It is restarted on every exit, at most 5 times: it must set
 #        those checkpoints aside, quick-start from the older one and end with the same state digests
+#        APPLY_FAIL_AT (default 0 = off, a CREDITS_TESTNET build): at that sequence node
+#        APPLY_FAIL_NODE (default 3) is told to fail applying a block 20 blocks later to its caches
+#        (./testnet-fail-apply); it must stop within 120 s, saving no checkpoint, and after a restart
+#        catch up with the same state digests, never logging "Pool already present"
+#        API_LOAD_NODE (default 0 = off): that node opens its public API (port 9100 + node) and, from
+#        sequence API_LOAD_FROM (default 1500), api_load.py reads random blocks among the last 1,500
+#        through it with 4 threads until the end, so that API threads read blocks while the node
+#        prunes; the node must keep up, and the load must have made at least 1,000 calls
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
-#        state digest (needs sudo)
+#        state digest (needs sudo). With DISK_FULL_STOP=1 the node gets SIGTERM halfway through the
+#        full-disk period and must exit within 120 s, as an operator would stop it
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -103,6 +112,10 @@ LOAD_SECONDS=${LOAD_SECONDS:-300}
 DISK_FULL_NODE=${DISK_FULL_NODE:-0}
 CHECKPOINT_AHEAD_AT=${CHECKPOINT_AHEAD_AT:-0}
 CHECKPOINT_AHEAD_NODE=${CHECKPOINT_AHEAD_NODE:-3}
+APPLY_FAIL_AT=${APPLY_FAIL_AT:-0}
+APPLY_FAIL_NODE=${APPLY_FAIL_NODE:-3}
+API_LOAD_NODE=${API_LOAD_NODE:-0}
+API_LOAD_FROM=${API_LOAD_FROM:-1500}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
@@ -150,6 +163,7 @@ done | tr '\n' ' ')
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
+DISK_FULL_STOP=${DISK_FULL_STOP:-0}
 DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
 NET_FAULT=${NET_FAULT:-}
 NET_FAULT_NODES=${NET_FAULT_NODES:-}
@@ -214,6 +228,11 @@ fi
 api_settings() {
     local i=$1
     if [ "$CONTRACTS" != "1" ]; then
+        if [ "$i" -eq "$API_LOAD_NODE" ]; then
+            echo "port=$((9100 + i))"
+            echo "apiexec_port=0"
+            return
+        fi
         echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
         echo "apiexec_port=0"
         return
@@ -352,6 +371,7 @@ net_fault_stats() {
 }
 
 stop_all() {
+    [ -z "${API_LOAD_PID:-}" ] || kill -TERM "$API_LOAD_PID" 2>/dev/null || true
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
     done
@@ -708,6 +728,23 @@ while :; do
         disk_filled_at=$(date +%s)
         echo "disk-full test: n$DISK_FULL_NODE block DB filled at sequence $min ($(df -h "$WORK/n$DISK_FULL_NODE/db" | tail -1 | awk '{print $4}') left)"
     fi
+    if [ "$DISK_FULL_STOP" = 1 ] && [ "$disk_filled_at" -gt 0 ] && [ "${disk_stop_done:-0}" -eq 0 ] \
+        && [ "$(date +%s)" -ge $((disk_filled_at + DISK_FULL_SECONDS / 2)) ]; then
+        disk_stop_done=1
+        if kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+            kill -TERM "${PIDS[$DISK_FULL_NODE]}"
+            stop_t0=$(date +%s)
+            while kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null && [ $(( $(date +%s) - stop_t0 )) -lt 120 ]; do sleep 1; done
+            if kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+                echo "FAIL: n$DISK_FULL_NODE did not stop on SIGTERM within 120 s while its disk was full"
+                kill -KILL "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null || true
+                exit 1
+            fi
+            wait "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$DISK_FULL_NODE " 2>/dev/null || true
+            echo "disk-full test: n$DISK_FULL_NODE stopped on SIGTERM in $(( $(date +%s) - stop_t0 )) s with its disk full"
+        fi
+    fi
     if [ "$disk_filled_at" -gt 0 ] && [ "$disk_freed" -eq 0 ] && [ "$(date +%s)" -ge $((disk_filled_at + DISK_FULL_SECONDS)) ]; then
         rm -f "$WORK/n$DISK_FULL_NODE/db/filler"
         disk_freed=1
@@ -763,6 +800,33 @@ while :; do
         start_node "$CHECKPOINT_AHEAD_NODE"
     fi
 
+    if [ "$APPLY_FAIL_AT" -gt 0 ] && [ "${apply_fail_set:-0}" -eq 0 ] && [ "$min" -ge "$APPLY_FAIL_AT" ]; then
+        apply_fail_set=1
+        af=$APPLY_FAIL_NODE
+        af_seq=$(( $(seq_of "$af") + 20 ))
+        echo "$af_seq" > "$WORK/n$af/testnet-fail-apply"
+        af_lines=$(wc -l < "$WORK/n$af/node.log")
+        af_t0=$(date +%s)
+        echo "apply-fail test: n$af fails to apply block $af_seq"
+        while kill -0 "${PIDS[$af]}" 2>/dev/null && [ $(( $(date +%s) - af_t0 )) -lt 240 ]; do sleep 1; done
+        if kill -0 "${PIDS[$af]}" 2>/dev/null; then
+            echo "FAIL: n$af did not stop after failing to apply block $af_seq"
+            tail -n +"$((af_lines + 1))" "$WORK/n$af/node.log" | grep -aE "failed to apply|Couldn't save block|Pool already present" | head -5
+            exit 1
+        fi
+        wait "${PIDS[$af]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$af " 2>/dev/null || true
+        echo "apply-fail test: n$af stopped $(( $(date +%s) - af_t0 )) s after the marker, restarting it"
+        sleep 5
+        start_node "$af"
+    fi
+
+    if [ "$API_LOAD_NODE" -gt 0 ] && [ -z "${API_LOAD_PID:-}" ] && [ "$min" -ge "$API_LOAD_FROM" ]; then
+        python3 "$HERE/api_load.py" "127.0.0.1:$((9100 + API_LOAD_NODE))" "$WORK/api_load.stats" > "$WORK/api_load.log" 2>&1 &
+        API_LOAD_PID=$!
+        echo "api load: reading random blocks through n$API_LOAD_NODE's API from sequence $min"
+    fi
+
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
@@ -814,6 +878,23 @@ if [ "$CHECKPOINT_AHEAD_AT" -gt 0 ]; then
     grep -aq 'is ahead of the blocks on disk, moving it to' <<<"$after" \
         || { echo "FAIL: n$CHECKPOINT_AHEAD_NODE set no checkpoint aside"; exit 1; }
     echo "checkpoint-ahead test: n$CHECKPOINT_AHEAD_NODE set $(grep -ac 'is ahead of the blocks on disk, moving it to' <<<"$after") checkpoint(s) aside in $ca_restarts failed start(s), then caught up"
+fi
+if [ "$APPLY_FAIL_AT" -gt 0 ]; then
+    after=$(tail -n +"$((af_lines + 1))" "$WORK/n$APPLY_FAIL_NODE/node.log")
+    grep -aq "failed to apply to the caches" <<<"$after" || { echo "FAIL: n$APPLY_FAIL_NODE never hit the injected failure"; exit 1; }
+    ! grep -aq "Pool already present" <<<"$after" || { echo "FAIL: n$APPLY_FAIL_NODE offered a stored block again"; exit 1; }
+    ! grep -aq "caches for QUICK START saved" <<<"$(awk '/failed to apply to the caches/{f=1} f' <<<"$after" | awk '/QUICK START!/{exit} {print}')" \
+        || { echo "FAIL: n$APPLY_FAIL_NODE saved its caches after the failure"; exit 1; }
+    echo "apply-fail test: n$APPLY_FAIL_NODE stopped without a checkpoint and caught up after a restart"
+fi
+if [ -n "${API_LOAD_PID:-}" ]; then
+    kill -TERM "$API_LOAD_PID" 2>/dev/null || true
+    wait "$API_LOAD_PID" 2>/dev/null || true
+    API_LOAD_PID=
+    stats=$(cat "$WORK/api_load.stats" 2>/dev/null || echo "calls=0 errors=0")
+    echo "api load: $stats"
+    load_calls=$(sed -nE 's/.*calls=([0-9]+).*/\1/p' <<<"$stats")
+    [ "${load_calls:-0}" -ge 1000 ] || { echo "FAIL: the API load made only ${load_calls:-0} calls"; tail -20 "$WORK/api_load.log"; exit 1; }
 fi
 
 if [ -n "$FUND_PID" ]; then

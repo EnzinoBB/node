@@ -1,6 +1,8 @@
 #include <base58.h>
 #include <chrono>
 #include <cstdlib>
+#include <fstream>
+#include <stdexcept>
 #include <csdb/currency.hpp>
 #include <lib/system/hash.hpp>
 #include <lib/system/logger.hpp>
@@ -321,34 +323,39 @@ void BlockChain::pruneStep() {
         return;
     }
     const cs::Sequence end = std::min(pruneUpTo_, from + kBlocksPerStep);
-    std::vector<csdb::PoolHash> hashes;
-    hashes.reserve(end - from);
-    for (cs::Sequence seq = from; seq < end; ++seq) {
-        // the block itself tells which transaction index entries it owns
-        const csdb::Pool pool = storage_.pool_load(seq);
-        csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(seq);
-        if (pool.is_valid() && trxIndex_) {
-            trxIndex_->onPruneBlock(pool);
+    {
+        // the storage's pool cache is not thread safe: every storage call holds dbLock_, as the API
+        // threads do when they load blocks. The compaction below needs no lock: only the engine is touched
+        std::lock_guard lock(dbLock_);
+        std::vector<csdb::PoolHash> hashes;
+        hashes.reserve(end - from);
+        for (cs::Sequence seq = from; seq < end; ++seq) {
+            // the block itself tells which transaction index entries it owns
+            const csdb::Pool pool = storage_.pool_load(seq);
+            csdb::PoolHash hash = pool.is_valid() ? pool.hash() : blockHashes_->find(seq);
+            if (pool.is_valid() && trxIndex_) {
+                trxIndex_->onPruneBlock(pool);
+            }
+            if (hash.is_empty()) {
+                csdebug() << kLogPrefix << "pruned storage: block " << seq << " not found";
+            }
+            else {
+                hashes.push_back(hash);
+            }
         }
-        if (hash.is_empty()) {
-            csdebug() << kLogPrefix << "pruned storage: block " << seq << " not found";
+        // the whole step in one storage transaction where the engine allows it (LMDB)
+        if (!hashes.empty() && !storage_.pool_prune_batch(hashes)) {
+            // the blocks are there but could not be removed now (e.g. the storage is short of buffer
+            // cache during a fast sync): keep them and retry this step with the next block
+            cswarning() << kLogPrefix << "pruned storage: blocks " << from << ".." << end - 1 << " not removed yet, will retry";
+            return;
         }
-        else {
-            hashes.push_back(hash);
+        for (; from < end; ++from) {
+            // getHashBySequence() then answers an empty hash, as for any block not stored
+            blockHashes_->remove(from);
         }
+        firstStoredSeq_ = from;
     }
-    // the whole step in one storage transaction where the engine allows it (LMDB)
-    if (!hashes.empty() && !storage_.pool_prune_batch(hashes)) {
-        // the blocks are there but could not be removed now (e.g. the storage is short of buffer
-        // cache during a fast sync): keep them and retry this step with the next block
-        cswarning() << kLogPrefix << "pruned storage: blocks " << from << ".." << end - 1 << " not removed yet, will retry";
-        return;
-    }
-    for (; from < end; ++from) {
-        // getHashBySequence() then answers an empty hash, as for any block not stored
-        blockHashes_->remove(from);
-    }
-    firstStoredSeq_ = from;
     if (from == pruneUpTo_) {
         const bool compacted = storage_.compact();
         cslog() << kLogPrefix << "pruned storage: blocks before " << WithDelimiters(from) << " removed"
@@ -960,6 +967,18 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
     // former updateFromNextBlock(pool) method:
     try {
         std::lock_guard lock(cacheMutex_);
+#ifdef CREDITS_TESTNET
+        // test-network builds only: fail once on the block named in ./testnet-fail-apply, after the
+        // transaction index and the wallet ids took it (ci/testnet/run.sh APPLY_FAIL_AT)
+        if (std::ifstream marker("testnet-fail-apply"); marker) {
+            cs::Sequence failAt = 0;
+            if (marker >> failAt && failAt == pool.sequence()) {
+                marker.close();
+                std::remove("testnet-fail-apply");
+                throw std::runtime_error("test: failure injected while applying block " + std::to_string(failAt));
+            }
+        }
+#endif
         // currently block stores own round confidants, not next round:
         const auto& currentRoundConfidants = pool.confidants();
         walletsCacheUpdater_->loadNextBlock(pool, currentRoundConfidants, *this);
@@ -990,7 +1009,7 @@ bool BlockChain::applyBlockToCaches(const csdb::Pool& pool) {
 // then the caches, lastSequence_, the handlers of storeBlockEvent and the database all hold exactly
 // this block, and a quick start from it continues with the next block in the database.
 void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
-    if (!serializationManPtr_ || !pool.sequence()) {
+    if (!serializationManPtr_ || !pool.sequence() || cachesTainted_) {
         return;
     }
     const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
@@ -1282,6 +1301,10 @@ void BlockChain::close() {
     }
 
     cs::Lock lock(dbLock_);
+    // the caches hold the head block: they may only become a checkpoint if every block up to it is in
+    // the database. Not so when the deferred block could not be flushed, or when blocks still wait for
+    // a database that refuses writes (RocksDB with a full disk)
+    const bool blocksOnDisk = !deferredBlock_.is_valid() && storage_.flush();
     storage_.close();
     cs::Connector::disconnect(&storage_.readBlockEvent(), this, &BlockChain::onReadFromDB);
     blockHashes_->close();
@@ -1289,6 +1312,17 @@ void BlockChain::close() {
 
     if (!serializationManPtr_) {
         csinfo() << "Blockchain: no serialization manager provided to save caches for QUICK START.";
+        return;
+    }
+
+    if (cachesTainted_) {
+        cswarning() << "Blockchain: the caches failed to apply a block, no caches saved for QUICK START.";
+        return;
+    }
+
+    if (!blocksOnDisk) {
+        cswarning() << "Blockchain: block " << headInfo.sequence << " is not in the database, no caches saved for QUICK START; "
+                    << "the next start continues from an earlier checkpoint";
         return;
     }
 
@@ -1521,6 +1555,11 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
 
     csdebug() << kLogPrefix << "finish & store block #" << pool_seq << " to chain";
 
+    if (cachesTainted_) {
+        cserror() << kLogPrefix << "cannot record block #" << pool_seq << ": the caches failed to apply a block, the node stops";
+        return std::nullopt;
+    }
+
     if (last_seq + 1 != pool_seq) {
         cserror() << kLogPrefix << "cannot record block #" << pool_seq << " to chain, last sequence " << last_seq;
         return std::nullopt;
@@ -1539,6 +1578,7 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
 
     constexpr cs::Sequence NoSequence = std::numeric_limits<cs::Sequence>::max();
     cs::Sequence flushed_block_seq = NoSequence;
+    csdb::Pool flushedBlock;
 
     //if the block is not applied here, but the deferred block is already saved 
 //we have situation when we try to save the deferred block anther time
@@ -1582,6 +1622,11 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
                     uuid_ = uuidFromBlock(deferredBlock_);
                     csdebug() << kLogPrefix << "UUID = " << uuid_;
                 }
+                // on disk now: no longer deferred, so that it is never offered to the storage again
+                // (a failure below would otherwise leave it "deferred" and every later save would be
+                // refused as already present). Loads and the last hash now come from the storage.
+                flushedBlock = deferredBlock_;
+                deferredBlock_ = csdb::Pool{};
             }
             else {
                 csmeta(cserror) << kLogPrefix << "Couldn't save block: " << deferredBlock_.sequence();
@@ -1591,18 +1636,24 @@ std::optional<csdb::Pool> BlockChain::recordBlock(csdb::Pool& pool, bool isTrust
     }
 
     if (flushed_block_seq != NoSequence) {
-        saveLiveCheckpoint(deferredBlock_);
+        saveLiveCheckpoint(flushedBlock);
     }
 
     if (!applyBlockToCaches(pool)) {
-        csdebug() << kLogPrefix << "failed to apply block to caches";
+        // the transaction index and the wallet ids already took the block and the wallet caches may
+        // hold part of it: applying it again would count it twice. Stop, saving no checkpoint from
+        // these caches; the next start quick-starts from the last good one and reads the blocks after it.
+        cachesTainted_ = true;
+        cserror() << kLogPrefix << "block #" << pool_seq << " failed to apply to the caches: stopping the node without "
+                  << "saving a checkpoint; the next start reads the blocks again from the last checkpoint";
+        Node::stopOnError();
         return std::nullopt;
     }
     //========================================
 
     if (flushed_block_seq != NoSequence) {
         csdebug() << "---------------------------- Flush block #" << flushed_block_seq << " to disk ---------------------------";
-        csdebug() << "signatures amount = " << deferredBlock_.signatures().size() << ", smartSignatures amount = " << deferredBlock_.smartSignatures().size()
+        csdebug() << "signatures amount = " << flushedBlock.signatures().size() << ", smartSignatures amount = " << flushedBlock.smartSignatures().size()
                   << ", see block info above";
         csdebug() << "----------------------------------------------------------------------------------";
     }
@@ -2207,7 +2258,7 @@ cs::Sequence BlockChain::getPreviousPoolSeq(const csdb::Address& addr, cs::Seque
             cserror() << kLogPrefix << "Node will be stopped due to index error. Please restart it.";
 
             trxIndex_->invalidate();
-            Node::requestStop();
+            Node::stopOnError();
         }
 
         return kWrongSequence;
