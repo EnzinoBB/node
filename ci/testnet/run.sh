@@ -625,25 +625,35 @@ while :; do
         # node.log is appended across restarts: remember where the start after the conversion begins
         convert_lines4=$(wc -l < "$WORK/n4/node.log")
         start_node 4
-        # a small batch for n6, so that many batches remain after the second one
-        (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) &
-        cpid=$!
-        until_t=$(( $(date +%s) + 300 ))
-        until [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -ge 2 ] || ! kill -0 "$cpid" 2>/dev/null; do
-            [ "$(date +%s)" -lt "$until_t" ] || { kill -KILL "$cpid" 2>/dev/null || true; echo "FAIL: n6 did not log two converted batches within 300 s"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
-            sleep 0.2
+        # n6 is killed twice at fixed points (testnet-convert-kill, read once by test-network builds): after
+        # its second batch of 50, then, resumed, with every block converted and verified but before the
+        # old database is compared and deleted. Its BerkeleyDB files are then damaged, as a crash in a
+        # compaction can leave them (a log recovery cannot replay): the next start cannot open them
+        # and must finish without them, every block being in db/.convert-new.
+        convert6() {
+            echo "$1" > "$WORK/n6/testnet-convert-kill"
+            (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) \
+                && { echo "FAIL: n6 was not killed at its conversion point $1"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+            [ -f "$WORK/n6/db/.convert" ] || { echo "FAIL: n6 was killed at $1 but has no db/.convert to resume"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+            [ ! -e "$WORK/n6/testnet-convert-kill" ] || { echo "FAIL: n6 did not read testnet-convert-kill"; exit 1; }
+        }
+        convert6 2
+        # the kill comes as the second batch leaves the old database, before its "converted blocks" line:
+        # one line, and two batches of 50 recorded below the last block
+        n6last=$(sed -n 's/^last=//p' "$WORK/n6/db/.convert")
+        [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -eq 1 ] && grep -aq "^done_down_to=$(( n6last - 99 ))\$" "$WORK/n6/db/.convert" \
+            || { echo "FAIL: n6 was not killed after its second batch"; cat "$WORK/n6/db/.convert"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+        convert6 checked
+        grep -aq '^done_down_to=0$' "$WORK/n6/db/.convert" && grep -aq '^phase=blocks$' "$WORK/n6/db/.convert" \
+            || { echo "FAIL: n6 was not killed with every block converted"; cat "$WORK/n6/db/.convert"; exit 1; }
+        # the first page (the table's metadata) of both block tables overwritten with garbage (not zeros,
+        # which BerkeleyDB may take for a file being created): neither recovery nor open can use them
+        for f in blockchain.db sequence.db; do
+            [ -f "$WORK/n6/db/$f" ] || { echo "FAIL: n6 has no db/$f to damage"; ls -la "$WORK/n6/db"; exit 1; }
+            head -c 4096 /dev/zero | tr '\0' '\253' | dd of="$WORK/n6/db/$f" bs=4096 count=1 conv=notrunc status=none
         done
-        kill -KILL "$cpid" 2>/dev/null || true; wait "$cpid" 2>/dev/null || true
-        if [ ! -f "$WORK/n6/db/.convert" ]; then
-            if grep -aq 'conversion done' "$WORK/n6/stdout.log"; then
-                echo "FAIL: n6 finished its conversion before the kill, lower the batch"
-            else
-                echo "FAIL: n6 was killed but has no db/.convert to resume"
-            fi
-            exit 1
-        fi
         convert_lines6=$(wc -l < "$WORK/n6/node.log")
-        echo "convert test: n6 killed during its conversion to rocksdb, restarting it"
+        echo "convert test: n6 killed after a batch and after the last check of its conversion to rocksdb, berkeleydb files damaged, restarting it"
         # the extra arguments are a temporary of this call only: a later restart of n6 does not convert again
         EXTRA_ARGS_6="--convert-db --convert-batch 50" start_node 6
     fi
@@ -1007,7 +1017,9 @@ if [ "$CONVERT_AT" -gt 0 ]; then
         [ ! -e "$WORK/n$i/db/blockchain.db" ] || { echo "FAIL: n$i still has its BerkeleyDB files"; exit 1; }
         grep -aq 'conversion done' "$WORK/n$i/stdout.log" || { echo "FAIL: n$i did not finish its conversion"; exit 1; }
     done
-    grep -aq 'resuming the conversion' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion"; exit 1; }
+    grep -aq 'resuming the conversion .* below block [1-9]' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion midway"; exit 1; }
+    [ "$(grep -ac 'resuming the conversion .* below block 0$' "$WORK/n6/stdout.log")" -ge 1 ] || { echo "FAIL: n6 did not resume a fully converted database"; exit 1; }
+    grep -aq 'finishing without it' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not finish without its damaged berkeleydb database"; exit 1; }
     for i in 4 6; do
         # QUICK START! goes to node.log (the file sink), not stdout.log; only the part since the restart
         lines_var="convert_lines$i"
