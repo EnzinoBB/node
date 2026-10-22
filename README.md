@@ -4,18 +4,27 @@
 [Guides](https://developers.credits.com/en/Articles/Guides) \|
 [News](https://credits.com/en/Home/News)
 
-[![Twitter](https://img.shields.io/twitter/follow/creditscom.svg?label=Follow&style=social)](https://twitter.com/intent/follow?screen_name=creditscom)
+[![Build](https://github.com/EnzinoBB/node/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/EnzinoBB/node/actions/workflows/build.yml)
+[![Release](https://img.shields.io/github/v/release/EnzinoBB/node?label=Community%20release&style=plastic)](https://github.com/EnzinoBB/node/releases/latest)
 [![AGPL License](https://img.shields.io/github/license/CREDITSCOM/node.svg?color=green&label=License&style=plastic)](LICENSE)
-![Version](https://img.shields.io/github/tag/CREDITSCOM/node.svg?label=Version&style=plastic)
-[![Build Status](http://89.111.33.166:8080/buildStatus/icon?job=lin-client-node&build=27)](http://89.111.33.166:8080/view/release-pipeline/job/lin-client-node/lastBuild/)
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=CREDITSCOM_node&metric=alert_status)](https://sonarcloud.io/dashboard?id=CREDITSCOM_node)
-# Credits Node
+[![Twitter](https://img.shields.io/twitter/follow/creditscom.svg?label=Follow&style=social)](https://twitter.com/intent/follow?screen_name=creditscom)
+# Credits Node (community)
 A node is a client-side application that is installed on the user equipment.
 The Node processes and stores transactions, executes and confirms smart contract rules requests processing from third-party systems and provides data when requested.
 Written on C++.
 
 ## Version
-Current node version 4.2.532.0
+This repository is the community continuation of [CREDITSCOM/node](https://github.com/CREDITSCOM/node), forked from the official release 4.2.532. Community releases are numbered `4.2.532-community.N`. They keep protocol version 532 and stay compatible with the mainnet.
+
+| | |
+|---|---|
+| What changes from the official node | [docs/differences.md](docs/differences.md) |
+| Every change, pull request by pull request | [docs/CHANGES.md](docs/CHANGES.md) |
+| Block database, pruned storage, conversion | [docs/storage.md](docs/storage.md) |
+| Docker (pruned node from a snapshot) | [packaging/docker/README.md](packaging/docker/README.md) |
+| Packages (full and pruned, Linux x86-64) | [Releases](https://github.com/EnzinoBB/node/releases) |
+
+Replacing the official binaries with the community ones, with the official `config.ini`, keeps the same BerkeleyDB database and the same behaviour on the network. The new features (other block databases, pruned storage, conversion) are opt-in.
 
 <h2>What is Credits Node?</h2>
 <p>Credits Node is the main module that provide an opportunity to run a node and participate in CREDITS blockhain network. The node performs processing and storage of transactions, execution and confirmation of the terms of smart contracts, processing requests from third-party systems, and provides data upon request. Each node on the network has the same functionality.
