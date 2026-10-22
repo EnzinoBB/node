@@ -787,3 +787,29 @@ TEST(Convert, CheckpointsTheBerkeleyDbSourceAfterEachCompaction) {
     fs::remove_all(copy);
     fs::remove_all(dir);
 }
+
+TEST(Convert, AnUnopenableSourceBeforeTheContractsAreCopiedSaysSo) {
+    // every block recorded as converted but the contract records not (a hand-edited db/.convert):
+    // the old database is still needed, and the message names what is missing, not a block range
+    using csdb::convert::Step;
+    const auto chain = makeChain(0, 200);
+    const auto dir = writeDb("berkeleydb", "unopenable_contracts", chain);
+    auto o = opts(dir, "berkeleydb", "rocksdb");
+    o.hook = [](Step s, uint32_t, uint32_t) {
+        if (s == Step::Checked) throw std::runtime_error("simulated crash");
+    };
+    EXPECT_THROW(csdb::convert::run(o), std::runtime_error);
+    csdb::convert::State st;
+    ASSERT_TRUE(csdb::convert::readState(dir.string(), st));
+    st.contractsCopied = false;
+    ASSERT_TRUE(csdb::convert::writeState(dir.string(), st));
+    damageBerkeleyDb(dir);
+    o.hook = nullptr;
+    auto r = csdb::convert::run(o);
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("contract records are not copied yet"), std::string::npos) << r.error;
+    EXPECT_EQ(r.error.find("blocks "), std::string::npos) << r.error;
+    EXPECT_TRUE(fs::exists(dir / ".convert"));
+    EXPECT_TRUE(fs::exists(dir / ".convert-new"));
+    fs::remove_all(dir);
+}

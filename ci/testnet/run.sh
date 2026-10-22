@@ -49,7 +49,8 @@
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
-#        in the middle of the conversion and started again: it must resume and finish
+#        after its second batch and again with every block converted (testnet-convert-kill), its
+#        BerkeleyDB files damaged, and started again: it must resume midway, then finish without them
 #        INDEX_LOSS_AT (default 0 = off): at that sequence node INDEX_LOSS_NODE (default PRUNE_NODE) is
 #        stopped, its transaction index (caches/indexdb) is removed and it is started again; a pruned
 #        node waits until it has pruned. It must quick-start and rebuild the index from the blocks it
@@ -632,7 +633,8 @@ while :; do
         # and must finish without them, every block being in db/.convert-new.
         convert6() {
             echo "$1" > "$WORK/n6/testnet-convert-kill"
-            (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) \
+            # a hang ends after 300 s (exit 124) and fails the checks below instead of the whole job
+            (cd "$WORK/n6" && exec timeout -s KILL 300 "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) \
                 && { echo "FAIL: n6 was not killed at its conversion point $1"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
             [ -f "$WORK/n6/db/.convert" ] || { echo "FAIL: n6 was killed at $1 but has no db/.convert to resume"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
             [ ! -e "$WORK/n6/testnet-convert-kill" ] || { echo "FAIL: n6 did not read testnet-convert-kill"; exit 1; }
@@ -640,11 +642,13 @@ while :; do
         convert6 2
         # the kill comes as the second batch leaves the old database, before its "converted blocks" line:
         # one line, and two batches of 50 recorded below the last block
+        n6first=$(sed -n 's/^first=//p' "$WORK/n6/db/.convert")
         n6last=$(sed -n 's/^last=//p' "$WORK/n6/db/.convert")
+        [ -n "$n6first" ] && [ -n "$n6last" ] || { echo "FAIL: n6 db/.convert has no first/last"; cat "$WORK/n6/db/.convert"; exit 1; }
         [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -eq 1 ] && grep -aq "^done_down_to=$(( n6last - 99 ))\$" "$WORK/n6/db/.convert" \
             || { echo "FAIL: n6 was not killed after its second batch"; cat "$WORK/n6/db/.convert"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
         convert6 checked
-        grep -aq '^done_down_to=0$' "$WORK/n6/db/.convert" && grep -aq '^phase=blocks$' "$WORK/n6/db/.convert" \
+        grep -aq "^done_down_to=$n6first\$" "$WORK/n6/db/.convert" && grep -aq '^phase=blocks$' "$WORK/n6/db/.convert" \
             || { echo "FAIL: n6 was not killed with every block converted"; cat "$WORK/n6/db/.convert"; exit 1; }
         # the first page (the table's metadata) of both block tables overwritten with garbage (not zeros,
         # which BerkeleyDB may take for a file being created): neither recovery nor open can use them
@@ -1018,7 +1022,7 @@ if [ "$CONVERT_AT" -gt 0 ]; then
         grep -aq 'conversion done' "$WORK/n$i/stdout.log" || { echo "FAIL: n$i did not finish its conversion"; exit 1; }
     done
     grep -aq 'resuming the conversion .* below block [1-9]' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion midway"; exit 1; }
-    [ "$(grep -ac 'resuming the conversion .* below block 0$' "$WORK/n6/stdout.log")" -ge 1 ] || { echo "FAIL: n6 did not resume a fully converted database"; exit 1; }
+    [ "$(grep -ac "resuming the conversion .* below block $n6first\$" "$WORK/n6/stdout.log")" -ge 1 ] || { echo "FAIL: n6 did not resume a fully converted database"; exit 1; }
     grep -aq 'finishing without it' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not finish without its damaged berkeleydb database"; exit 1; }
     for i in 4 6; do
         # QUICK START! goes to node.log (the file sink), not stdout.log; only the part since the restart
