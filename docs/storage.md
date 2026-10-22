@@ -152,6 +152,13 @@ resumes at the next start` (exit 0). A crash or a power cut leaves `db/.convert`
 well. The next start resumes from the recorded batch, with or without `--convert-db`, as long as
 `db_backend` still names the target.
 
+Once every block is converted the old database is no longer needed. If a crash left a BerkeleyDB
+environment that recovery cannot replay (`DB_RUNRECOVERY`), the next start says `the berkeleydb
+database cannot be opened (...): every block is already in db/.convert-new, finishing without it`,
+checks the new database and deletes the old files. Before that point an old database that does not
+open stops the conversion with `blocks N..M are not converted yet` (exit 3), and `db/.convert` and
+`db/.convert-new` are kept.
+
 No conversion starts while another node process holds `db/.lock`: `another node process is using
 db: stop it first` (exit 3).
 

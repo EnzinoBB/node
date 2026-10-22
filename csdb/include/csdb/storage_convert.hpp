@@ -8,9 +8,12 @@
 // newest blocks first from berkeleydb, which shrinks from the end, oldest first from the others.
 // Each batch is removed from the old database only after it is written, synced, read back and
 // recorded in db/.convert. A crash or a stop resumes from db/.convert, in the recorded order.
+// Once every block is converted the old database is no longer needed: a resume that cannot open it
+// (a BerkeleyDB environment recovery cannot replay) finishes without it.
 namespace csdb::convert {
 
-enum class Step { Read, Written, Verified, Recorded, Removed };
+// Checked: every block converted and the whole new database verified, the old one not yet looked at
+enum class Step { Read, Written, Verified, Recorded, Removed, Checked };
 
 struct Options {
     std::string dbPath;                 // the node's db/ folder

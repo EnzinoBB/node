@@ -95,6 +95,26 @@ protected:
     std::string name(const std::string& test) const { return test + "_" + from() + "_" + to(); }
 };
 
+// the metadata page of BerkeleyDB's block tables overwritten with garbage: opening the environment
+// fails, in recovery or in the table's open, as after a crash recovery cannot replay
+void damageBerkeleyDb(const fs::path& dir) {
+    for (const char* f : {"blockchain.db", "sequence.db"}) {
+        std::fstream file(dir / f, std::ios::in | std::ios::out | std::ios::binary);
+        ASSERT_TRUE(file) << f;
+        const std::string garbage(4096, '\xab');
+        file.write(garbage.data(), static_cast<std::streamsize>(garbage.size()));
+    }
+}
+
+bool opens(const std::string& backend, const fs::path& dir) {
+    try {
+        return csdb::backend::open(backend, dir.string()) != nullptr;
+    }
+    catch (const std::exception&) {
+        return false;
+    }
+}
+
 // blocks a recorded state has not converted yet
 std::pair<int64_t, int64_t> unconverted(const csdb::convert::State& s) {
     if (s.ascending) return {s.doneUpTo < 0 ? int64_t(s.first) : s.doneUpTo + 1, int64_t(s.last)};
@@ -653,5 +673,117 @@ TEST_P(ConvertOrder, RefusesToDeleteAChangedContractRecord) {
     ASSERT_TRUE(db->getContractData(cs::Bytes(32, 2), v));
     EXPECT_EQ(v, cs::Bytes(50, 9));
     db.reset();
+    fs::remove_all(dir);
+}
+
+TEST_P(ConvertOrder, ResumesAfterTheLastCheck) {
+    // every block converted and verified, the old database not yet compared nor deleted
+    using csdb::convert::Step;
+    const auto chain = makeChain(0, 400);
+    const auto dir = writeDb(from(), name("checked"), chain);
+    auto o = opts(dir, from(), to());
+    o.hook = [](Step s, uint32_t, uint32_t) {
+        if (s == Step::Checked) throw std::runtime_error("simulated crash");
+    };
+    EXPECT_THROW(csdb::convert::run(o), std::runtime_error);
+    csdb::convert::State st;
+    ASSERT_TRUE(csdb::convert::readState(dir.string(), st));
+    EXPECT_EQ(unconverted(st).first, unconverted(st).second + 1);   // nothing left to convert
+    EXPECT_FALSE(st.moving);
+    o.hook = nullptr;
+    auto r = csdb::convert::run(o);
+    ASSERT_TRUE(r.ok) << r.error;
+    expectSame(to(), dir, chain);
+    fs::remove_all(dir);
+}
+
+// A crash in BerkeleyDB's last compaction can leave a log recovery cannot replay (DB_RUNRECOVERY on
+// every start). Every block is in .convert-new by then: the conversion finishes without the old files.
+TEST(Convert, FinishesWithoutABerkeleyDbThatDoesNotOpen) {
+    using csdb::convert::Step;
+    for (const std::string to : {"lmdb", "rocksdb"}) {
+        const auto chain = makeChain(0, 400);
+        const auto dir = writeDb("berkeleydb", "unopenable_" + to, chain);
+        auto o = opts(dir, "berkeleydb", to);
+        o.hook = [](Step s, uint32_t, uint32_t) {
+            if (s == Step::Checked) throw std::runtime_error("simulated crash");
+        };
+        EXPECT_THROW(csdb::convert::run(o), std::runtime_error);
+        damageBerkeleyDb(dir);
+        ASSERT_FALSE(opens("berkeleydb", dir)) << "the damage must make the source unopenable";
+        // the resumed estimate counts from db/.convert and does not open the source
+        uint64_t estimate = 1;
+        EXPECT_NO_THROW(estimate = csdb::convert::estimatePeakBytes(dir.string(), "berkeleydb", to, 37));
+        EXPECT_EQ(estimate, 256ULL << 20);
+        o.hook = nullptr;
+        std::vector<std::string> log;
+        o.log = [&](const std::string& line) { log.push_back(line); };
+        auto r = csdb::convert::run(o);
+        ASSERT_TRUE(r.ok) << r.error;
+        EXPECT_TRUE(std::any_of(log.begin(), log.end(), [](const std::string& l) {
+            return l.find("cannot be opened") != std::string::npos && l.find("finishing without it") != std::string::npos;
+        }));
+        EXPECT_TRUE(csdb::backend::files("berkeleydb", dir.string()).empty());
+        expectSame(to, dir, chain);
+        fs::remove_all(dir);
+    }
+}
+
+TEST(Convert, AnUnopenableSourceMidwayKeepsTheConversion) {
+    // blocks still to convert are only in the old database: stop, keep everything, say which
+    const auto chain = makeChain(0, 400);
+    const auto dir = writeDb("berkeleydb", "unopenable_midway", chain);
+    auto o = opts(dir, "berkeleydb", "rocksdb");
+    int asked = 0;
+    o.stopRequested = [&] { return ++asked == 2; };
+    auto r = csdb::convert::run(o);
+    ASSERT_TRUE(r.stopped) << r.error;
+    damageBerkeleyDb(dir);
+    ASSERT_FALSE(opens("berkeleydb", dir));
+    EXPECT_NO_THROW(csdb::convert::estimatePeakBytes(dir.string(), "berkeleydb", "rocksdb", 37));
+    o.stopRequested = nullptr;
+    EXPECT_NO_THROW(r = csdb::convert::run(o));
+    EXPECT_FALSE(r.ok);
+    EXPECT_NE(r.error.find("cannot be opened"), std::string::npos) << r.error;
+    EXPECT_NE(r.error.find("blocks 0..325 are not converted yet"), std::string::npos) << r.error;
+    EXPECT_TRUE(fs::exists(dir / ".convert"));
+    EXPECT_FALSE(csdb::backend::files("rocksdb", (dir / ".convert-new").string()).empty());
+    fs::remove_all(dir);
+}
+
+TEST(Convert, CheckpointsTheBerkeleyDbSourceAfterEachCompaction) {
+    // after a batch the source's log and files agree: a copy taken without closing the environment
+    // (what a kill leaves) opens with nothing to replay and holds exactly the unconverted blocks
+    using csdb::convert::Step;
+    const auto chain = makeChain(0, 400);
+    const auto dir = writeDb("berkeleydb", "checkpointed", chain);
+    const auto copy = fs::temp_directory_path() / "cs_convert_checkpointed_copy";
+    fs::remove_all(copy);
+    auto o = opts(dir, "berkeleydb", "rocksdb");
+    int batches = 0;
+    o.hook = [&](Step s, uint32_t, uint32_t) {
+        if (s == Step::Removed && ++batches == 2) {
+            fs::create_directories(copy);
+            for (const auto& p : csdb::backend::files("berkeleydb", dir.string())) {
+                if (p.filename().string().rfind("__db.", 0) != 0) fs::copy(p, copy / p.filename());
+            }
+            fs::copy(dir / ".convert", copy / ".convert");
+            throw std::runtime_error("simulated crash");
+        }
+    };
+    EXPECT_THROW(csdb::convert::run(o), std::runtime_error);
+    {
+        auto db = csdb::backend::open("berkeleydb", copy.string());
+        ASSERT_TRUE(db);
+        auto it = db->new_iterator();
+        ASSERT_TRUE(it);
+        it->seek_to_first();
+        ASSERT_TRUE(it->is_valid());
+        EXPECT_EQ(it->key(), 0u);
+        it->seek_to_last();
+        ASSERT_TRUE(it->is_valid());
+        EXPECT_EQ(it->key(), 325u);
+    }
+    fs::remove_all(copy);
     fs::remove_all(dir);
 }
