@@ -326,7 +326,9 @@ def load(args, client_for, master, counter, nodes):
             with lock:
                 if ok:
                     stats["write"].append(ms)
-                elif "rejected by consensus" in (msg or ""):
+                # refused by consensus (concurrent calls of one contract in a round), or by the API while
+                # the account's previous call is still in progress: answers, not faults
+                elif "rejected by consensus" in (msg or "") or "Transaction in progress" in (msg or ""):
                     rejected[0] += 1
                 else:
                     errors["write"] += 1
@@ -374,7 +376,8 @@ def load(args, client_for, master, counter, nodes):
         print(f"load {kind}s: {len(ms)} ok of {sent} ({summary[kind]['rate']}/s), latency "
               f"p50 {summary[kind]['p50_ms'] or 0:.0f} ms, p95 {summary[kind]['p95_ms'] or 0:.0f} ms, "
               f"max {summary[kind]['max_ms'] or 0:.0f} ms", flush=True)
-    print(f"load writes rejected by consensus (concurrent calls of one contract): {rejected[0]}", flush=True)
+    print(f"load writes refused (by consensus for concurrent calls of one contract, or while the account's "
+          f"previous call was in progress): {rejected[0]}", flush=True)
     if args.stats_file:
         with open(args.stats_file, "w") as f:
             json.dump(summary, f, indent=1)
