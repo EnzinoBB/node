@@ -419,16 +419,14 @@ def main():
     parser.add_argument("--write-rate", type=float, default=1.0)
     parser.add_argument("--read-rate", type=float, default=5.0)
     parser.add_argument("--stats-file", default="")
-    # nodes with pruned storage: once the contracts' deploy blocks are pruned they answer getters with
-    # no result (a known limitation of the node, being analysed): not read from, still compared
-    parser.add_argument("--pruned-nodes", default="")
+    # nodes left out of the reads (still compared at the end)
+    parser.add_argument("--skip-read-nodes", default="")
     args = parser.parse_args()
     check_nodes = args.check_nodes or args.nodes
-    pruned = {int(n) for n in args.pruned_nodes.split() if n.strip()}
-    read_nodes = [i for i in range(1, args.nodes + 1) if i not in pruned]
-    if pruned:
-        print(f"reads skip the pruned nodes {sorted(pruned)}: getters need the contracts' deploy blocks "
-              f"(known limitation), their states are still compared", flush=True)
+    skipped = {int(n) for n in args.skip_read_nodes.split() if n.strip()}
+    read_nodes = [i for i in range(1, args.nodes + 1) if i not in skipped]
+    if skipped:
+        print(f"reads skip the nodes {sorted(skipped)}, their states are still compared", flush=True)
 
     def client_for(i):
         port = 9090 if i == 1 else 9100 + i
