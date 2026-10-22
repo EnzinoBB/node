@@ -6,6 +6,8 @@
 #        TARGET_SEQ (default 1100: past the first STATE DIGEST at block 1000)
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
+#        TRUSTED_NODES (default NODES): only the first TRUSTED_NODES nodes are initial confidants
+#        (odd, 5 to 25); the others, up to 61 nodes in all, are ordinary nodes
 #        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
 #        of the nodes and executors in resources.tsv, and prints a summary at the end
 #        FUND (default 0; needs a -DCREDITS_TESTNET=ON binary): genesis funds go to a generated master
@@ -116,11 +118,17 @@ BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
-# MinTrustedNodes is 4; an even set of ready nodes drops one at bootstrap
-case "$NODES" in
+# the initial confidants (trusted.txt): the first TRUSTED_NODES nodes, by default all of them; the
+# others are ordinary nodes, as most nodes on mainnet. MinTrustedNodes is 4, MaxTrustedNodes 25, and
+# an even set of ready confidants drops one at bootstrap
+TRUSTED_NODES=${TRUSTED_NODES:-$NODES}
+case "$TRUSTED_NODES" in
     5|7|9|11|13|15|17|19|21|23|25) ;;
-    *) echo "NODES must be odd, 5 to 25, got '$NODES'"; exit 1 ;;
+    *) echo "TRUSTED_NODES must be odd, 5 to 25, got '$TRUSTED_NODES'"; exit 1 ;;
 esac
+# ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i
+[ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
+    || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
 # 25 is Consensus::MaxTrustedNodes: every node here is an initial confidant, so no larger table can
 # bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
 # neighbours of each other and consensus messages are routed, so that does not stop the network
@@ -325,7 +333,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
-        echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
+        [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
         [ "$j" -ne "$i" ] && echo "127.0.0.1:$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG

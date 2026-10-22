@@ -14,8 +14,11 @@ on:
   workflow_dispatch:
     inputs:
       nodes_list:
-        description: 'Comma-separated node counts, odd, 5 to 25 (25 = MaxTrustedNodes)'
+        description: 'Comma-separated node counts: odd, 5 to 25 (25 = MaxTrustedNodes) when every node is trusted; up to 61 with trusted_nodes'
         default: '9,13,17,21,25'
+      trusted_nodes:
+        description: 'Initial confidants among the nodes (odd, 5 to 25; empty = every node)'
+        default: ''
       contract_load:
         description: 'Load phase as "seconds,writes per second,reads per second"'
         default: '120,2,20'
@@ -42,12 +45,17 @@ jobs:
         id: counts
         env:
           LIST: ${{ inputs.nodes_list || '9,13,17,21,25' }}
+          TRUSTED: ${{ inputs.trusted_nodes || '' }}
           LOAD: ${{ inputs.contract_load || '120,2,20' }}
         run: |
           echo "$LOAD" | grep -qE '^[0-9]+,[0-9.]+,[0-9.]+$' || { echo "contract_load must be seconds,writes,reads"; exit 1; }
           json="["
           for n in ${LIST//,/ }; do
-            case "$n" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "node counts must be odd, 5 to 25, got '$n'"; exit 1 ;; esac
+            if [ -n "$TRUSTED" ]; then
+              [ "$n" -ge "$TRUSTED" ] && [ "$n" -le 61 ] || { echo "node counts must be $TRUSTED to 61, got '$n'"; exit 1; }
+            else
+              case "$n" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "node counts must be odd, 5 to 25, got '$n'"; exit 1 ;; esac
+            fi
             json+="$n,"
           done
           echo "counts=${json%,}]" >> "$GITHUB_OUTPUT"
@@ -133,7 +141,7 @@ jobs:
       max-parallel: 3
       matrix:
         nodes: ${{ fromJSON(needs.plan.outputs.counts) }}
-    name: ${{ matrix.nodes }} nodes
+    name: ${{ matrix.nodes }} nodes${{ inputs.trusted_nodes && format(', {0} trusted', inputs.trusted_nodes) || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -161,6 +169,7 @@ jobs:
         timeout-minutes: 110
         env:
           NODES: ${{ matrix.nodes }}
+          TRUSTED_NODES: ${{ inputs.trusted_nodes || '' }}
           CONTRACTS: '1'
           CONTRACT_LOAD: ${{ inputs.contract_load || '120,2,20' }}
           TARGET_SEQ: '1100'
