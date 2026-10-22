@@ -19,6 +19,8 @@ TEST(BootstrapGate, HonestRoundsAreInTheWindow) {
     EXPECT_TRUE(isBootstrapRoundInWindow(9002, 100, 9001));  // and one round table missed
     EXPECT_TRUE(isBootstrapRoundInWindow(9003, 100, 9001));
     EXPECT_TRUE(isBootstrapRoundInWindow(500, 499, 501));    // the round moves down by one
+    EXPECT_TRUE(isBootstrapRoundInWindow(500, 500, 0));      // restarted, round not known yet
+    EXPECT_TRUE(isBootstrapRoundInWindow(502, 500, 0));
 }
 
 TEST(BootstrapGate, OtherRoundsAreNot) {

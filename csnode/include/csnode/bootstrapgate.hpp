@@ -21,7 +21,7 @@ inline bool isBootstrapRoundInWindow(RoundNumber rNum, Sequence lastSeq, RoundNu
         return false;
     }
     const RoundNumber top = std::max<RoundNumber>(lastSeq, currentRound);
-    return rNum - kBootstrapRoundsAhead <= top || rNum <= kBootstrapRoundsAhead;
+    return rNum <= kBootstrapRoundsAhead || rNum - kBootstrapRoundsAhead <= top;
 }
 
 // A node takes an unsigned bootstrap table only when its own round has lasted about

@@ -593,6 +593,10 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
         ptr = payload.data();
         std::copy(ptr, ptr + signed_subdata_len, std::back_inserter(buf));
         signedTable = stream.isValid() && cscrypto::verifySignature(sig, cs::PacketValidator::getBlockChainKey(), buf.data(), buf.size());
+        if (!signedTable) {
+            // e.g. a diag API bootstrap whose round the sender raised to its last block + 1
+            csdebug() << kLogPrefix_ << "bootstrap table #" << rNum << " has a signature that does not verify for this round";
+        }
     }
 
     // an unsigned table only while this node's own round has stalled, as it has for the starter
