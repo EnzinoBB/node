@@ -566,7 +566,6 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
             cswarning() << "malformed bootstrap round table, ignore";
             return;
         }
-        const size_t signed_buf_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
         const size_t signed_buf_len = sizeof(cs::RoundNumber) + signed_subdata_len;
         cs::Bytes buf;
         buf.reserve(signed_buf_len);
