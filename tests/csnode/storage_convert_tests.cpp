@@ -804,6 +804,7 @@ TEST(Convert, AnUnopenableSourceBeforeTheContractsAreCopiedSaysSo) {
     st.contractsCopied = false;
     ASSERT_TRUE(csdb::convert::writeState(dir.string(), st));
     damageBerkeleyDb(dir);
+    ASSERT_FALSE(opens("berkeleydb", dir)) << "the damage must make the source unopenable";
     o.hook = nullptr;
     auto r = csdb::convert::run(o);
     EXPECT_FALSE(r.ok);

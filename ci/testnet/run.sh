@@ -633,7 +633,8 @@ while :; do
         # and must finish without them, every block being in db/.convert-new.
         convert6() {
             echo "$1" > "$WORK/n6/testnet-convert-kill"
-            # a hang ends after 300 s (exit 124) and fails the checks below instead of the whole job
+            # a hang is killed after 300 s (exit 137, like the kill the node gives itself): the checks
+            # below then fail instead of the whole job
             (cd "$WORK/n6" && exec timeout -s KILL 300 "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) \
                 && { echo "FAIL: n6 was not killed at its conversion point $1"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
             [ -f "$WORK/n6/db/.convert" ] || { echo "FAIL: n6 was killed at $1 but has no db/.convert to resume"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
@@ -1021,7 +1022,7 @@ if [ "$CONVERT_AT" -gt 0 ]; then
         [ ! -e "$WORK/n$i/db/blockchain.db" ] || { echo "FAIL: n$i still has its BerkeleyDB files"; exit 1; }
         grep -aq 'conversion done' "$WORK/n$i/stdout.log" || { echo "FAIL: n$i did not finish its conversion"; exit 1; }
     done
-    grep -aq 'resuming the conversion .* below block [1-9]' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion midway"; exit 1; }
+    grep -aq "resuming the conversion .* below block $(( n6last - 99 ))\$" "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion midway"; exit 1; }
     [ "$(grep -ac "resuming the conversion .* below block $n6first\$" "$WORK/n6/stdout.log")" -ge 1 ] || { echo "FAIL: n6 did not resume a fully converted database"; exit 1; }
     grep -aq 'finishing without it' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not finish without its damaged berkeleydb database"; exit 1; }
     for i in 4 6; do

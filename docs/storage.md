@@ -159,13 +159,15 @@ checks the new database and deletes the old files. Before that point an old data
 open stops the conversion with `blocks N..M are not converted yet` (exit 3), and `db/.convert` and
 `db/.convert-new` are kept.
 
-That last case needs a crash during a BerkeleyDB compaction, and the node cannot repair it by
-itself: the blocks not converted yet are only in the old files. Before converting a berkeleydb
-database, stop the node and keep a copy of the whole `db/` folder. If the conversion then stops
-with `cannot be opened (...) blocks N..M are not converted yet`, replace `db/` with the copy (the
-whole folder, so that `db/.convert` and `db/.convert-new` go too) and convert again from the
-start. Without a copy, start over from an empty `db/` (in Docker `CREDITS_RESET=1`; a pruned node
-restores a snapshot).
+That last case comes from a crash during a BerkeleyDB compaction (or any other damage to the old
+files), and the node cannot repair it by itself: the blocks not converted yet are only in the old
+files. Before converting a berkeleydb database, stop the node and keep a copy of the whole `db/`
+folder, taken right before the conversion (take a new one if the node ran in between). The copy
+takes as much space as `db/`; another disk is fine. If the conversion then stops with `cannot be
+opened (...) blocks N..M are not converted yet`, replace `db/` with the copy (the whole folder, so
+that `db/.convert` and `db/.convert-new` go too) and convert again from the start. Without a copy,
+start over from an empty `db/`, `caches/` and `qs/` (in Docker `CREDITS_RESET=1`: a pruned node
+converting to lmdb then restores a snapshot, any other syncs from block 0).
 
 No conversion starts while another node process holds `db/.lock`: `another node process is using
 db: stop it first` (exit 3).
