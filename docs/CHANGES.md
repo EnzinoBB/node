@@ -2,7 +2,8 @@
 
 Every pull request merged into this fork since it branched from
 [CREDITSCOM/node](https://github.com/CREDITSCOM/node) at `4a95aaaf` (node 4.2.532), grouped by
-the first community release that contains it. Each release is published as
+the first community release that contains it. For what these changes mean when running a node, see
+[differences.md](differences.md). Each release is published as
 `community-v4.2.532-community.N`, with full and pruned packages and the Docker image
 `ghcr.io/enzinobb/credits-node`.
 

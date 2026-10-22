@@ -127,7 +127,8 @@ berkeleydb target has to grow from its first record.
 | Source | Peak use |
 |---|---|
 | berkeleydb | the database plus one batch and the compaction space: about 1 GB beyond the database on mainnet |
-| lmdb, rocksdb | about the old plus the whole new database: their files do not shrink until the conversion ends |
+| lmdb | about the old plus the whole new database: its files do not shrink until the conversion ends |
+| rocksdb | the old database plus the new one, which is up to 4 times larger in lmdb or berkeleydb (RocksDB compresses its blocks: 3.3 GB became 11.6 GB in berkeleydb on mainnet); about twice the database to another rocksdb |
 
 The node estimates the peak before starting and stops (exit 3) when the free space is lower,
 naming both numbers.
