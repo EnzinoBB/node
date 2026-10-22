@@ -32,7 +32,10 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #67 | csdb, ci, docs: conversion follow-ups from the review of #65 (contract-records message, keep a copy of `db/` before converting from berkeleydb, sturdier db-convert scenario) |
+| #70 | csnode: bootstrap tables of 9 to 25 confidants are accepted (the official node silently drops them, so a network of 9 or more initial confidants never starts); the same choice as the official node up to 8 |
 
 ## community.9 — 2026-10-22
 
