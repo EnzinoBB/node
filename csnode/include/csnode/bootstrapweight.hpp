@@ -20,8 +20,8 @@ constexpr size_t kMaxBootstrapTable = 25;  // Consensus::MaxTrustedNodes
 // Up to 8 keys, exactly the official node's value on x86-64, so that both pick the same table when a
 // stalled network bootstraps again: the table is matched against the initial confidants in their
 // (sorted) order, and the confidant with index k adds 2^(n-1-k) for a table of n keys. In the official
-// code an index k >= n shifts by a wrapped size_t, which x86 masks to 31..8 and the uint8_t sum then
-// truncates to 0: it adds nothing, as here. From 9 to 25 keys, where the official node returns 0 and
+// code an index k >= n shifts by a wrapped size_t, which x86 masks to 31..8 (for fewer than 28 initial
+// confidants) and the uint8_t sum then truncates to 0: it adds nothing, as here. From 9 to 25 keys, where the official node returns 0 and
 // drops the table, 2^n on top, so every larger table beats every smaller one, but only for a table
 // the starter builds: initial confidants in their order, each once. Any other table of 9 or more keys
 // (repeated or unordered keys, which an unsigned table could otherwise use to outweigh an honest one)
