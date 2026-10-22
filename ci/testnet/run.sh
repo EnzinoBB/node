@@ -18,6 +18,8 @@
 #        SYNCRO_ROUND (default 0 = off, needs FUND=1): special order 35 makes the sync answers count
 #        from that round (Consensus::syncroChangeRound), as on a network that issued it
 #        JOIN_FULL=1: the node of JOIN_PRUNED_AT syncs from block 0 as a full node instead
+#        LOW_STAKE_NODES (default 0, needs FUND=1): the last that many nodes get 1'000 CS, below the
+#        minimum stake; after StartingDPOS (DPOS_AT) none of them may be trusted
 #        MIN_STAKE (default 0 = off, needs FUND=1): special order 22 sets the minimum stake; with the
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
@@ -155,6 +157,10 @@ DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+# the last LOW_STAKE_NODES nodes (never initial confidants) get 1'000 CS, below the minimum stake
+LOW_STAKE_NODES=${LOW_STAKE_NODES:-0}
+[ "$LOW_STAKE_NODES" -le $((NODES - TRUSTED_NODES)) ] \
+    || { echo "LOW_STAKE_NODES must be at most NODES - TRUSTED_NODES ($((NODES - TRUSTED_NODES)))"; exit 1; }
 SYNCRO_ROUND=${SYNCRO_ROUND:-0}
 JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
@@ -919,6 +925,7 @@ while :; do
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
             --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" --syncro-round "$SYNCRO_ROUND" \
+            --low-stake-nodes "$LOW_STAKE_NODES" \
             $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
@@ -1185,13 +1192,25 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
-echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"
 # who took part in consensus: trusted per round (from n1's round headers) and how many nodes were
 # trusted at least once (a node logs TRUSTED [index] in the rounds it is trusted in)
 per_round=$(grep -ah 'Trusted count:' "$WORK/n1/node.log" | sed -E 's/.*Trusted count: ([0-9]+).*/\1/' | sort -n | uniq -c \
-    | awk '{printf "%s%s trusted in %s rounds", sep, $2, $1; sep=", "}')
+    | awk '{printf "%s%s trusted in %s rounds", sep, $2, $1; sep=", "}' || true)
 ever=0
 for i in $(seq 1 "$ALL_NODES"); do
     grep -aq 'TRUSTED \[' "$WORK/n$i/node.log" && ever=$((ever + 1))
 done
 echo "consensus: $per_round; $ever of $ALL_NODES nodes were trusted at least once (initial confidants: $TRUSTED_NODES)"
+if [ "$LOW_STAKE_NODES" -gt 0 ]; then
+    # once stake counts (StartingDPOS, moved by DPOS_AT; 100 rounds of margin for the order to land),
+    # a node below the minimum stake must never be trusted
+    from=$(( ${DPOS_AT:-0} > 0 ? DPOS_AT + 100 : 10100 ))
+    low_trusted=0
+    for i in $(seq $((NODES - LOW_STAKE_NODES + 1)) "$NODES"); do
+        n=$(grep -ah 'R-[0-9]*\.[0-9]* TRUSTED \[' "$WORK/n$i/node.log" | sed -E 's/.*R-([0-9]+)\..*/\1/' | awk -v f="$from" '$1 > f' | wc -l || true)
+        [ "$n" -eq 0 ] || { echo "n$i (low stake) was trusted in $n rounds after round $from"; low_trusted=$((low_trusted + 1)); }
+    done
+    [ "$low_trusted" -eq 0 ] || { echo "FAIL: nodes below the minimum stake were elected trusted"; exit 1; }
+    echo "stake: none of the $LOW_STAKE_NODES nodes below the minimum stake was trusted after round $from"
+fi
+echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

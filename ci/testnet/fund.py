@@ -3,10 +3,13 @@
 
 Usage: fund.py <work_dir> <nodes> <master_seed_b58> [--port 9090] [--amount 60000] [--load-seconds 0]
                [--dpos-at SEQ --reward-round SEQ] [--min-stake CS] [--delegations]
+               [--low-stake-nodes K --low-amount 1000]
 
 The genesis funds of a CREDITS_TESTNET build go to the key given in CS_TESTNET_GENESIS_KEY; this
 script holds its seed. It sends <amount> CS from it to every node (above the 50'000 minimum stake),
 then, for --load-seconds, small random transfers between nodes, through the Thrift API of node 1.
+With --low-stake-nodes the last K nodes get --low-amount instead, below the minimum stake: once
+stake counts (StartingDPOS) they must never be elected trusted.
 
 With --dpos-at and/or --reward-round the master key, which is also the starter key of the test network
 (CS_TESTNET_STARTER_KEY), sends two special "managing" transactions: order 9 moves StartingDPOS to
@@ -206,6 +209,8 @@ def main():
     parser.add_argument("master_seed")
     parser.add_argument("--port", type=int, default=9090)
     parser.add_argument("--amount", type=int, default=60000)
+    parser.add_argument("--low-stake-nodes", type=int, default=0)
+    parser.add_argument("--low-amount", type=int, default=1000)
     parser.add_argument("--load-seconds", type=int, default=0)
     parser.add_argument("--dpos-at", type=int, default=0)
     parser.add_argument("--reward-round", type=int, default=0)
@@ -222,9 +227,12 @@ def main():
     print(f"master balance before funding: {balance(client, master.pk):.4f}", flush=True)
 
     failures = 0
+    def funded(i):
+        return args.low_amount if i > len(nodes) - args.low_stake_nodes else args.amount
+
     for i, node in enumerate(nodes, 1):
-        ok, message = send(client, master, node.pk, args.amount)
-        print(f"fund n{i}: {'ok' if ok else 'FAILED ' + message}", flush=True)
+        ok, message = send(client, master, node.pk, funded(i))
+        print(f"fund n{i} with {funded(i)}: {'ok' if ok else 'FAILED ' + message}", flush=True)
         failures += 0 if ok else 1
 
     # Node::processSpecialInfo: u16 order, then the order's fields (cs::IDataStream, little endian);
@@ -256,7 +264,7 @@ def main():
     if args.delegations:
         # a delegation is checked against the confirmed balance, so wait for the funding to land
         wait_until = time.time() + 180
-        while time.time() < wait_until and any(balance(client, n.pk) < args.amount for n in nodes):
+        while time.time() < wait_until and any(balance(client, n.pk) < funded(i) for i, n in enumerate(nodes, 1)):
             time.sleep(5)
         expiry = int(time.time()) + args.delegation_seconds
         for i, src, dst in pairs:
