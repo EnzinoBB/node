@@ -24,7 +24,8 @@ bool pollUntil(std::chrono::milliseconds total, std::chrono::milliseconds step, 
         if (now >= deadline) {
             return false;
         }
-        std::this_thread::sleep_for(std::min(step, std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)));
+        // rounded up: rounded down, the last millisecond would spin with zero-length sleeps
+        std::this_thread::sleep_for(std::min(step, std::chrono::ceil<std::chrono::milliseconds>(deadline - now)));
     }
 }
 
