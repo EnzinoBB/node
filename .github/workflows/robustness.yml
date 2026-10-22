@@ -21,6 +21,9 @@ on:
       only:
         description: 'Comma-separated scenario names to run (empty = all)'
         default: ''
+      node_alt_ref:
+        description: 'Branch or commit of this repository built and run by the even nodes (empty = all the same)'
+        default: ''
 
 permissions:
   contents: read
@@ -100,6 +103,45 @@ jobs:
         with:
           name: testnet-node-${{ github.sha }}
           path: build/client/node
+          retention-days: 7
+
+      # mixed nodes, as in testnet.yml: the even nodes run a node built from another ref
+      - name: Build the node under comparison
+        if: inputs.node_alt_ref != ''
+        env:
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          NODE_ALT_REF: ${{ inputs.node_alt_ref }}
+        run: |
+          git fetch -q --no-recurse-submodules origin -- "$NODE_ALT_REF"
+          git worktree add -q node-alt FETCH_HEAD
+          # the submodules are copied from this run's checkout, which must point to the same commits
+          for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+                   third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
+            if [ "$(git ls-tree HEAD -- "$m")" != "$(git -C node-alt ls-tree HEAD -- "$m")" ]; then
+              echo "$NODE_ALT_REF points $m to another commit than this run"; exit 1
+            fi
+            rm -rf "node-alt/$m"
+            cp -a "$m" "node-alt/$m"
+          done
+          cmake -S node-alt -B build-alt -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF \
+            -DCREDITS_TESTNET=ON
+          cmake --build build-alt -j"$(nproc)" --target node
+          echo "node under comparison: $(git -C node-alt log -1 --format='%h %s')"
+
+      - name: Upload the node under comparison
+        if: inputs.node_alt_ref != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-node-alt-${{ github.sha }}
+          path: build-alt/client/node
           retention-days: 7
 
   scenario:
@@ -245,6 +287,13 @@ jobs:
           name: testnet-node-${{ github.sha }}
           path: build
 
+      - name: Download the node under comparison
+        if: env.SELECTED == 'true' && inputs.node_alt_ref != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: testnet-node-alt-${{ github.sha }}
+          path: build-alt
+
       - name: Run private network
         if: env.SELECTED == 'true'
         timeout-minutes: 100
@@ -259,6 +308,10 @@ jobs:
           WORK: ${{ github.workspace }}/testnet-run
         run: |
           chmod +x build/node
+          if [ -f build-alt/node ]; then
+            chmod +x build-alt/node
+            export BIN_ALT="$PWD/build-alt/node"
+          fi
           # the scenario's variables come from the matrix above, NAME=value pairs only
           for kv in $SCENARIO; do
             echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9,:]+$' || { echo "bad scenario entry $kv"; exit 1; }
