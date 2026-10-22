@@ -24,7 +24,8 @@ that joined later).
 
 Transactions go through node 1's API (port 9090), so a test scenario must never kill, partition or
 slow node 1: a call during an outage ends the script. Only a transaction node 1 refuses because it
-is not synchronized yet (after a power cut) is sent again, for up to 120 s: nothing was accepted.
+is not synchronized yet (after a power cut) or because the master's previous transaction is still
+in progress is sent again, for up to 120 s: nothing was accepted.
 The final check reads every node's API (node i > 1 listens on 9100 + i).
 """
 import argparse
@@ -275,10 +276,13 @@ def call(client, master, contract, method, label, expected=None):
         next_inner_id(client, master)
         sci = invocation(method=method)
         result = client.TransactionFlow(smart_transaction(master, contract, sci, TT_EXECUTE))
-        # refused before it was accepted (api/src/apihandler.cpp "Node is not syncronized"): send it again
-        if result.status.code == 0 or "not syncronized" not in (result.status.message or "") or time.time() >= deadline:
+        # refused before it was accepted: the node is not synchronized yet (after a power cut), or the
+        # account's previous transaction is still in progress there (api/src/apihandler.cpp): send it again
+        msg = result.status.message or ""
+        if result.status.code == 0 or ("not syncronized" not in msg and "Transaction in progress" not in msg) \
+                or time.time() >= deadline:
             break
-        print(f"{label}: node not synchronized yet, sending again", flush=True)
+        print(f"{label}: refused ({msg.strip()!r}), sending again", flush=True)
         time.sleep(5)
     value = result.smart_contract_result.v_int if result.smart_contract_result else None
     ok = result.status.code == 0 and value == expected
