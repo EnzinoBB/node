@@ -930,11 +930,14 @@ done
 if [ -n "$CONTRACTS_PID" ]; then
     # every node, a joining one too, is at TARGET_SEQ: contracts.py may compare the states now
     touch "$WORK/contracts-final"
-    while kill -0 "$CONTRACTS_PID" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 5; done
+    # its own deadline: TIMEOUT_MIN is for reaching the target, and contracts.py still waits 60 s
+    # and reads every node after it
+    final_deadline=$(( $(date +%s) + 600 ))
+    while kill -0 "$CONTRACTS_PID" 2>/dev/null && [ "$(date +%s)" -lt "$final_deadline" ]; do sleep 5; done
     if kill -0 "$CONTRACTS_PID" 2>/dev/null; then
         kill "$CONTRACTS_PID" 2>/dev/null || true
         cat "$WORK/contracts.log"
-        echo "FAIL: contracts.py did not finish within $TIMEOUT_MIN min"
+        echo "FAIL: contracts.py did not finish its final checks within 10 min of the target"
         exit 1
     fi
     contracts_status=0
