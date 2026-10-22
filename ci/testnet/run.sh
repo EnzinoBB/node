@@ -6,6 +6,8 @@
 #        TARGET_SEQ (default 1100: past the first STATE DIGEST at block 1000)
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
+#        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
+#        of the nodes and executors in resources.tsv, and prints a summary at the end
 #        FUND (default 0; needs a -DCREDITS_TESTNET=ON binary): genesis funds go to a generated master
 #        key, which funds every node through node 1's API (port 9090) once the chain reaches FUND_AT
 #        (default 30) and then keeps random transfers flowing for LOAD_SECONDS (default 300)
@@ -104,6 +106,13 @@ BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
+# MinTrustedNodes is 4; an even set of ready nodes drops one at bootstrap
+case "$NODES" in
+    5|7|9|11|13|15|17|19|21|23|25) ;;
+    *) echo "NODES must be odd, 5 to 25, got '$NODES'"; exit 1 ;;
+esac
+[ "$NODES" -le 15 ] || echo "warning: $NODES nodes, max_neighbours is 16: not a full mesh"
+SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
 RESTART_AT=${RESTART_AT:-300}
@@ -376,6 +385,13 @@ net_fault_stats() {
 }
 
 stop_all() {
+    # the sampler's last sample still sees the nodes running
+    if [ -n "${SAMPLER_PID:-}" ]; then
+        kill -TERM "$SAMPLER_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do kill -0 "$SAMPLER_PID" 2>/dev/null || break; sleep 1; done
+        kill -KILL "$SAMPLER_PID" 2>/dev/null || true
+        wait "$SAMPLER_PID" 2>/dev/null || true
+    fi
     [ -z "${API_LOAD_PID:-}" ] || kill -TERM "$API_LOAD_PID" 2>/dev/null || true
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
@@ -396,6 +412,7 @@ stop_all() {
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
+    [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
 trap stop_all EXIT
 
@@ -451,6 +468,12 @@ fi
 
 for i in $(seq 1 "$NODES"); do start_node "$i"; done
 echo "started $NODES nodes in $WORK"
+SAMPLER_PID=
+if [ "$SAMPLE_SECONDS" -gt 0 ]; then
+    python3 "$HERE/sampler.py" "$WORK" "$SAMPLE_SECONDS" "$WORK/resources.tsv" --nodes "$NODES" \
+        --summary-file "$WORK/resources-summary.txt" > "$WORK/sampler.log" 2>&1 &
+    SAMPLER_PID=$!
+fi
 
 deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 restarted=0
@@ -478,6 +501,7 @@ while :; do
     sleep 20
     line="t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) ))s"
     min=-1
+    max=0
     for i in $(seq 1 "$NODES"); do
         s=$(seq_of "$i"); s=${s:-0}
         line+=" n$i=$s"
@@ -497,6 +521,7 @@ while :; do
             fi
         fi
         if [ "$min" -lt 0 ] || [ "$s" -lt "$min" ]; then min=$s; fi
+        if [ "$s" -gt "$max" ]; then max=$s; fi
     done
     join_seq=-1
     if [ "$JOIN_NODE" -gt 0 ] && [ -n "${PIDS[$JOIN_NODE]:-}" ]; then
@@ -504,6 +529,7 @@ while :; do
         line+=" n$JOIN_NODE=$join_seq(joined)"
     fi
     echo "$line"
+    echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
 
     if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
         echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"

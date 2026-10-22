@@ -1,7 +1,8 @@
 name: Robustness
 
-# Fork hunting: the private 7-node network of testnet.yml under conditions that could make honest
-# nodes disagree, each scenario on its own runner. Every node reports a state digest every block,
+# Fork hunting: the private network of testnet.yml (7 nodes, or the `nodes` input) under
+# conditions that could make honest nodes disagree, each scenario on its own runner. Every node
+# reports a state digest every block,
 # and a scenario passes only if all nodes report the same digests and reach the target sequence:
 # - mixed block databases (BerkeleyDB, LMDB, RocksDB in the same network);
 # - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
@@ -21,6 +22,12 @@ on:
       only:
         description: 'Comma-separated scenario names to run (empty = all)'
         default: ''
+      nodes:
+        description: 'Nodes in the network (odd, 5 to 15); the NODE_STORAGE scenarios run only at 7'
+        default: '7'
+      timeout_min:
+        description: 'Minutes each scenario has to reach its target sequence'
+        default: '75'
 
 permissions:
   contents: read
@@ -36,6 +43,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
+      - name: Check inputs
+        env:
+          NODES: ${{ inputs.nodes || '7' }}
+          TIMEOUT: ${{ inputs.timeout_min || '75' }}
+        run: |
+          case "$NODES" in 5|7|9|11|13|15) ;; *) echo "nodes must be odd, 5 to 15, got '$NODES'"; exit 1 ;; esac
+          [ "$TIMEOUT" -ge 10 ] && [ "$TIMEOUT" -le 120 ] || { echo "timeout_min must be 10 to 120, got '$TIMEOUT'"; exit 1; }
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -105,7 +120,7 @@ jobs:
   scenario:
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 150
     strategy:
       fail-fast: false
       # a few runners at a time: the suite is long and heavy use got Actions disabled once
@@ -139,6 +154,7 @@ jobs:
           # peers must answer NoSuchBlocks, not AwaitAnswer and then nothing
           - name: pruned-peers-join
             env: NODE_STORAGE=lmdb,lmdb,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
+            fixed: true
           # kills that land while the node prunes, or right after a checkpoint it prunes from
           - name: rocksdb-pruned-crash
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
@@ -196,10 +212,13 @@ jobs:
           # with a power cut and packet corruption
           - name: all-storage
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=5 SNAPSHOT_AT=2300 TARGET_SEQ=3300
+            fixed: true
           - name: all-storage-crash
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_NODE=4 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=3300
+            fixed: true
           - name: all-storage-power-cut
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_ALL_AT=2500 NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=2,6 TARGET_SEQ=3300
+            fixed: true
           # a node joining from a snapshot taken after the first pruning, and from a truncated one
           - name: snapshot-join
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100
@@ -213,7 +232,8 @@ jobs:
     name: ${{ matrix.name }}
     # a manual run can pick scenarios; the others stop at once
     env:
-      SELECTED: ${{ inputs.only == '' || contains(format(',{0},', inputs.only), format(',{0},', matrix.name)) }}
+      # the scenarios with a NODE_STORAGE list are laid out for 7 nodes
+      SELECTED: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') }}
     steps:
       - name: Skip unselected scenario
         if: env.SELECTED != 'true'
@@ -247,12 +267,12 @@ jobs:
 
       - name: Run private network
         if: env.SELECTED == 'true'
-        timeout-minutes: 100
+        timeout-minutes: 130
         env:
           SCENARIO: ${{ matrix.env }}
-          NODES: '7'
+          NODES: ${{ inputs.nodes || '7' }}
           TARGET_SEQ: '1100'  # a scenario can raise it
-          TIMEOUT_MIN: '75'
+          TIMEOUT_MIN: ${{ inputs.timeout_min || '75' }}
           RESTART_AT: '300'
           FUND: '1'
           LOAD_SECONDS: '300'
@@ -267,6 +287,13 @@ jobs:
           echo "scenario: $SCENARIO"
           ci/testnet/run.sh build/node
 
+      - name: Resource summary
+        if: always() && env.SELECTED == 'true'
+        run: |
+          if [ -f testnet-run/resources-summary.txt ]; then
+            { echo "### Resources (${{ matrix.name }})"; echo '```'; cat testnet-run/resources-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload logs
         if: always() && env.SELECTED == 'true'
         uses: actions/upload-artifact@v4
@@ -275,5 +302,10 @@ jobs:
           path: |
             testnet-run/n*/*.log
             testnet-run/fund.log
+            testnet-run/contracts.log
+            testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
+            testnet-run/resources.tsv
+            testnet-run/resources-summary.txt
+            testnet-run/sampler.log
           retention-days: 14

@@ -49,6 +49,9 @@ on:
       restart_nodes:
         description: 'Nodes stopped and restarted together in the restart test, e.g. "6 7" (empty = the last node)'
         default: ''
+      nodes:
+        description: 'Nodes in the network (odd, 5 to 15; 15 is the full-mesh limit of max_neighbours=16)'
+        default: '7'
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -71,11 +74,17 @@ env:
 jobs:
   testnet:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'testnet')
-    name: Private network (7 nodes)
+    name: Private network (${{ inputs.nodes || '7' }} nodes)
     runs-on: ubuntu-24.04
     timeout-minutes: 340
 
     steps:
+      - name: Check inputs
+        env:
+          NODES: ${{ inputs.nodes || '7' }}
+        run: |
+          case "$NODES" in 5|7|9|11|13|15) ;; *) echo "nodes must be odd, 5 to 15, got '$NODES'"; exit 1 ;; esac
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -259,7 +268,7 @@ jobs:
       - name: Run private network
         timeout-minutes: 300
         env:
-          NODES: '7'
+          NODES: ${{ inputs.nodes || '7' }}
           TARGET_SEQ: ${{ inputs.target_seq || '1100' }}
           TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
           DISK_FULL_NODE: ${{ inputs.disk_full_node || '0' }}
@@ -283,6 +292,9 @@ jobs:
           free -m
           df -h "${GITHUB_WORKSPACE}"
           du -sh testnet-run 2>/dev/null || true
+          if [ -f testnet-run/resources-summary.txt ]; then
+            { echo '### Resources'; echo '```'; cat testnet-run/resources-summary.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload node logs
         if: always()
@@ -295,4 +307,8 @@ jobs:
             testnet-run/contracts.log
             testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
+            testnet-run/resources.tsv
+            testnet-run/resources-summary.txt
+            testnet-run/sampler.log
+            testnet-run/progress
           retention-days: 14
