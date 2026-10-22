@@ -72,6 +72,12 @@ quick-starts after a conversion.
   restarts. The community node accepts tables of up to 25 confidants (`MaxTrustedNodes`). Up to 8 it
   gives exactly the official weights, so both pick the same table when a stalled network starts
   again; a dropped table is now logged.
+- **Bootstrap tables are checked against the node's own state.** A bootstrap round table is
+  taken only for a round next to the node's own (from its last block to its round + 2), and,
+  unless it is signed with the blockchain key, only once the node's own round has lasted at
+  least half of `round_elapse_time` (a node younger than `round_elapse_time`, or already in a
+  bootstrap round, takes it as before). The tables honest nodes send always pass, so a mixed
+  network makes the same choices.
 - **State kept across a quick start.** Pending consensus-settings changes, special orders and
   deployed smart contracts survive a quick start. The official node can lose them, or apply
   them differently, after a quick start.
