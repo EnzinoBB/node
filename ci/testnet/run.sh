@@ -22,7 +22,12 @@
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
 #        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
 #        runs its own executor; contracts.py deploys a counter contract and calls it before and after
-#        the restart test, which waits for the first calls; all nodes must end with the same state
+#        the restart test, which waits for the first calls; all nodes must end with the same state.
+#        A power cut (CRASH_ALL_AT) also waits for the first calls. The calls after go once the
+#        restarted nodes, and the network after a power cut, are 30 blocks past it, and the lowest
+#        node reached CONTRACTS_AFTER_AT (default 0); the states are compared once every node,
+#        a joining one too, reached TARGET_SEQ. contracts.py sends everything through n1: a
+#        contract scenario never kills, partitions or slows n1
 #        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
@@ -135,6 +140,9 @@ MIN_STAKE=${MIN_STAKE:-0}
 SYNCRO_ROUND=${SYNCRO_ROUND:-0}
 JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
+CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
+[ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
+    || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
 PRUNE_NODE=${PRUNE_NODE:-0}
 NODE_STORAGE=${NODE_STORAGE:-}
 DB_BACKEND=${DB_BACKEND:-}
@@ -450,6 +458,19 @@ digest_offline() {
 }
 
 # the lowest sequence among the nodes of the restart test
+# a SIGKILLed node leaves its executor JVM running (it has no death signal), still bound to its port
+kill_executor() {
+    pkill -KILL -f "cs.testnet.node=n$1 " 2>/dev/null || true
+}
+
+# the calls after the restart (contracts.py --wait-file) go once the nodes stopped by the restart
+# test and by a power cut are back and 30 blocks past it, and the lowest node is at CONTRACTS_AFTER_AT
+contracts_go_ready() {
+    { [ "$RESTART_AT" -eq 0 ] || { [ "$restarted" -eq 1 ] && [ "$(restarted_seq)" -ge $((stopped_at + 30)) ]; }; } \
+        && { [ "$CRASH_ALL_AT" -eq 0 ] || { [ "$crashed_all" -eq 1 ] && [ "$min" -ge $((CRASH_ALL_AT + 30)) ]; }; } \
+        && [ "$min" -ge "$CONTRACTS_AFTER_AT" ]
+}
+
 restarted_seq() {
     local low="" s
     for i in $RESTART_NODES; do
@@ -549,6 +570,7 @@ while :; do
             echo "crash test: SIGKILL n$CRASH_NODE (kill $crashes of $CRASH_TIMES) at sequence $(seq_of "$CRASH_NODE"), newest checkpoint ${newest:-none}"
             kill -KILL "${PIDS[$CRASH_NODE]}" 2>/dev/null || true
             wait "${PIDS[$CRASH_NODE]}" 2>/dev/null || true
+            kill_executor "$CRASH_NODE"
             sleep 5
             start_node "$CRASH_NODE"
             crash_wait_qs=""
@@ -557,7 +579,9 @@ while :; do
     fi
 
     # the whole network killed at once, as after a power cut
-    if [ "$CRASH_ALL_AT" -gt 0 ] && [ "$crashed_all" -eq 0 ] && [ "$min" -ge "$CRASH_ALL_AT" ]; then
+    # with contracts, only once the first calls are done: a cut during the deploys would end contracts.py
+    if [ "$CRASH_ALL_AT" -gt 0 ] && [ "$crashed_all" -eq 0 ] && [ "$min" -ge "$CRASH_ALL_AT" ] \
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
         echo "crash test: SIGKILL every node at sequence $min"
         for i in $(seq 1 "$ALL_NODES"); do
             [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true
@@ -565,6 +589,7 @@ while :; do
         for i in $(seq 1 "$ALL_NODES"); do
             [ -n "${PIDS[$i]:-}" ] && wait "${PIDS[$i]}" 2>/dev/null || true
         done
+        pkill -KILL -f "cs.testnet.node=" 2>/dev/null || true
         sleep 10
         for i in $(seq 1 "$NODES"); do start_node "$i"; done
         crashed_all=1
@@ -879,16 +904,18 @@ while :; do
     if [ "$CONTRACTS" = "1" ] && [ -z "$CONTRACTS_PID" ] && grep -q "master transactions done" "$WORK/fund.log" 2>/dev/null; then
         echo "contracts: deploying and calling them through node 1"
         (cd "$HERE" && python3 contracts.py "$WORK" "$NODES" "$MASTER_SEED" \
-            --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done") > "$WORK/contracts.log" 2>&1 &
+            --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
+            --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final") > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
-    # the calls after the restart must run on the restarted node too, so let it catch up first
-    if [ "$restarted" -eq 1 ] && [ ! -e "$WORK/restart-done" ] && [ "$(restarted_seq)" -ge $((stopped_at + 30)) ] 2>/dev/null; then
+    # the calls after the restart must run on the restarted nodes too, so let them catch up first
+    if [ "$CONTRACTS" = "1" ] && [ ! -e "$WORK/restart-done" ] && contracts_go_ready 2>/dev/null; then
         touch "$WORK/restart-done"
     fi
 
+    # with contracts, not before the calls after the restart were let go
     if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
-        && { [ "$CONTRACTS" != "1" ] || ! kill -0 "${CONTRACTS_PID:-0}" 2>/dev/null; }; then break; fi
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
@@ -896,9 +923,23 @@ while :; do
 done
 
 if [ -n "$CONTRACTS_PID" ]; then
+    # every node, a joining one too, is at TARGET_SEQ: contracts.py may compare the states now
+    touch "$WORK/contracts-final"
+    while kill -0 "$CONTRACTS_PID" 2>/dev/null && [ "$(date +%s)" -lt "$deadline" ]; do sleep 5; done
+    if kill -0 "$CONTRACTS_PID" 2>/dev/null; then
+        kill "$CONTRACTS_PID" 2>/dev/null || true
+        cat "$WORK/contracts.log"
+        echo "FAIL: contracts.py did not finish within $TIMEOUT_MIN min"
+        exit 1
+    fi
     contracts_status=0
     wait "$CONTRACTS_PID" || contracts_status=$?
     cat "$WORK/contracts.log"
+    # an executor left running by a killed node keeps the port its successor needs
+    if grep -l 'Address already in use' "$WORK"/n*/executor.log 2>/dev/null; then
+        echo "FAIL: an executor could not bind its port (an orphan executor of a killed node)"
+        exit 1
+    fi
     for i in $(seq 1 "$NODES"); do
         echo "n$i executor: $(cat "$WORK/n$i"/log/*.txt 2>/dev/null | grep -ac . || true) log lines, $(grep -aci "SmartContractGet\|exception" "$WORK/n$i/node.log" 2>/dev/null || true) node log lines on SmartContractGet/exceptions"
     done

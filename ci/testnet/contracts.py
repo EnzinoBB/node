@@ -3,6 +3,7 @@
 
 Usage: contracts.py <work_dir> <nodes> <master_seed_b58> [--calls-before 3] [--calls-after 5]
                     [--ready-file PATH] [--wait-file PATH] [--wait-timeout 1800]
+                    [--check-nodes N] [--final-file PATH]
 
 The master key deploys Counter, whose next() adds one to its state and returns it, and calls it
 --calls-before times. It then creates --ready-file and, once --wait-file exists (run.sh creates
@@ -16,8 +17,14 @@ mainnet node and executor: the node refuses methods declaring @UsingContract
 (Violations::SubsequentCall), and executor build 1518 fails an undeclared invokeExternalContract
 with an AccessControlException (its configuration is created lazily inside the contract sandbox).
 
-Transactions go through node 1's API (port 9090); the final check reads every node's API
-(node i > 1 listens on 9100 + i).
+Then, once --final-file exists (run.sh creates it when every node reached its target sequence),
+it compares the contract states on nodes 1 to --check-nodes (default <nodes>; run.sh adds a node
+that joined later).
+
+Transactions go through node 1's API (port 9090), so a test scenario must never kill, partition or
+slow node 1: a call during an outage ends the script. Only a transaction node 1 refuses because it
+is not synchronized yet (after a power cut) is sent again, for up to 120 s: nothing was accepted.
+The final check reads every node's API (node i > 1 listens on 9100 + i).
 """
 import argparse
 import hashlib
@@ -218,9 +225,16 @@ def deploy(client, master, name, source):
 
 
 def call(client, master, contract, method, label, expected=None):
-    next_inner_id(client, master)
-    sci = invocation(method=method)
-    result = client.TransactionFlow(smart_transaction(master, contract, sci, TT_EXECUTE))
+    deadline = time.time() + 120
+    while True:
+        next_inner_id(client, master)
+        sci = invocation(method=method)
+        result = client.TransactionFlow(smart_transaction(master, contract, sci, TT_EXECUTE))
+        # refused before it was accepted (api/src/apihandler.cpp "Node is not syncronized"): send it again
+        if result.status.code == 0 or "not syncronized" not in (result.status.message or "") or time.time() >= deadline:
+            break
+        print(f"{label}: node not synchronized yet, sending again", flush=True)
+        time.sleep(5)
     value = result.smart_contract_result.v_int if result.smart_contract_result else None
     ok = result.status.code == 0 and value == expected
     outcome = ("ok" if ok else "FAILED") if expected is not None else "reported"
@@ -238,6 +252,8 @@ def main():
     parser.add_argument("--ready-file", default="")
     parser.add_argument("--wait-file", default="")
     parser.add_argument("--wait-timeout", type=int, default=1800)
+    parser.add_argument("--check-nodes", type=int, default=0)
+    parser.add_argument("--final-file", default="")
     args = parser.parse_args()
 
     def client_for(i):
@@ -282,10 +298,15 @@ def main():
     call_callers("after restart", 1)
     call_callers("after restart", 2)
 
+    if args.final_file:
+        deadline = time.time() + args.wait_timeout
+        while not os.path.exists(args.final_file) and time.time() < deadline:
+            time.sleep(5)
+        print(f"final file {'found' if os.path.exists(args.final_file) else 'MISSING'}", flush=True)
     time.sleep(60)  # let the last state reach every node
     for name, contract in (("Counter", counter), ("Ledger", ledger)) + callers:
         states = {}
-        for i in range(1, args.nodes + 1):
+        for i in range(1, (args.check_nodes or args.nodes) + 1):
             try:
                 got = client_for(i).SmartContractGet(contract)
                 states[i] = hashlib.sha256(got.smartContract.objectState).hexdigest()[:16] if got.status.code == 0 else "error"
