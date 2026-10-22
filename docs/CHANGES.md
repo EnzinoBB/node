@@ -37,6 +37,8 @@ lines under the new release.
 | #67 | csdb, ci, docs: conversion follow-ups from the review of #65 (contract-records message, keep a copy of `db/` before converting from berkeleydb, sturdier db-convert scenario) |
 | #70 | csnode: bootstrap tables of 9 to 25 confidants are accepted (the official node silently drops them, so a network of 9 or more initial confidants never starts); the same choice as the official node up to 8 |
 | #71 | csnode: a bootstrap round table is taken only for a round next to the node's own, and, unless signed with the blockchain key, only once the node's own round has stalled; the block-removal request it set (never effective) is gone |
+| #73 | api: the executor version check asks every second up to `executor_check_version_delay` instead of once after it (the node starts as soon as its executor answers); with `executor_multi_instance` a stopping node no longer kills the other nodes' executors |
+| #74 | api: contract getters and the deployer's contract list take the deploy the smart contracts keep (a pruned node no longer has its block, and answered getters with an empty success); a getter with nothing to execute, or no executor, now fails |
 
 ## community.9 — 2026-10-22
 
