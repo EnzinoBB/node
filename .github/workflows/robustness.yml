@@ -2,8 +2,8 @@ name: Robustness
 
 # Fork hunting: the private network of testnet.yml (7 nodes, or the `nodes` input) under
 # conditions that could make honest nodes disagree, each scenario on its own runner. Every node
-# reports a state digest every block,
-# and a scenario passes only if all nodes report the same digests and reach the target sequence:
+# reports a state digest every block, and a scenario passes only if all nodes report the same
+# digests and reach the target sequence:
 # - mixed block databases (BerkeleyDB, LMDB, RocksDB in the same network);
 # - a node killed with SIGKILL six times, half of them right after it saved a checkpoint;
 # - the whole network killed at once and restarted, as after a power cut;
