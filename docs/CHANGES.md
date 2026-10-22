@@ -37,9 +37,13 @@ lines under the new release.
 | #67 | csdb, ci, docs: conversion follow-ups from the review of #65 (contract-records message, keep a copy of `db/` before converting from berkeleydb, sturdier db-convert scenario) |
 | #70 | csnode: bootstrap tables of 9 to 25 confidants are accepted (the official node silently drops them, so a network of 9 or more initial confidants never starts); the same choice as the official node up to 8 |
 | #71 | csnode: a bootstrap round table is taken only for a round next to the node's own, and, unless signed with the blockchain key, only once the node's own round has stalled; the block-removal request it set (never effective) is gone |
+<<<<<<< HEAD
 | #68 | ci(testnet): resource sampling (host and per-process memory and CPU, block rate) in every private-network run; a `nodes` input for testnet and robustness |
 | #69 | ci: smart contracts in the robustness suite (crashes, a power cut, packet loss, a pruned node killed and joining, a database conversion) |
 | #72 | ci: contract reads on every node and a contract load phase; networks of up to 61 nodes with 5 to 25 initial confidants, stake-based election and nodes below the minimum stake; a scale workflow |
+=======
+| #74 | api: contract getters and the deployer's contract list take the deploy the smart contracts keep (a pruned node no longer has its block, and answered getters with an empty success); a getter with nothing to execute, or no executor, now fails |
+>>>>>>> origin/fix/pruned-getters
 
 ## community.9 — 2026-10-22
 

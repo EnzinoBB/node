@@ -945,7 +945,7 @@ while :; do
             --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
             --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
             --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
-            --stats-file "$WORK/contracts-stats.json" --pruned-nodes "$PRUNED_NODES") > "$WORK/contracts.log" 2>&1 &
+            --stats-file "$WORK/contracts-stats.json" --pruned-nodes "${READ_SKIP_NODES-$PRUNED_NODES}") > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
     # contracts.py ended before its first calls were done: nothing would release the restart test
