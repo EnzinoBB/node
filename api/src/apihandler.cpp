@@ -1165,6 +1165,8 @@ void APIHandler::smartTransactionFlow(api::TransactionFlowResult& _return, const
     //auto send_transaction = makeTransaction(transaction);
     const auto smart_addr = blockchain_.getAddressByType(send_transaction.target(), BlockChain::AddressType::PublicKey);
     if (solver_.smart_contracts().isBlacklisted(smart_addr)) {
+        // not an empty success: the caller must see that nothing ran
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "contract is blacklisted");
         return;
     }
     bool deploy = transaction.__isset.smartContract ? is_smart_deploy(input_smart) : false;
