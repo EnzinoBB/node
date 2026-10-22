@@ -32,7 +32,11 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #67 | csdb, ci, docs: conversion follow-ups from the review of #65 (contract-records message, keep a copy of `db/` before converting from berkeleydb, sturdier db-convert scenario) |
+| #70 | csnode: bootstrap tables of 9 to 25 confidants are accepted (the official node silently drops them, so a network of 9 or more initial confidants never starts); the same choice as the official node up to 8 |
+| #71 | csnode: a bootstrap round table is taken only for a round next to the node's own, and, unless signed with the blockchain key, only once the node's own round has stalled; the block-removal request it set (never effective) is gone |
 
 ## community.9 — 2026-10-22
 

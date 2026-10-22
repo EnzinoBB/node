@@ -20,7 +20,8 @@ struct Options {
     std::string from;                   // backend now on disk
     std::string to;                     // configured backend
     uint32_t batch = 100000;
-    std::function<void(Step, uint32_t lo, uint32_t hi)> hook;   // tests: throw to simulate a crash
+    // tests and test-network builds: throw (or raise SIGKILL) to simulate a crash at a step
+    std::function<void(Step, uint32_t lo, uint32_t hi)> hook;
     std::function<bool()> stopRequested;                        // checked between batches
     std::function<void(const std::string&)> log;
 };

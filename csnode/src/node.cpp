@@ -507,28 +507,25 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
     }
 }
 
-uint8_t Node::calculateBootStrapWeight(cs::PublicKeys& confidants) {
-    size_t confSize = confidants.size();
-    uint8_t currentWeight = 0U;
-    if (confSize > 8) {
-        return currentWeight;
-    }
-    //auto it = initialConfidants_.cbegin();
-    auto itConfidants = confidants.cbegin();
-    --confSize;
-    for (auto it : initialConfidants_) {
-        if (std::equal(it.cbegin(), it.cend(), itConfidants->cbegin())) {
-            currentWeight += 1 << confSize;
-            ++itConfidants;
-        }
-        --confSize;
-    }
-    return currentWeight;
+static_assert(cs::kMaxBootstrapTable == Consensus::MaxTrustedNodes, "a bootstrap table holds at most MaxTrustedNodes keys");
+
+// the official node weighs tables of up to 8 keys only and silently drops larger ones, so a network
+// of 9 or more initial confidants never bootstraps: see cs::bootstrapWeight
+cs::BootstrapWeight Node::calculateBootStrapWeight(const cs::PublicKeys& confidants) const {
+    return cs::bootstrapWeight(initialConfidants_, confidants);
 }
 
 
 void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::RoundNumber rNum) {
     cslog() << "NODE> get Boot strap Round Table #" << rNum;
+    // a table for a round no honest starter would send to this node changes nothing here
+    const cs::Sequence lastSequence = blockChain_.getLastSeq();
+    const cs::RoundNumber currentRound = cs::Conveyer::instance().currentRoundNumber();
+    if (!cs::isBootstrapRoundInWindow(rNum, lastSequence, currentRound)) {
+        cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " does not fit this node (last block " << lastSequence
+                << ", round " << currentRound << "), drop";
+        return;
+    }
     solver_->resetGrayList();
     cs::IDataStream in(data, size);
     cs::RoundTable roundTable;
@@ -558,15 +555,17 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
         }
     }
 
-    uint8_t currentWeight = calculateBootStrapWeight(confidants);
+    cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confidants);
+    bool signedTable = false;
+    const size_t signed_subdata_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
 
     if (unknown) {
         cs::Signature sig;
         stream >> sig;
         if (!stream.isValid()) {
             cswarning() << "malformed bootstrap round table, ignore";
+            return;
         }
-        const size_t signed_subdata_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
         const size_t signed_buf_len = sizeof(cs::RoundNumber) + signed_subdata_len;
         cs::Bytes buf;
         buf.reserve(signed_buf_len);
@@ -578,9 +577,42 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
             cswarning() << kLogPrefix_ << "failed to test bootstrap signature, drop";
             return;
         }
-        currentWeight = 255U;
+        currentWeight = cs::kSignedBootstrapWeight;
+        signedTable = true;
     }
+    else if (payload.size() == signed_subdata_len + cscrypto::kSignatureSize) {
+        // a table of initial confidants signed through the diag API (Node::bootstrap): the official
+        // node does not read its signature; here it exempts the table from the stall check below.
+        // An unsigned table ends with 4 random bytes, never with a signature's 64
+        cs::Signature sig;
+        stream >> sig;
+        cs::Bytes buf;
+        buf.reserve(sizeof(cs::RoundNumber) + signed_subdata_len);
+        auto* ptr = reinterpret_cast<const uint8_t*>(&rNum);
+        std::copy(ptr, ptr + sizeof(cs::RoundNumber), std::back_inserter(buf));
+        ptr = payload.data();
+        std::copy(ptr, ptr + signed_subdata_len, std::back_inserter(buf));
+        signedTable = stream.isValid() && cscrypto::verifySignature(sig, cs::PacketValidator::getBlockChainKey(), buf.data(), buf.size());
+        if (!signedTable) {
+            // e.g. a diag API bootstrap whose round the sender raised to its last block + 1
+            csdebug() << kLogPrefix_ << "bootstrap table #" << rNum << " has a signature that does not verify for this round";
+        }
+    }
+
+    // an unsigned table only while this node's own round has stalled, as it has for the starter
+    if (!signedTable) {
+        const uint64_t elapse = cs::ConfigHolder::instance().config()->roundElapseTime();
+        const uint64_t sinceRound = stat_.msSinceRoundChange();
+        if (!cs::isBootstrapStallAccepted(sinceRound, stat_.msSinceStart(), elapse, isBootstrapRound_)) {
+            cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " while round " << currentRound << " is " << sinceRound
+                    << " ms old (round_elapse_time " << elapse << "), drop";
+            return;
+        }
+    }
+
     if (currentWeight <= bootStrapWeight_) {
+        cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " with " << confidants.size() << " confidants weighs "
+                << currentWeight << ", not above " << bootStrapWeight_ << ", drop";
         return;
     }
 
@@ -592,18 +624,15 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
 
     if (!isBootstrapRound_) {
         isBootstrapRound_ = true;
-        cslog() << "NODE> Bootstrap on";
+        cslog() << "NODE> Bootstrap on, table of " << confidants.size() << " confidants, weight " << currentWeight;
     }
 
     roundTable.confidants = std::move(confidants);
     roundTable.hashes.clear();
 
-    cs::Sequence lastSequence = blockChain_.getLastSeq();
-
-    if (lastSequence >= rNum) {
-        csdebug() << "NODE> remove " << lastSequence - rNum + 1 << " block(s) required (rNum = " << rNum << ", last_seq = " << lastSequence << ")";
-        blockChain_.setBlocksToBeRemoved(lastSequence - rNum + 1);
-    }
+    // No block-removal request: the official one (lastSequence - rNum + 1) is refused whenever a
+    // block was loaded or recorded, the permission being set already; the one honest case,
+    // rNum == lastSequence (one uncertain last block), is resolved by storeBlock.
 
     roundTable.round = rNum;
     confirmationList_.remove(rNum);
@@ -4642,7 +4671,7 @@ void Node::onRoundTimeElapsed() {
         for (auto it : actualConfidants) {
             confs.push_back(it);
         }
-        uint8_t currentWeight = calculateBootStrapWeight(confs);
+        cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confs);
         if (currentWeight > bootStrapWeight_) {
             bootStrapWeight_ = currentWeight;
         }
@@ -4708,7 +4737,7 @@ bool Node::bootstrap(const cs::Bytes& bytes, cs::RoundNumber round) {
     auto& conveyer = cs::Conveyer::instance();
     conveyer.updateRoundTable(roundPackageCache_.back().roundTable().round, roundPackageCache_.back().roundTable());
 
-    uint8_t currentWeight = calculateBootStrapWeight(rt.confidants);
+    cs::BootstrapWeight currentWeight = calculateBootStrapWeight(rt.confidants);
     if (currentWeight > bootStrapWeight_) {
         bootStrapWeight_ = currentWeight;
     }

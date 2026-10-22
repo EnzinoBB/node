@@ -129,7 +129,7 @@ jobs:
           key: ccache-ubuntu-24.04-${{ github.sha }}
           restore-keys: ccache-ubuntu-24.04-
 
-      # same configuration as build.yml plus CREDITS_TESTNET (applied only to csnode and net),
+      # same configuration as build.yml plus CREDITS_TESTNET (applied only to csnode, net and client),
       # so most ccache entries are shared
       - name: Build node
         run: |
