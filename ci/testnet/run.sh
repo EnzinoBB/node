@@ -939,6 +939,12 @@ while :; do
             --stats-file "$WORK/contracts-stats.json") > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
+    # contracts.py ended before its first calls were done: nothing would release the restart test
+    if [ -n "$CONTRACTS_PID" ] && [ ! -e "$WORK/contracts-ready" ] && ! kill -0 "$CONTRACTS_PID" 2>/dev/null; then
+        cat "$WORK/contracts.log"
+        echo "FAIL: contracts.py ended before its first calls"
+        exit 1
+    fi
     # the calls after the restart must run on the restarted nodes too, so let them catch up first
     if [ "$CONTRACTS" = "1" ] && [ ! -e "$WORK/restart-done" ] && contracts_go_ready 2>/dev/null; then
         touch "$WORK/restart-done"

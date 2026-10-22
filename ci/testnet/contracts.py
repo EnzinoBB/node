@@ -238,7 +238,15 @@ def next_inner_id(client, account):
 
 
 def deploy(client, master, name, source):
-    compiled = client.SmartContractCompile(source)
+    # the node's executor JVM may still be starting (many nodes start theirs at once): the API
+    # answers with a transport error then, so the compile is tried again for a while
+    deadline = time.time() + 600
+    while True:
+        compiled = client.SmartContractCompile(source)
+        if compiled.status.code == 0 or time.time() >= deadline or "socket" not in (compiled.status.message or ""):
+            break
+        print(f"compile {name}: executor not reachable yet ({compiled.status.message!r}), retrying", flush=True)
+        time.sleep(10)
     if compiled.status.code != 0:
         sys.exit(f"compile {name} FAILED: {compiled.status.message}")
     next_inner_id(client, master)
