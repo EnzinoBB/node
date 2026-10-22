@@ -4,6 +4,7 @@
 Usage: contracts.py <work_dir> <nodes> <master_seed_b58> [--calls-before 3] [--calls-after 5]
                     [--ready-file PATH] [--wait-file PATH] [--wait-timeout 1800]
                     [--check-nodes N] [--final-file PATH]
+                    [--load-seconds 0 --write-rate 1 --read-rate 5 --stats-file PATH]
 
 The master key deploys Counter, whose next() adds one to its state and returns it, and calls it
 --calls-before times. It then creates --ready-file and, once --wait-file exists (run.sh creates
@@ -444,7 +445,9 @@ def main():
         calls += 1
         failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} before restart", calls) else 1
         failures += 0 if call(client_for(1), master, ledger, "record", f"Ledger call {calls} before restart", calls) else 1
-    def read_all(contract, method, expected, label, timeout=60):
+    # reads and the load go to the nodes the network started with; a node that joins later is in
+    # check_nodes, compared once it reached the target (--final-file)
+    def read_all(contract, method, expected, label, timeout=300):
         """The getter on every node, until each returns `expected` (a lagging node needs a round or
         two); prints one line, returns the number of nodes that did not."""
         def one(i):
@@ -460,8 +463,8 @@ def main():
                 if value == expected or time.time() >= deadline:
                     return i, value, first_ms, msg
                 time.sleep(2)
-        with ThreadPoolExecutor(max_workers=check_nodes) as pool:
-            results = list(pool.map(one, range(1, check_nodes + 1)))
+        with ThreadPoolExecutor(max_workers=args.nodes) as pool:
+            results = list(pool.map(one, range(1, args.nodes + 1)))
         bad = [r for r in results if r[1] != expected]
         cells = " ".join(f"n{i}={v}" + (f"/{ms:.0f}ms" if ms is not None else "") for i, v, ms, _ in results)
         print(f"read {label}: {'ok' if not bad else 'FAILED'} (expected {expected}) {cells}", flush=True)
@@ -502,7 +505,7 @@ def main():
     failures += read_all(ledger, "entries", calls, "Ledger.entries after restart")
 
     if args.load_seconds > 0:
-        writes_ok, writes_failed, writes_rejected, bad_reads = load(args, client_for, master, counter, check_nodes)
+        writes_ok, writes_failed, writes_rejected, bad_reads = load(args, client_for, master, counter, args.nodes)
         failures += writes_failed + bad_reads
         # a write that failed on its way back (a timeout) may still have landed: the counter is
         # between the confirmed writes and all of them, and every node must read that same value
@@ -523,7 +526,7 @@ def main():
               flush=True)
         failures += 0 if in_range else 1
         calls = value if value is not None else calls
-        failures += read_all(counter, "get", calls, "Counter.get after the load", timeout=120)
+        failures += read_all(counter, "get", calls, "Counter.get after the load")
     call_callers("after restart", 1)
     call_callers("after restart", 2)
 

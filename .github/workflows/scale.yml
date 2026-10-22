@@ -57,6 +57,7 @@ jobs:
           TRUSTED: ${{ inputs.trusted_nodes || '' }}
           DPOS: ${{ inputs.dpos_at || '0' }}
           LOW: ${{ inputs.low_stake_nodes || '0' }}
+          TIMEOUT: ${{ inputs.timeout_min || '60' }}
           LOAD: ${{ inputs.contract_load || '120,2,20' }}
         run: |
           # a tag scale-t<trusted>-n<count>_<count>...[-d<sequence>][-l<nodes>] sets them too
@@ -70,6 +71,10 @@ jobs:
             DPOS=${BASH_REMATCH[4]:-0}
             LOW=${BASH_REMATCH[6]:-0}
           fi
+          if [ -n "$TRUSTED" ]; then
+            case "$TRUSTED" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "trusted nodes must be odd, 5 to 25, got '$TRUSTED'"; exit 1 ;; esac
+          fi
+          [ "$TIMEOUT" -ge 10 ] && [ "$TIMEOUT" -le 100 ] || { echo "timeout_min must be 10 to 100, got '$TIMEOUT'"; exit 1; }
           echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"
           echo "dpos_at=$DPOS" >> "$GITHUB_OUTPUT"
           echo "low_stake=$LOW" >> "$GITHUB_OUTPUT"

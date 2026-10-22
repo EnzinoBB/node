@@ -2,7 +2,8 @@
 # Run a private Credits network of N nodes on this machine and check that it works.
 #
 # Usage: run.sh <path-to-node-binary>
-# Env:   NODES (default 7, keep it odd: an even set of ready nodes drops one at bootstrap)
+# Env:   NODES (default 7; keep the initial confidants, TRUSTED_NODES, odd: an even set of ready ones
+#        drops one at bootstrap)
 #        TARGET_SEQ (default 1100: past the first STATE DIGEST at block 1000)
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
@@ -40,7 +41,7 @@
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
-#        RESTART_NODES (default: the last node): the nodes the restart test stops and restarts together
+#        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
@@ -131,8 +132,7 @@ esac
 # ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i
 [ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
     || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
-# 25 is Consensus::MaxTrustedNodes: every node here is an initial confidant, so no larger table can
-# bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
+# 25 is Consensus::MaxTrustedNodes: no larger set of initial confidants can bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
 # neighbours of each other and consensus messages are routed, so that does not stop the network
 CONTRACT_LOAD_SECONDS=${CONTRACT_LOAD_SECONDS:-0}
 CONTRACT_WRITE_RATE=${CONTRACT_WRITE_RATE:-1}
@@ -141,7 +141,8 @@ SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
 RESTART_AT=${RESTART_AT:-300}
-RESTART_NODES=${RESTART_NODES:-$NODES}
+# by default the last initial confidant (the last node when every node is one)
+RESTART_NODES=${RESTART_NODES:-$TRUSTED_NODES}
 echo "$RESTART_NODES" | grep -qE '^[0-9]+( [0-9]+)*$' || { echo "bad RESTART_NODES '$RESTART_NODES'"; exit 1; }
 FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
@@ -161,6 +162,9 @@ MIN_STAKE=${MIN_STAKE:-0}
 LOW_STAKE_NODES=${LOW_STAKE_NODES:-0}
 [ "$LOW_STAKE_NODES" -le $((NODES - TRUSTED_NODES)) ] \
     || { echo "LOW_STAKE_NODES must be at most NODES - TRUSTED_NODES ($((NODES - TRUSTED_NODES)))"; exit 1; }
+# stake counts only from StartingDPOS: the check needs it well before the target
+[ "$LOW_STAKE_NODES" -eq 0 ] || { [ "$DPOS_AT" -gt 0 ] && [ $((DPOS_AT + 300)) -le "$TARGET_SEQ" ]; } \
+    || { echo "LOW_STAKE_NODES needs DPOS_AT, at most TARGET_SEQ - 300"; exit 1; }
 SYNCRO_ROUND=${SYNCRO_ROUND:-0}
 JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
@@ -293,7 +297,8 @@ api_settings() {
     echo "executor_receive_timeout=60000"
     # the node asks its new executor for its version this long after starting it, and disables it
     # for good if it does not answer: dozens of JVMs starting at once on one machine take longer
-    # than the 7 s default
+    # than the 7 s default. They do start at once: a node that stops kills every contract-executor
+    # JVM of the machine (ExecutorManager, jps), and each node relaunches its own
     echo "executor_check_version_delay=60000"
     cat > "$WORK/n$i/settings.properties" <<PROPS
 node.api.host=127.0.0.1
@@ -1217,10 +1222,11 @@ echo "consensus: $per_round; $ever of $ALL_NODES nodes were trusted at least onc
 if [ "$LOW_STAKE_NODES" -gt 0 ]; then
     # once stake counts (StartingDPOS, moved by DPOS_AT; 100 rounds of margin for the order to land),
     # a node below the minimum stake must never be trusted
-    from=$(( ${DPOS_AT:-0} > 0 ? DPOS_AT + 100 : 10100 ))
+    from=$((DPOS_AT + 100))
     low_trusted=0
     for i in $(seq $((NODES - LOW_STAKE_NODES + 1)) "$NODES"); do
-        n=$(grep -ah 'R-[0-9]*\.[0-9]* TRUSTED \[' "$WORK/n$i/node.log" | sed -E 's/.*R-([0-9]+)\..*/\1/' | awk -v f="$from" '$1 > f' | wc -l || true)
+        # rounds print with digit groups (R-1'234.0)
+        n=$(grep -a 'TRUSTED \[' "$WORK/n$i/node.log" | sed -E "s/.*R-([0-9']+)\..*/\1/" | tr -d "'" | awk -v f="$from" '$1 > f' | wc -l || true)
         [ "$n" -eq 0 ] || { echo "n$i (low stake) was trusted in $n rounds after round $from"; low_trusted=$((low_trusted + 1)); }
     done
     [ "$low_trusted" -eq 0 ] || { echo "FAIL: nodes below the minimum stake were elected trusted"; exit 1; }
