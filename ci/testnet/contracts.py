@@ -43,7 +43,7 @@ from thriftpy2.rpc import make_client
 from thriftpy2.transport import TBufferedTransportFactory
 from thriftpy2.utils import serialize
 
-from fund import Account, api, encode_max_fee, general, node_account, pack_inner_id
+from fund import Account, Client, api, balance, encode_max_fee, general, pack_inner_id, send
 
 CURRENCY_CS = 1
 TT_DEPLOY = 1   # api.TransactionType: contract deployment
@@ -296,7 +296,9 @@ def percentile(values, p):
 def load(args, client_for, master, counter, nodes):
     """args.load_seconds of Counter.next writes (args.write_rate per second in all, one writer
     thread per funded node account, each through its own node's API) and Counter.get reads
-    (args.read_rate per second, spread over every node). Returns (writes that returned a value,
+    (args.read_rate per second, spread over every node). The writers are accounts of their own,
+    funded here by the master key: the nodes' accounts are fund.py's, whose transfers would compete
+    with these calls for their inner ids. Returns (writes that returned a value,
     writes that failed, writes consensus rejected, 1 if more than 1 % of the reads failed)."""
     stats = {"write": [], "read": []}
     errors = {"write": 0, "read": 0}
@@ -306,9 +308,19 @@ def load(args, client_for, master, counter, nodes):
     lock = threading.Lock()
     stop_at = time.time() + args.load_seconds
     writers = list(range(1, nodes + 1))
+    accounts = {i: Account(hashlib.sha256(master.pk + b"contract writer %d" % i).digest()) for i in writers}
+    funder = Client(9090, 300)
+    master.next_inner_id = None
+    for i in writers:
+        ok, message = send(funder, master, accounts[i].pk, 1000)
+        if not ok:
+            print(f"load: funding writer {i} FAILED: {message}", flush=True)
+    deadline = time.time() + 300
+    while time.time() < deadline and any(balance(funder, a.pk) < 1000 for a in accounts.values()):
+        time.sleep(5)
 
     def writer(i):
-        account = node_account(args.work, i)
+        account = accounts[i]
         period = len(writers) / args.write_rate if args.write_rate > 0 else None
         while period and time.time() < stop_at:
             t0 = time.time()
