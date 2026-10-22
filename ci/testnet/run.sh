@@ -1186,3 +1186,12 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
 sys.exit(0 if ok else 1)
 PY
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"
+# who took part in consensus: trusted per round (from n1's round headers) and how many nodes were
+# trusted at least once (a node logs TRUSTED [index] in the rounds it is trusted in)
+per_round=$(grep -ah 'Trusted count:' "$WORK/n1/node.log" | sed -E 's/.*Trusted count: ([0-9]+).*/\1/' | sort -n | uniq -c \
+    | awk '{printf "%s%s trusted in %s rounds", sep, $2, $1; sep=", "}')
+ever=0
+for i in $(seq 1 "$ALL_NODES"); do
+    grep -aq 'TRUSTED \[' "$WORK/n$i/node.log" && ever=$((ever + 1))
+done
+echo "consensus: $per_round; $ever of $ALL_NODES nodes were trusted at least once (initial confidants: $TRUSTED_NODES)"

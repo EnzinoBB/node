@@ -19,6 +19,9 @@ on:
       trusted_nodes:
         description: 'Initial confidants among the nodes (odd, 5 to 25; empty = every node)'
         default: ''
+      dpos_at:
+        description: 'Sequence from which trusted nodes are elected by stake (special order 9; 0 = StartingDPOS 10000, after the run)'
+        default: '0'
       contract_load:
         description: 'Load phase as "seconds,writes per second,reads per second"'
         default: '120,2,20'
@@ -41,20 +44,26 @@ jobs:
     outputs:
       counts: ${{ steps.counts.outputs.counts }}
       trusted: ${{ steps.counts.outputs.trusted }}
+      dpos_at: ${{ steps.counts.outputs.dpos_at }}
     steps:
       - name: Node counts
         id: counts
         env:
           LIST: ${{ inputs.nodes_list || '9,13,17,21,25' }}
           TRUSTED: ${{ inputs.trusted_nodes || '' }}
+          DPOS: ${{ inputs.dpos_at || '0' }}
           LOAD: ${{ inputs.contract_load || '120,2,20' }}
         run: |
-          # a tag scale-t<trusted>-n<count>_<count>... sets them too (scale-t7-n25_51)
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^scale-t([0-9]+)-n([0-9_]+)$ ]]; then
+          # a tag scale-t<trusted>-n<count>_<count>...[-d<sequence>] sets them too (scale-t7-n33_49-d200:
+          # 7 initial confidants, 33 and 49 nodes, stake-based election from block 200)
+          DPOS=${DPOS:-0}
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^scale-t([0-9]+)-n([0-9_]+)(-d([0-9]+))?$ ]]; then
             TRUSTED=${BASH_REMATCH[1]}
             LIST=${BASH_REMATCH[2]//_/,}
+            DPOS=${BASH_REMATCH[4]:-0}
           fi
           echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"
+          echo "dpos_at=$DPOS" >> "$GITHUB_OUTPUT"
           echo "$LOAD" | grep -qE '^[0-9]+,[0-9.]+,[0-9.]+$' || { echo "contract_load must be seconds,writes,reads"; exit 1; }
           json="["
           for n in ${LIST//,/ }; do
@@ -177,6 +186,7 @@ jobs:
         env:
           NODES: ${{ matrix.nodes }}
           TRUSTED_NODES: ${{ needs.plan.outputs.trusted }}
+          DPOS_AT: ${{ needs.plan.outputs.dpos_at }}
           CONTRACTS: '1'
           CONTRACT_LOAD: ${{ inputs.contract_load || '120,2,20' }}
           TARGET_SEQ: '1100'
@@ -223,6 +233,9 @@ jobs:
           print(f"| {n} | {passed} | {grab(r'blocks: ([0-9.]+) per second', res)} "
                 f"| {grab(r'busy mean ([0-9]+) %', res)} / {grab(r'peak ([0-9]+) %, ', res)} % "
                 f"| {grab(r'peak used ([0-9]+) MB', res)} MB | {lat} |")
+          print()
+          m = re.search(r"^(consensus: .*)$", log, re.M)
+          print(m.group(1) if m else "consensus: ?")
           print()
           print("```")
           print(res)
