@@ -289,9 +289,12 @@ def load(args, client_for, master, counter, nodes):
     """args.load_seconds of Counter.next writes (args.write_rate per second in all, one writer
     thread per funded node account, each through its own node's API) and Counter.get reads
     (args.read_rate per second, spread over every node). Returns (writes that returned a value,
-    writes that did not, 1 if more than 1 % of the reads failed)."""
+    writes that failed, writes consensus rejected, 1 if more than 1 % of the reads failed)."""
     stats = {"write": [], "read": []}
     errors = {"write": 0, "read": 0}
+    # concurrent calls of one contract from several accounts: consensus takes some and rejects the
+    # others in a round; a rejected call is an answer, not a fault, and is counted on its own
+    rejected = [0]
     lock = threading.Lock()
     stop_at = time.time() + args.load_seconds
     writers = list(range(1, nodes + 1))
@@ -315,6 +318,8 @@ def load(args, client_for, master, counter, nodes):
             with lock:
                 if ok:
                     stats["write"].append(ms)
+                elif "rejected by consensus" in (msg or ""):
+                    rejected[0] += 1
                 else:
                     errors["write"] += 1
                     if errors["write"] <= 5:
@@ -351,22 +356,23 @@ def load(args, client_for, master, counter, nodes):
     for t in threads:
         t.join()
 
-    summary = {"nodes": nodes, "seconds": args.load_seconds}
+    summary = {"nodes": nodes, "seconds": args.load_seconds, "writes_rejected": rejected[0]}
     for kind in ("write", "read"):
         ms = stats[kind]
-        sent = len(ms) + errors[kind]
+        sent = len(ms) + errors[kind] + (rejected[0] if kind == "write" else 0)
         summary[kind] = {"sent": sent, "ok": len(ms), "failed": errors[kind],
                          "rate": round(len(ms) / args.load_seconds, 2),
                          "p50_ms": percentile(ms, 50), "p95_ms": percentile(ms, 95), "max_ms": max(ms) if ms else None}
         print(f"load {kind}s: {len(ms)} ok of {sent} ({summary[kind]['rate']}/s), latency "
               f"p50 {summary[kind]['p50_ms'] or 0:.0f} ms, p95 {summary[kind]['p95_ms'] or 0:.0f} ms, "
               f"max {summary[kind]['max_ms'] or 0:.0f} ms", flush=True)
+    print(f"load writes rejected by consensus (concurrent calls of one contract): {rejected[0]}", flush=True)
     if args.stats_file:
         with open(args.stats_file, "w") as f:
             json.dump(summary, f, indent=1)
     read_sent = summary["read"]["sent"]
     bad_reads = 1 if read_sent and errors["read"] > 0.01 * read_sent else 0
-    return len(stats["write"]), errors["write"], bad_reads
+    return len(stats["write"]), errors["write"], rejected[0], bad_reads
 
 
 def main():
@@ -473,7 +479,7 @@ def main():
     failures += read_all(ledger, "entries", calls, "Ledger.entries after restart")
 
     if args.load_seconds > 0:
-        writes_ok, writes_failed, bad_reads = load(args, client_for, master, counter, check_nodes)
+        writes_ok, writes_failed, writes_rejected, bad_reads = load(args, client_for, master, counter, check_nodes)
         failures += writes_failed + bad_reads
         # a write that failed on its way back (a timeout) may still have landed: the counter is
         # between the confirmed writes and all of them, and every node must read that same value
@@ -487,9 +493,10 @@ def main():
             if value is not None:
                 break
             time.sleep(5)
-        low, high = calls + writes_ok, calls + writes_ok + writes_failed
+        low, high = calls + writes_ok, calls + writes_ok + writes_failed + writes_rejected
         in_range = value is not None and low <= value <= high
-        print(f"Counter after the load: {value} (confirmed writes give {low}..{high}): {'ok' if in_range else 'FAILED'}",
+        print(f"Counter after the load: {value} (confirmed writes give {low}..{high}, unconfirmed ones may land): "
+              f"{'ok' if in_range else 'FAILED'}",
               flush=True)
         failures += 0 if in_range else 1
         calls = value if value is not None else calls

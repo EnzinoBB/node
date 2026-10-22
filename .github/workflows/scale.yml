@@ -198,7 +198,7 @@ jobs:
           try:
               s = json.load(open("testnet-run/contracts-stats.json"))
               w, r = s["write"], s["read"]
-              lat = (f"{w['ok']}/{w['sent']} at {w['rate']}/s, p50 {w['p50_ms'] or 0:.0f} p95 {w['p95_ms'] or 0:.0f} ms | "
+              lat = (f"{w['ok']}/{w['sent']} at {w['rate']}/s ({s.get('writes_rejected', 0)} rejected), p50 {w['p50_ms'] or 0:.0f} p95 {w['p95_ms'] or 0:.0f} ms | "
                      f"{r['ok']}/{r['sent']} at {r['rate']}/s, p50 {r['p50_ms'] or 0:.0f} p95 {r['p95_ms'] or 0:.0f} ms")
           except Exception:
               lat = "? | ?"
