@@ -1165,6 +1165,8 @@ void APIHandler::smartTransactionFlow(api::TransactionFlowResult& _return, const
     //auto send_transaction = makeTransaction(transaction);
     const auto smart_addr = blockchain_.getAddressByType(send_transaction.target(), BlockChain::AddressType::PublicKey);
     if (solver_.smart_contracts().isBlacklisted(smart_addr)) {
+        // not an empty success: the caller must see that nothing ran
+        SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "contract is blacklisted");
         return;
     }
     bool deploy = transaction.__isset.smartContract ? is_smart_deploy(input_smart) : false;
@@ -1178,7 +1180,13 @@ void APIHandler::smartTransactionFlow(api::TransactionFlowResult& _return, const
         decltype(auto) lockedSmartOrigin = lockedReference(this->smart_origin);
         auto it = lockedSmartOrigin->find(smart_addr);
         if (it != lockedSmartOrigin->end()) {
-            origin_bytecode = fetch_smart(executor_.loadTransactionApi(it->second)).smartContractDeploy.byteCodeObjects;
+            // the deploy the smart contracts keep (in memory and in every checkpoint): a pruned node
+            // no longer has the deploy's block; the storage is the fallback, as in SmartContractGet
+            csdb::Transaction deploy_tr = solver_.smart_contracts().get_contract_deploy(smart_addr);
+            if (!deploy_tr.is_valid()) {
+                deploy_tr = executor_.loadTransactionApi(it->second);
+            }
+            origin_bytecode = fetch_smart(deploy_tr).smartContractDeploy.byteCodeObjects;
         }
         else {
             SetResponseStatus(_return.status, APIRequestStatusType::FAILURE);
@@ -1227,6 +1235,12 @@ void APIHandler::smartTransactionFlow(api::TransactionFlowResult& _return, const
         auto target_pk = blockchain_.getAddressByType(send_transaction.target(), BlockChain::AddressType::PublicKey).to_api_addr();
         executor::ExecuteByteCodeResult api_resp;
         const std::vector<general::ByteCodeObject>& bytecode = deploy ? input_smart.smartContractDeploy.byteCodeObjects : origin_bytecode;
+        if (!deploy && bytecode.empty()) {
+            // nothing to execute: an answer without a result must not read as a success
+            SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, "contract byte code is not available on this node");
+            hashStateEntry->yield();
+            return;
+        }
         if (!deploy || !input_smart.smartContractDeploy.byteCodeObjects.empty()) {
             std::vector<executor::MethodHeader> methodHeaders;
             {
@@ -2197,6 +2211,25 @@ size_t APIHandler::getMappedDeployerSmart(const csdb::Address& deployer, Mapper 
     auto begIt = element.begin() + offset;
     for (auto trid = begIt; trid != begIt + limit && trid != element.end(); ++trid) {
         auto tr = executor_.loadTransactionApi(*trid);
+        if (!tr.is_valid()) {
+            // a pruned node no longer has the deploy's block: the copy the smart contracts keep
+            csdb::Address contract;
+            {
+                decltype(auto) origins = lockedReference(this->smart_origin);
+                for (const auto& [address, id] : *origins) {
+                    if (id == *trid) {
+                        contract = address;
+                        break;
+                    }
+                }
+            }
+            if (contract.is_valid()) {
+                tr = solver_.smart_contracts().get_contract_deploy(contract);
+            }
+            if (!tr.is_valid()) {
+                continue;
+            }
+        }
 
         if (cs::SmartContracts::get_contract_state(blockchain_, tr.target()).empty()) {
             continue;
