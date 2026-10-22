@@ -32,6 +32,10 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.9 — 2026-10-22
+
 | PR | Change |
 |---|---|
 | #57 | csdb: the RocksDB block writer owns its batch, and a full disk neither hangs nor stops the node |
@@ -42,7 +46,8 @@ lines under the new release.
 | #62 | csnode, csdb: pruned history walk, legacy index watermark, small databases detected, 0-based `seq_no`, a failed LMDB open stays closed |
 | #63 | csdb: the conversion estimate counts RocksDB compression; BerkeleyDB writes fail cleanly, and recovery errors stop the node |
 | #64 | packaging: atomic snapshot restore (`.restore-incomplete`), fresh digest lines, logs read in time order, no snapshot of a running node |
-| #65 *(open)* | csdb, client: once every block is converted, a conversion finishes without an old database that does not open; the BerkeleyDB source is checkpointed after each compaction; the db-convert scenario covers deterministic kill points |
+| #65 | csdb, client: once every block is converted, a conversion finishes without an old database that does not open; the BerkeleyDB source is checkpointed after each compaction; the db-convert scenario covers deterministic kill points |
+| #66 | docs: this file, [differences.md](differences.md), the README and the conversion disk space brought up to date |
 
 PRs #57–#64 fix the findings of an independent review of the whole fork. #65 fixes the
 db-convert failure that a robustness run found on master afterwards.
