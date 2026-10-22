@@ -175,7 +175,8 @@ def summary(rows, nodes, interval):
         out.append(f"  peak RSS of all nodes and executors together: {max(per_ts.values())} MB")
 
     prog = [(num(r["t"]), num(r["seq_min"]), num(r["seq_max"])) for r in host]
-    prog = [p for p in prog if None not in p]
+    # from the first block on: before it the nodes start (and wait for their executors)
+    prog = [p for p in prog if None not in p and p[2] > 0]
     if len(prog) > 1:
         overall = (prog[-1][2] - prog[0][2]) / max(prog[-1][0] - prog[0][0], 1)
         rates = [(b[2] - a[2]) / (b[0] - a[0]) for a, b in zip(prog, prog[1:]) if b[0] > a[0]]

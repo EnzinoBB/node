@@ -31,6 +31,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import statistics
 import struct
 import sys
@@ -307,7 +308,6 @@ def load(args, client_for, master, counter, nodes):
     # others in a round; a rejected call is an answer, not a fault, and is counted on its own
     rejected = [0]
     lock = threading.Lock()
-    stop_at = time.time() + args.load_seconds
     writers = list(range(1, nodes + 1))
     accounts = {i: Account(hashlib.sha256(master.pk + b"contract writer %d" % i).digest()) for i in writers}
     funder = Client(9090, 300)
@@ -319,10 +319,16 @@ def load(args, client_for, master, counter, nodes):
     deadline = time.time() + 300
     while time.time() < deadline and any(balance(funder, a.pk) < 1000 for a in accounts.values()):
         time.sleep(5)
+    # the load window starts once the writers are funded (funding N accounts takes a block each)
+    stop_at = time.time() + args.load_seconds
 
     def writer(i):
         account = accounts[i]
         period = len(writers) / args.write_rate if args.write_rate > 0 else None
+        if period:
+            # spread over the period, or every writer sends in the same block (one batch of N calls,
+            # executed one by one, instead of single calls)
+            time.sleep(period * (i - 1) / len(writers))
         while period and time.time() < stop_at:
             t0 = time.time()
             ok = False
@@ -347,7 +353,7 @@ def load(args, client_for, master, counter, nodes):
                     errors["write"] += 1
                     if errors["write"] <= 5:
                         print(f"load write via n{i} FAILED: {msg!r}", flush=True)
-            time.sleep(max(0.0, period - (time.time() - t0)))
+            time.sleep(max(0.0, period - (time.time() - t0)) * random.uniform(0.8, 1.2))
 
     def reader(k):
         period = 1.0 / args.read_rate * 4 if args.read_rate > 0 else None
