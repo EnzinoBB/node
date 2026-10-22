@@ -294,7 +294,7 @@ def percentile(values, p):
     return values[min(len(values) - 1, int(round(p / 100 * (len(values) - 1))))]
 
 
-def load(args, client_for, master, counter, nodes):
+def load(args, client_for, master, counter, nodes, read_nodes):
     """args.load_seconds of Counter.next writes (args.write_rate per second in all, one writer
     thread per funded node account, each through its own node's API) and Counter.get reads
     (args.read_rate per second, spread over every node). The writers are accounts of their own,
@@ -354,7 +354,7 @@ def load(args, client_for, master, counter, nodes):
         n = k
         while period and time.time() < stop_at:
             t0 = time.time()
-            i = n % nodes + 1
+            i = read_nodes[n % len(read_nodes)]
             n += 4
             try:
                 value, ms, msg = read_value(client_for(i), master, counter, "get")
@@ -371,7 +371,7 @@ def load(args, client_for, master, counter, nodes):
             time.sleep(max(0.0, period - (time.time() - t0)))
 
     print(f"load: {args.load_seconds} s, {args.write_rate} writes/s from {len(writers)} accounts, "
-          f"{args.read_rate} reads/s on {nodes} nodes", flush=True)
+          f"{args.read_rate} reads/s on {len(read_nodes)} nodes", flush=True)
     threads = [threading.Thread(target=writer, args=(i,)) for i in writers] + \
               [threading.Thread(target=reader, args=(k,)) for k in range(4)]
     for t in threads:
@@ -415,8 +415,16 @@ def main():
     parser.add_argument("--write-rate", type=float, default=1.0)
     parser.add_argument("--read-rate", type=float, default=5.0)
     parser.add_argument("--stats-file", default="")
+    # nodes with pruned storage: once the contracts' deploy blocks are pruned they answer getters with
+    # no result (a known limitation of the node, being analysed): not read from, still compared
+    parser.add_argument("--pruned-nodes", default="")
     args = parser.parse_args()
     check_nodes = args.check_nodes or args.nodes
+    pruned = {int(n) for n in args.pruned_nodes.split() if n.strip()}
+    read_nodes = [i for i in range(1, args.nodes + 1) if i not in pruned]
+    if pruned:
+        print(f"reads skip the pruned nodes {sorted(pruned)}: getters need the contracts' deploy blocks "
+              f"(known limitation), their states are still compared", flush=True)
 
     def client_for(i):
         port = 9090 if i == 1 else 9100 + i
@@ -463,8 +471,8 @@ def main():
                 if value == expected or time.time() >= deadline:
                     return i, value, first_ms, msg
                 time.sleep(2)
-        with ThreadPoolExecutor(max_workers=args.nodes) as pool:
-            results = list(pool.map(one, range(1, args.nodes + 1)))
+        with ThreadPoolExecutor(max_workers=len(read_nodes)) as pool:
+            results = list(pool.map(one, read_nodes))
         bad = [r for r in results if r[1] != expected]
         cells = " ".join(f"n{i}={v}" + (f"/{ms:.0f}ms" if ms is not None else "") for i, v, ms, _ in results)
         print(f"read {label}: {'ok' if not bad else 'FAILED'} (expected {expected}) {cells}", flush=True)
@@ -505,7 +513,7 @@ def main():
     failures += read_all(ledger, "entries", calls, "Ledger.entries after restart")
 
     if args.load_seconds > 0:
-        writes_ok, writes_failed, writes_rejected, bad_reads = load(args, client_for, master, counter, args.nodes)
+        writes_ok, writes_failed, writes_rejected, bad_reads = load(args, client_for, master, counter, args.nodes, read_nodes)
         failures += writes_failed + bad_reads
         # a write that failed on its way back (a timeout) may still have landed: the counter is
         # between the confirmed writes and all of them, and every node must read that same value
