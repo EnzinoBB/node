@@ -66,6 +66,12 @@ quick-starts after a conversion.
     start;
   - it rebuilds the block hash databases (`blockHashes: rebuilding from the stored blocks ...`)
     when they fail their check.
+- **Bootstrap with more than 8 confidants.** The official node gives a bootstrap round table a
+  weight that fits in 8 bits and silently drops tables of 9 or more confidants, so a network whose
+  initial confidants (or the bootstrap nodes set by special order 2) are 9 or more never starts or
+  restarts. The community node accepts tables of up to 25 confidants (`MaxTrustedNodes`). Up to 8 it
+  gives exactly the official weights, so both pick the same table when a stalled network starts
+  again; a dropped table is now logged.
 - **State kept across a quick start.** Pending consensus-settings changes, special orders and
   deployed smart contracts survive a quick start. The official node can lose them, or apply
   them differently, after a quick start.
