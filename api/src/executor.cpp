@@ -170,7 +170,8 @@ void cs::Executor::getExecutorBuildVersion(executor::ExecutorBuildVersionResult&
         // could still arrive on this connection: replace it now, not on the next call
         recreateOriginExecutor();
 
-        _return.status.code = 1;
+        // the executor did not answer: told apart from an answer, as execute() does
+        _return.status.code = cs::error::ThriftException;
         _return.status.message = x.what();
 
         notifyError();
@@ -781,10 +782,9 @@ void cs::Executor::checkExecutorVersion() {
                           return false;
                       }
                       getExecutorBuildVersion(_return);
-                      // an answer, or an error with the connection still open (the executor answered
-                      // with an error, e.g. an unknown method), is final; a transport error closed the
-                      // connection: the executor is not listening yet
-                      return _return.status.code == 0 || isConnected();
+                      // any answer is final, an error one too (e.g. an unknown method); a transport
+                      // error means the executor is not listening yet
+                      return _return.status.code != cs::error::ThriftException;
                   },
                   [&] { return requestStop_.load(); });
 
@@ -794,12 +794,12 @@ void cs::Executor::checkExecutorVersion() {
 
     const auto waited = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
     if (_return.status.code == 0 && !isConnected()) {
-        _return.status.code = 1;
+        _return.status.code = cs::error::ThriftException;
         _return.status.message = "no connection to the executor";
     }
     if (_return.status.code != 0) {
         cserror() << "Start contract executor error code " << int(_return.status.code) << ": " << _return.status.message
-                  << " (no answer within " << waited << " ms)";
+                  << (_return.status.code == cs::error::ThriftException ? " (no answer within " : " (after ") << waited << " ms)";
     }
     else {
         cslog() << "Start contract executor: " << _return.status.message << ". Executor build number " << _return.commitNumber
