@@ -7,8 +7,8 @@ name: Scale
 # latency. A node count passes when every node reaches the target with the same state digests and
 # contracts.py finds the expected values and states everywhere.
 on:
-  # a scale-* tag runs it with the defaults on the tagged commit (a manual run needs the workflow on
-  # the default branch)
+  # a scale-* tag runs it on the tagged commit with the defaults, or scale-t<trusted>-n<counts
+  # joined by _> (a manual run needs the workflow on the default branch)
   push:
     tags: ['scale-*']
   workflow_dispatch:
@@ -40,6 +40,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       counts: ${{ steps.counts.outputs.counts }}
+      trusted: ${{ steps.counts.outputs.trusted }}
     steps:
       - name: Node counts
         id: counts
@@ -48,6 +49,12 @@ jobs:
           TRUSTED: ${{ inputs.trusted_nodes || '' }}
           LOAD: ${{ inputs.contract_load || '120,2,20' }}
         run: |
+          # a tag scale-t<trusted>-n<count>_<count>... sets them too (scale-t7-n25_51)
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^scale-t([0-9]+)-n([0-9_]+)$ ]]; then
+            TRUSTED=${BASH_REMATCH[1]}
+            LIST=${BASH_REMATCH[2]//_/,}
+          fi
+          echo "trusted=$TRUSTED" >> "$GITHUB_OUTPUT"
           echo "$LOAD" | grep -qE '^[0-9]+,[0-9.]+,[0-9.]+$' || { echo "contract_load must be seconds,writes,reads"; exit 1; }
           json="["
           for n in ${LIST//,/ }; do
@@ -141,7 +148,7 @@ jobs:
       max-parallel: 3
       matrix:
         nodes: ${{ fromJSON(needs.plan.outputs.counts) }}
-    name: ${{ matrix.nodes }} nodes${{ inputs.trusted_nodes && format(', {0} trusted', inputs.trusted_nodes) || '' }}
+    name: ${{ matrix.nodes }} nodes${{ needs.plan.outputs.trusted && format(', {0} trusted', needs.plan.outputs.trusted) || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -169,7 +176,7 @@ jobs:
         timeout-minutes: 110
         env:
           NODES: ${{ matrix.nodes }}
-          TRUSTED_NODES: ${{ inputs.trusted_nodes || '' }}
+          TRUSTED_NODES: ${{ needs.plan.outputs.trusted }}
           CONTRACTS: '1'
           CONTRACT_LOAD: ${{ inputs.contract_load || '120,2,20' }}
           TARGET_SEQ: '1100'
