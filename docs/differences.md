@@ -76,8 +76,11 @@ quick-starts after a conversion.
   taken only for a round next to the node's own (from its last block to its round + 2), and,
   unless it is signed with the blockchain key, only once the node's own round has lasted at
   least half of `round_elapse_time` (a node younger than `round_elapse_time`, or already in a
-  bootstrap round, takes it as before). The tables honest nodes send always pass, so a mixed
-  network makes the same choices.
+  bootstrap round, takes it as before). The tables honest nodes send pass in the cases a mixed
+  network relies on, so it makes the same choices; a node that joined the stalled round late, or
+  that is several blocks behind and has not learned the round yet, takes the next table instead.
+  A bootstrap through the diag API must name a round within two of what the nodes know (their
+  last block + 1, as the sending node uses when it raises the round).
 - **State kept across a quick start.** Pending consensus-settings changes, special orders and
   deployed smart contracts survive a quick start. The official node can lose them, or apply
   them differently, after a quick start.
