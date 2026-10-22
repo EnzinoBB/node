@@ -28,6 +28,10 @@
 #        node reached CONTRACTS_AFTER_AT (default 0); the states are compared once every node,
 #        a joining one too, reached TARGET_SEQ. contracts.py sends everything through n1: a
 #        contract scenario never kills, partitions or slows n1
+#        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
+#        seconds: CONTRACT_WRITE_RATE (default 1) Counter.next writes a second from every node's
+#        account through its own API, and CONTRACT_READ_RATE (default 5) Counter.get reads (getters,
+#        no transaction) a second over every node; latencies in contracts-stats.json
 #        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
@@ -116,7 +120,12 @@ case "$NODES" in
     5|7|9|11|13|15|17|19|21|23|25) ;;
     *) echo "NODES must be odd, 5 to 25, got '$NODES'"; exit 1 ;;
 esac
-[ "$NODES" -le 15 ] || echo "warning: $NODES nodes, max_neighbours is 16: not a full mesh"
+# 25 is Consensus::MaxTrustedNodes: every node here is an initial confidant, so no larger table can
+# bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
+# neighbours of each other and consensus messages are routed, so that does not stop the network
+CONTRACT_LOAD_SECONDS=${CONTRACT_LOAD_SECONDS:-0}
+CONTRACT_WRITE_RATE=${CONTRACT_WRITE_RATE:-1}
+CONTRACT_READ_RATE=${CONTRACT_READ_RATE:-5}
 SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
@@ -905,7 +914,9 @@ while :; do
         echo "contracts: deploying and calling them through node 1"
         (cd "$HERE" && python3 contracts.py "$WORK" "$NODES" "$MASTER_SEED" \
             --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
-            --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final") > "$WORK/contracts.log" 2>&1 &
+            --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
+            --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
+            --stats-file "$WORK/contracts-stats.json") > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
     # the calls after the restart must run on the restarted nodes too, so let them catch up first

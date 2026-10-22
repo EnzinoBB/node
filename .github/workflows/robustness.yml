@@ -25,7 +25,7 @@ on:
         description: 'Comma-separated scenario names to run (empty = all)'
         default: ''
       nodes:
-        description: 'Nodes in the network (odd, 5 to 15); the NODE_STORAGE scenarios run only at 7'
+        description: 'Nodes in the network (odd, 5 to 25 = MaxTrustedNodes); the NODE_STORAGE scenarios run only at 7'
         default: '7'
       timeout_min:
         description: 'Minutes each scenario has to reach its target sequence'
@@ -50,7 +50,7 @@ jobs:
           NODES: ${{ inputs.nodes || '7' }}
           TIMEOUT: ${{ inputs.timeout_min || '75' }}
         run: |
-          case "$NODES" in 5|7|9|11|13|15) ;; *) echo "nodes must be odd, 5 to 15, got '$NODES'"; exit 1 ;; esac
+          case "$NODES" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "nodes must be odd, 5 to 25, got '$NODES'"; exit 1 ;; esac
           [ "$TIMEOUT" -ge 10 ] && [ "$TIMEOUT" -le 120 ] || { echo "timeout_min must be 10 to 120, got '$TIMEOUT'"; exit 1; }
 
       - name: Checkout
