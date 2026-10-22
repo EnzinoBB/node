@@ -303,6 +303,10 @@ Result run(const Options& opt) {
     auto oldDb = openOld(opt.from, opt.dbPath, openError);
     if (!oldDb) {
         if (!resuming) return failed(r, "cannot open the " + opt.from + " database: " + openError);
+        if (allConverted(st) && !st.contractsCopied) {
+            return failed(r, "the " + opt.from + " database cannot be opened (" + openError
+                             + "); its contract records are not copied yet: db/.convert and db/.convert-new are kept");
+        }
         if (!withoutOld) {
             int64_t lo = 0, hi = 0;
             nextBatch(st, 1, lo, hi);
@@ -457,7 +461,9 @@ Result run(const Options& opt) {
         if (!oldDb->remove_batch(keys)) return failed(r, "cannot remove converted blocks from the " + opt.from + " database: " + oldDb->last_error_message());
         // After the last batch the old files are deleted moments later: no compaction, whose truncation
         // of the emptied files is what a crash leaves recovery unable to replay. After the others, a
-        // checkpoint right away puts the log and the files in step again.
+        // checkpoint right away puts BerkeleyDB's log and files in step again. On lmdb and rocksdb it
+        // is their flush(), a sync per batch: cheap, and a source that cannot sync stops the
+        // conversion, resumable, rather than leaving its removals undurable.
         int64_t nextLo = 0, nextHi = 0;
         const bool more = nextBatch(st, opt.batch, nextLo, nextHi);
         if (more) {
