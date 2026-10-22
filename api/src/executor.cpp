@@ -49,6 +49,15 @@ void cs::Executor::executeByteCode(executor::ExecuteByteCodeResult& resp, const 
         if (auto optOriginRes = execute(address, smartContractBinary, methodHeader, isGetter, sequence)) {
             resp = optOriginRes.value().resp;
         }
+        else {
+            // as executeByteCodeMultiple: an unexecuted call is not a success without a result
+            resp.status.code = 1;
+            resp.status.message = "No executor connection!";
+        }
+    }
+    else {
+        resp.status.code = 1;
+        resp.status.message = "no contract byte code";
     }
 }
 
