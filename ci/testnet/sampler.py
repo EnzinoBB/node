@@ -177,9 +177,10 @@ def summary(rows, nodes, interval):
         overall = (prog[-1][2] - prog[0][2]) / max(prog[-1][0] - prog[0][0], 1)
         rates = [(b[2] - a[2]) / (b[0] - a[0]) for a, b in zip(prog, prog[1:]) if b[0] > a[0]]
         spreads = [p[2] - p[1] for p in prog]
-        out.append(f"  blocks: {overall:.2f} per second overall, per interval min {min(rates):.2f} median "
-                   f"{statistics.median(rates):.2f}; spread between nodes up to {max(spreads):.0f}, "
-                   f"{sum(1 for s in spreads if s > 50)} samples above 50")
+        per_interval = (f"per interval min {min(rates):.2f} median {statistics.median(rates):.2f}" if rates
+                        else "no interval with progress")
+        out.append(f"  blocks: {overall:.2f} per second overall, {per_interval}; spread between nodes up to "
+                   f"{max(spreads):.0f}, {sum(1 for s in spreads if s > 50)} samples above 50")
     seen = {}
     for r in rows:
         if r["kind"] == "node":
