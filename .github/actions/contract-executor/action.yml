@@ -1,0 +1,50 @@
+name: Contract executor
+description: >
+  The contract executor shipped with the official mainnet release 4.2.532.0 (the one operators
+  run), with the JDK it runs on (ojdkbuild 11.0.4, which ci/testnet/run.sh takes from the release
+  folder). Sets EXECUTOR_JAR. Needs a checkout of this repository first.
+outputs:
+  jar:
+    description: Path of the contract-executor jar
+    value: ${{ steps.locate.outputs.jar }}
+runs:
+  using: composite
+  steps:
+    # its sources no longer build as published: unreleased sc-api/thrift-api-client versions and
+    # Eclipse version ranges that now resolve to Java 17 jars
+    - name: Restore contract executor
+      id: cache-executor
+      uses: actions/cache@v4
+      with:
+        path: executor
+        key: contract-executor-mainnet-4.2.532.0-v2
+
+    - name: Fetch contract executor
+      if: steps.cache-executor.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl -sSfL -o release.tar.gz \
+          https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
+        mkdir -p executor
+        tar -xzf release.tar.gz -C executor
+        rm -rf executor/csnode/javafx-sdk-13
+        rm release.tar.gz
+        ls -la executor/csnode | grep -v '\.log$' | head -40
+        unzip -p executor/csnode/contract-executor.jar META-INF/MANIFEST.MF | head -20
+
+    # a fallback only: run.sh uses the release's ojdkbuild JDK when it finds it next to the jar
+    - name: Set up Java 11
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '11'
+
+    - name: Locate contract executor
+      id: locate
+      shell: bash
+      run: |
+        jar=$(find "$PWD/executor" -type f -name '*contract-executor*.jar' | head -1)
+        test -n "$jar"
+        echo "EXECUTOR_JAR=$jar" >> "$GITHUB_ENV"
+        echo "jar=$jar" >> "$GITHUB_OUTPUT"
+        echo "executor jar: $jar"

@@ -179,44 +179,10 @@ jobs:
           echo "BIN_ALT=$PWD/build-alt/client/node" >> "$GITHUB_ENV"
           echo "node under test: $(git -C node-alt log -1 --format='%h %s')"
 
-      # the contract executor shipped with the official mainnet release (the one operators run); its
-      # sources no longer build as published: unreleased sc-api/thrift-api-client versions and
-      # Eclipse version ranges that now resolve to Java 17 jars
-      - name: Restore contract executor
+      # the contract executor of the official mainnet release (the one operators run)
+      - name: Contract executor
         if: inputs.contracts == '1'
-        id: cache-executor
-        uses: actions/cache@v4
-        with:
-          path: executor
-          key: contract-executor-mainnet-4.2.532.0-v2
-
-      - name: Fetch contract executor
-        if: inputs.contracts == '1' && steps.cache-executor.outputs.cache-hit != 'true'
-        run: |
-          curl -sSfL -o release.tar.gz \
-            https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
-          mkdir -p executor
-          tar -xzf release.tar.gz -C executor
-          rm -rf executor/csnode/javafx-sdk-13
-          rm release.tar.gz
-          ls -la executor/csnode | grep -v '\.log$' | head -40
-          grep -ihE 'executor|jdk|java' executor/csnode/config.ini executor/csnode/*.sh executor/csnode/settings.properties 2>/dev/null | head -20
-          unzip -p executor/csnode/contract-executor.jar META-INF/MANIFEST.MF | head -20
-
-      - name: Set up Java 11
-        if: inputs.contracts == '1'
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '11'
-
-      - name: Locate contract executor
-        if: inputs.contracts == '1'
-        run: |
-          jar=$(find "$PWD/executor" -type f -name '*contract-executor*.jar' | head -1)
-          test -n "$jar"
-          echo "EXECUTOR_JAR=$jar" >> "$GITHUB_ENV"
-          echo "executor jar: $jar"
+        uses: ./.github/actions/contract-executor
 
       # mixed executors: the even nodes run an executor built from EnzinoBB/contract-executor, so a
       # result that differs from the release executor's shows up as a failed contract consensus
