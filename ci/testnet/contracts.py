@@ -4,6 +4,7 @@
 Usage: contracts.py <work_dir> <nodes> <master_seed_b58> [--calls-before 3] [--calls-after 5]
                     [--ready-file PATH] [--wait-file PATH] [--wait-timeout 1800]
                     [--check-nodes N] [--final-file PATH]
+                    [--load-seconds 0 --write-rate 1 --read-rate 5 --stats-file PATH]
 
 The master key deploys Counter, whose next() adds one to its state and returns it, and calls it
 --calls-before times. It then creates --ready-file and, once --wait-file exists (run.sh creates
@@ -23,15 +24,20 @@ that joined later).
 
 Transactions go through node 1's API (port 9090), so a test scenario must never kill, partition or
 slow node 1: a call during an outage ends the script. Only a transaction node 1 refuses because it
-is not synchronized yet (after a power cut) is sent again, for up to 120 s: nothing was accepted.
+is not synchronized yet (after a power cut) or because the master's previous transaction is still
+in progress is sent again, for up to 120 s: nothing was accepted.
 The final check reads every node's API (node i > 1 listens on 9100 + i).
 """
 import argparse
 import hashlib
+import json
 import os
+import statistics
 import struct
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import base58
 from thriftpy2.protocol import TBinaryProtocolFactory
@@ -39,7 +45,7 @@ from thriftpy2.rpc import make_client
 from thriftpy2.transport import TBufferedTransportFactory
 from thriftpy2.utils import serialize
 
-from fund import Account, api, encode_max_fee, general, pack_inner_id
+from fund import Account, Client, api, balance, encode_max_fee, general, pack_inner_id, send
 
 CURRENCY_CS = 1
 TT_DEPLOY = 1   # api.TransactionType: contract deployment
@@ -196,13 +202,53 @@ def smart_transaction(src, target, sci, tx_type):
     return t
 
 
+def read_transaction(src, contract, method):
+    """A getter: TransactionFlow with forgetNewState runs the method on the node's own executor
+    against the contract's current state and returns its result; nothing goes to consensus, no
+    transaction, no fee, no signature check (api/src/apihandler.cpp). A constant signature keeps the
+    node's getter bookkeeping from growing."""
+    sci = api.SmartContractInvocation(method=method, params=[], usedContracts=[], forgetNewState=True,
+                                      smartContractDeploy=None, version=1)
+    t = api.Transaction()
+    t.id = 0
+    t.source = src.pk
+    t.target = contract
+    t.amount = general.Amount(integral=0, fraction=0)
+    t.balance = general.Amount(integral=0, fraction=0)
+    t.currency = CURRENCY_CS
+    t.signature = bytes(64)
+    t.smartContract = sci
+    t.fee = api.AmountCommission(commission=SMART_MAX_FEE)
+    t.timeCreation = int(time.time() * 1000)
+    t.type = TT_EXECUTE
+    return t
+
+
+def read_value(client, src, contract, method):
+    """One getter call: (value or None, latency ms, status message)."""
+    t0 = time.time()
+    result = client.TransactionFlow(read_transaction(src, contract, method))
+    ms = (time.time() - t0) * 1000
+    # an executor that is not reachable answers status 0 without a result
+    value = result.smart_contract_result.v_int if result.status.code == 0 and result.smart_contract_result else None
+    return value, ms, result.status.message
+
+
 def next_inner_id(client, account):
     last = client.WalletTransactionsCountGet(account.pk).lastTransactionInnerId or 0
     account.next_inner_id = int(last) + 1
 
 
 def deploy(client, master, name, source):
-    compiled = client.SmartContractCompile(source)
+    # the node's executor JVM may still be starting (many nodes start theirs at once): the API
+    # answers with a transport error then, so the compile is tried again for a while
+    deadline = time.time() + 600
+    while True:
+        compiled = client.SmartContractCompile(source)
+        if compiled.status.code == 0 or time.time() >= deadline or "socket" not in (compiled.status.message or ""):
+            break
+        print(f"compile {name}: executor not reachable yet ({compiled.status.message!r}), retrying", flush=True)
+        time.sleep(10)
     if compiled.status.code != 0:
         sys.exit(f"compile {name} FAILED: {compiled.status.message}")
     next_inner_id(client, master)
@@ -230,16 +276,131 @@ def call(client, master, contract, method, label, expected=None):
         next_inner_id(client, master)
         sci = invocation(method=method)
         result = client.TransactionFlow(smart_transaction(master, contract, sci, TT_EXECUTE))
-        # refused before it was accepted (api/src/apihandler.cpp "Node is not syncronized"): send it again
-        if result.status.code == 0 or "not syncronized" not in (result.status.message or "") or time.time() >= deadline:
+        # refused before it was accepted: the node is not synchronized yet (after a power cut), or the
+        # account's previous transaction is still in progress there (api/src/apihandler.cpp): send it again
+        msg = result.status.message or ""
+        if result.status.code == 0 or ("not syncronized" not in msg and "Transaction in progress" not in msg) \
+                or time.time() >= deadline:
             break
-        print(f"{label}: node not synchronized yet, sending again", flush=True)
+        print(f"{label}: refused ({msg.strip()!r}), sending again", flush=True)
         time.sleep(5)
     value = result.smart_contract_result.v_int if result.smart_contract_result else None
     ok = result.status.code == 0 and value == expected
     outcome = ("ok" if ok else "FAILED") if expected is not None else "reported"
     print(f"{label}: {outcome} (status {result.status.code} {result.status.message!r}, returned {value})", flush=True)
     return ok
+
+
+def percentile(values, p):
+    if not values:
+        return None
+    values = sorted(values)
+    return values[min(len(values) - 1, int(round(p / 100 * (len(values) - 1))))]
+
+
+def load(args, client_for, master, counter, nodes, read_nodes):
+    """args.load_seconds of Counter.next writes (args.write_rate per second in all, one writer
+    thread per funded node account, each through its own node's API) and Counter.get reads
+    (args.read_rate per second, spread over every node). The writers are accounts of their own,
+    funded here by the master key: the nodes' accounts are fund.py's, whose transfers would compete
+    with these calls for their inner ids. Returns (writes that returned a value,
+    writes that failed, writes consensus rejected, 1 if more than 1 % of the reads failed)."""
+    stats = {"write": [], "read": []}
+    errors = {"write": 0, "read": 0}
+    # concurrent calls of one contract from several accounts: consensus takes some and rejects the
+    # others in a round; a rejected call is an answer, not a fault, and is counted on its own
+    rejected = [0]
+    lock = threading.Lock()
+    stop_at = time.time() + args.load_seconds
+    writers = list(range(1, nodes + 1))
+    accounts = {i: Account(hashlib.sha256(master.pk + b"contract writer %d" % i).digest()) for i in writers}
+    funder = Client(9090, 300)
+    master.next_inner_id = None
+    for i in writers:
+        ok, message = send(funder, master, accounts[i].pk, 1000)
+        if not ok:
+            print(f"load: funding writer {i} FAILED: {message}", flush=True)
+    deadline = time.time() + 300
+    while time.time() < deadline and any(balance(funder, a.pk) < 1000 for a in accounts.values()):
+        time.sleep(5)
+
+    def writer(i):
+        account = accounts[i]
+        period = len(writers) / args.write_rate if args.write_rate > 0 else None
+        while period and time.time() < stop_at:
+            t0 = time.time()
+            ok = False
+            try:
+                c = client_for(i)
+                next_inner_id(c, account)
+                sci = invocation(method="next")
+                result = c.TransactionFlow(smart_transaction(account, counter, sci, TT_EXECUTE))
+                ok = result.status.code == 0 and result.smart_contract_result is not None
+                msg = result.status.message
+            except Exception as e:
+                msg = type(e).__name__
+            ms = (time.time() - t0) * 1000
+            with lock:
+                if ok:
+                    stats["write"].append(ms)
+                # refused by consensus (concurrent calls of one contract in a round), or by the API while
+                # the account's previous call is still in progress: answers, not faults
+                elif "rejected by consensus" in (msg or "") or "Transaction in progress" in (msg or ""):
+                    rejected[0] += 1
+                else:
+                    errors["write"] += 1
+                    if errors["write"] <= 5:
+                        print(f"load write via n{i} FAILED: {msg!r}", flush=True)
+            time.sleep(max(0.0, period - (time.time() - t0)))
+
+    def reader(k):
+        period = 1.0 / args.read_rate * 4 if args.read_rate > 0 else None
+        n = k
+        while period and time.time() < stop_at:
+            t0 = time.time()
+            i = read_nodes[n % len(read_nodes)]
+            n += 4
+            try:
+                value, ms, msg = read_value(client_for(i), master, counter, "get")
+                ok = value is not None
+            except Exception as e:
+                ok, ms, msg = False, (time.time() - t0) * 1000, type(e).__name__
+            with lock:
+                if ok:
+                    stats["read"].append(ms)
+                else:
+                    errors["read"] += 1
+                    if errors["read"] <= 5:
+                        print(f"load read via n{i} FAILED: {msg!r}", flush=True)
+            time.sleep(max(0.0, period - (time.time() - t0)))
+
+    print(f"load: {args.load_seconds} s, {args.write_rate} writes/s from {len(writers)} accounts, "
+          f"{args.read_rate} reads/s on {len(read_nodes)} nodes", flush=True)
+    threads = [threading.Thread(target=writer, args=(i,)) for i in writers] + \
+              [threading.Thread(target=reader, args=(k,)) for k in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    summary = {"nodes": nodes, "seconds": args.load_seconds, "writes_rejected": rejected[0]}
+    for kind in ("write", "read"):
+        ms = stats[kind]
+        sent = len(ms) + errors[kind] + (rejected[0] if kind == "write" else 0)
+        summary[kind] = {"sent": sent, "ok": len(ms), "failed": errors[kind],
+                         "rate": round(len(ms) / args.load_seconds, 2),
+                         "p50_ms": percentile(ms, 50), "p95_ms": percentile(ms, 95), "max_ms": max(ms) if ms else None}
+        print(f"load {kind}s: {len(ms)} ok of {sent} ({summary[kind]['rate']}/s), latency "
+              f"p50 {summary[kind]['p50_ms'] or 0:.0f} ms, p95 {summary[kind]['p95_ms'] or 0:.0f} ms, "
+              f"max {summary[kind]['max_ms'] or 0:.0f} ms", flush=True)
+    print(f"load writes refused (by consensus for concurrent calls of one contract, or while the account's "
+          f"previous call was in progress): {rejected[0]}", flush=True)
+    if args.stats_file:
+        with open(args.stats_file, "w") as f:
+            json.dump(summary, f, indent=1)
+    read_sent = summary["read"]["sent"]
+    bad_reads = 1 if read_sent and errors["read"] > 0.01 * read_sent else 0
+    return len(stats["write"]), errors["write"], rejected[0], bad_reads
 
 
 def main():
@@ -254,7 +415,18 @@ def main():
     parser.add_argument("--wait-timeout", type=int, default=1800)
     parser.add_argument("--check-nodes", type=int, default=0)
     parser.add_argument("--final-file", default="")
+    parser.add_argument("--load-seconds", type=int, default=0)
+    parser.add_argument("--write-rate", type=float, default=1.0)
+    parser.add_argument("--read-rate", type=float, default=5.0)
+    parser.add_argument("--stats-file", default="")
+    # nodes left out of the reads (still compared at the end)
+    parser.add_argument("--skip-read-nodes", default="")
     args = parser.parse_args()
+    check_nodes = args.check_nodes or args.nodes
+    skipped = {int(n) for n in args.skip_read_nodes.split() if n.strip()}
+    read_nodes = [i for i in range(1, args.nodes + 1) if i not in skipped]
+    if skipped:
+        print(f"reads skip the nodes {sorted(skipped)}, their states are still compared", flush=True)
 
     def client_for(i):
         port = 9090 if i == 1 else 9100 + i
@@ -283,6 +455,50 @@ def main():
         calls += 1
         failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} before restart", calls) else 1
         failures += 0 if call(client_for(1), master, ledger, "record", f"Ledger call {calls} before restart", calls) else 1
+    # reads and the load go to the nodes the network started with; a node that joins later is in
+    # check_nodes, compared once it reached the target (--final-file)
+    def read_all(contract, method, expected, label, timeout=300):
+        """The getter on every node, until each returns `expected` (a lagging node needs a round or
+        two); prints one line, returns the number of nodes that did not."""
+        def one(i):
+            deadline = time.time() + timeout
+            first_ms = None
+            value, msg = None, ""
+            while True:
+                try:
+                    value, ms, msg = read_value(client_for(i), master, contract, method)
+                    first_ms = ms if first_ms is None else first_ms
+                except Exception as e:  # a node without a reachable API
+                    value, msg = None, type(e).__name__
+                if value == expected or time.time() >= deadline:
+                    return i, value, first_ms, msg
+                time.sleep(2)
+        with ThreadPoolExecutor(max_workers=len(read_nodes)) as pool:
+            results = list(pool.map(one, read_nodes))
+        bad = [r for r in results if r[1] != expected]
+        cells = " ".join(f"n{i}={v}" + (f"/{ms:.0f}ms" if ms is not None else "") for i, v, ms, _ in results)
+        print(f"read {label}: {'ok' if not bad else 'FAILED'} (expected {expected}) {cells}", flush=True)
+        for i, v, _, msg in bad:
+            print(f"  n{i}: {v!r} {msg!r}", flush=True)
+        return len(bad)
+
+    failures += read_all(counter, "get", calls, "Counter.get before restart")
+    failures += read_all(ledger, "entries", calls, "Ledger.entries before restart")
+
+    # reads change nothing: no transaction on the contract, the same state, the same inner id
+    def footprint():
+        c = client_for(1)
+        got = c.SmartContractGet(counter).smartContract
+        return got.transactionsCount, hashlib.sha256(got.objectState).hexdigest(), \
+            c.WalletTransactionsCountGet(master.pk).lastTransactionInnerId
+    before = footprint()
+    for _ in range(20):
+        read_value(client_for(1), master, counter, "get")
+    after = footprint()
+    print(f"20 reads on n1: contract transactions, state, master inner id {before} -> {after}: "
+          f"{'unchanged' if before == after else 'CHANGED'}", flush=True)
+    failures += 0 if before == after else 1
+
     if args.ready_file:
         open(args.ready_file, "w").close()
     if args.wait_file:
@@ -295,6 +511,32 @@ def main():
         failures += 0 if call(client_for(1), master, counter, "next", f"call {n + 1} after restart", calls) else 1
         failures += 0 if call(client_for(1), master, ledger, "record", f"Ledger call {calls} after restart", calls) else 1
     failures += 0 if call(client_for(1), master, ledger, "entries", "Ledger entries", calls) else 1
+    failures += read_all(counter, "get", calls, "Counter.get after restart")
+    failures += read_all(ledger, "entries", calls, "Ledger.entries after restart")
+
+    if args.load_seconds > 0:
+        writes_ok, writes_failed, writes_rejected, bad_reads = load(args, client_for, master, counter, args.nodes, read_nodes)
+        failures += writes_failed + bad_reads
+        # a write that failed on its way back (a timeout) may still have landed: the counter is
+        # between the confirmed writes and all of them, and every node must read that same value
+        time.sleep(30)
+        value = None
+        for _ in range(10):
+            try:
+                value = read_value(client_for(1), master, counter, "get")[0]
+            except Exception:
+                value = None
+            if value is not None:
+                break
+            time.sleep(5)
+        low, high = calls + writes_ok, calls + writes_ok + writes_failed + writes_rejected
+        in_range = value is not None and low <= value <= high
+        print(f"Counter after the load: {value} (confirmed writes give {low}..{high}, unconfirmed ones may land): "
+              f"{'ok' if in_range else 'FAILED'}",
+              flush=True)
+        failures += 0 if in_range else 1
+        calls = value if value is not None else calls
+        failures += read_all(counter, "get", calls, "Counter.get after the load")
     call_callers("after restart", 1)
     call_callers("after restart", 2)
 

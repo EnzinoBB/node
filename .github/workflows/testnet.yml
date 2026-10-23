@@ -50,8 +50,14 @@ on:
         description: 'Nodes stopped and restarted together in the restart test, e.g. "6 7" (empty = the last node)'
         default: ''
       nodes:
-        description: 'Nodes in the network (odd, 5 to 15; 15 is the full-mesh limit of max_neighbours=16)'
+        description: 'Nodes in the network (odd, 5 to 25 = MaxTrustedNodes)'
         default: '7'
+      trusted_nodes:
+        description: 'Initial confidants among the nodes (odd, 5 to 25; empty = every node); then nodes may go up to 61'
+        default: ''
+      contract_load:
+        description: 'With contracts: load phase as "seconds,writes per second,reads per second", e.g. 120,2,20 (empty = none)'
+        default: ''
   schedule:
     - cron: '17 2 * * *'
   pull_request:
@@ -74,7 +80,7 @@ env:
 jobs:
   testnet:
     if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'testnet')
-    name: Private network (${{ inputs.nodes || '7' }} nodes)
+    name: Private network (${{ inputs.nodes || '7' }} nodes${{ inputs.trusted_nodes && format(', {0} trusted', inputs.trusted_nodes) || '' }})
     runs-on: ubuntu-24.04
     timeout-minutes: 340
 
@@ -82,8 +88,14 @@ jobs:
       - name: Check inputs
         env:
           NODES: ${{ inputs.nodes || '7' }}
+          TRUSTED: ${{ inputs.trusted_nodes || '' }}
         run: |
-          case "$NODES" in 5|7|9|11|13|15) ;; *) echo "nodes must be odd, 5 to 15, got '$NODES'"; exit 1 ;; esac
+          if [ -n "$TRUSTED" ]; then
+            case "$TRUSTED" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "trusted_nodes must be odd, 5 to 25, got '$TRUSTED'"; exit 1 ;; esac
+            [ "$NODES" -ge "$TRUSTED" ] && [ "$NODES" -le 61 ] || { echo "nodes must be trusted_nodes to 61, got '$NODES'"; exit 1; }
+          else
+            case "$NODES" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "nodes must be odd, 5 to 25, got '$NODES'"; exit 1 ;; esac
+          fi
 
       - name: Checkout
         uses: actions/checkout@v4
@@ -235,6 +247,7 @@ jobs:
         timeout-minutes: 300
         env:
           NODES: ${{ inputs.nodes || '7' }}
+          TRUSTED_NODES: ${{ inputs.trusted_nodes || '' }}
           TARGET_SEQ: ${{ inputs.target_seq || '1100' }}
           TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
           DISK_FULL_NODE: ${{ inputs.disk_full_node || '0' }}
@@ -246,11 +259,18 @@ jobs:
           DELEGATE: ${{ inputs.delegate || '0' }}
           MIN_STAKE: ${{ inputs.min_stake || '0' }}
           CONTRACTS: ${{ inputs.contracts || '0' }}
+          CONTRACT_LOAD: ${{ inputs.contract_load || '' }}
           RESTART_NODES: ${{ inputs.restart_nodes || '' }}
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
-        run: ci/testnet/run.sh build/client/node
+        run: |
+          if [ -n "$CONTRACT_LOAD" ]; then
+            echo "$CONTRACT_LOAD" | grep -qE '^[0-9]+,[0-9.]+,[0-9.]+$' || { echo "contract_load must be seconds,writes,reads"; exit 1; }
+            IFS=, read -r CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE <<< "$CONTRACT_LOAD"
+            export CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE
+          fi
+          ci/testnet/run.sh build/client/node
 
       - name: Resource usage
         if: always()
@@ -274,6 +294,7 @@ jobs:
             testnet-run/n*/log/*.txt
             testnet-run/n*/config.ini
             testnet-run/resources.tsv
+            testnet-run/contracts-stats.json
             testnet-run/resources-summary.txt
             testnet-run/sampler.log
             testnet-run/progress

@@ -2,10 +2,13 @@
 # Run a private Credits network of N nodes on this machine and check that it works.
 #
 # Usage: run.sh <path-to-node-binary>
-# Env:   NODES (default 7, keep it odd: an even set of ready nodes drops one at bootstrap)
+# Env:   NODES (default 7; keep the initial confidants, TRUSTED_NODES, odd: an even set of ready ones
+#        drops one at bootstrap)
 #        TARGET_SEQ (default 1100: past the first STATE DIGEST at block 1000)
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
+#        TRUSTED_NODES (default NODES): only the first TRUSTED_NODES nodes are initial confidants
+#        (odd, 5 to 25); the others, up to 61 nodes in all, are ordinary nodes
 #        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
 #        of the nodes and executors in resources.tsv, and prints a summary at the end
 #        FUND (default 0; needs a -DCREDITS_TESTNET=ON binary): genesis funds go to a generated master
@@ -16,6 +19,8 @@
 #        SYNCRO_ROUND (default 0 = off, needs FUND=1): special order 35 makes the sync answers count
 #        from that round (Consensus::syncroChangeRound), as on a network that issued it
 #        JOIN_FULL=1: the node of JOIN_PRUNED_AT syncs from block 0 as a full node instead
+#        LOW_STAKE_NODES (default 0, needs FUND=1): the last that many nodes get 1'000 CS, below the
+#        minimum stake; after StartingDPOS (DPOS_AT) none of them may be trusted
 #        MIN_STAKE (default 0 = off, needs FUND=1): special order 22 sets the minimum stake; with the
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
@@ -28,11 +33,15 @@
 #        node reached CONTRACTS_AFTER_AT (default 0); the states are compared once every node,
 #        a joining one too, reached TARGET_SEQ. contracts.py sends everything through n1: a
 #        contract scenario never kills, partitions or slows n1
+#        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
+#        seconds: CONTRACT_WRITE_RATE (default 1) Counter.next writes a second from every node's
+#        account through its own API, and CONTRACT_READ_RATE (default 5) Counter.get reads (getters,
+#        no transaction) a second over every node; latencies in contracts-stats.json
 #        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
-#        RESTART_NODES (default: the last node): the nodes the restart test stops and restarts together
+#        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
@@ -112,17 +121,28 @@ BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
-# MinTrustedNodes is 4; an even set of ready nodes drops one at bootstrap
-case "$NODES" in
+# the initial confidants (trusted.txt): the first TRUSTED_NODES nodes, by default all of them; the
+# others are ordinary nodes, as most nodes on mainnet. MinTrustedNodes is 4, MaxTrustedNodes 25, and
+# an even set of ready confidants drops one at bootstrap
+TRUSTED_NODES=${TRUSTED_NODES:-$NODES}
+case "$TRUSTED_NODES" in
     5|7|9|11|13|15|17|19|21|23|25) ;;
-    *) echo "NODES must be odd, 5 to 25, got '$NODES'"; exit 1 ;;
+    *) echo "TRUSTED_NODES must be odd, 5 to 25, got '$TRUSTED_NODES'"; exit 1 ;;
 esac
-[ "$NODES" -le 15 ] || echo "warning: $NODES nodes, max_neighbours is 16: not a full mesh"
+# ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i
+[ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
+    || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
+# 25 is Consensus::MaxTrustedNodes: no larger set of initial confidants can bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
+# neighbours of each other and consensus messages are routed, so that does not stop the network
+CONTRACT_LOAD_SECONDS=${CONTRACT_LOAD_SECONDS:-0}
+CONTRACT_WRITE_RATE=${CONTRACT_WRITE_RATE:-1}
+CONTRACT_READ_RATE=${CONTRACT_READ_RATE:-5}
 SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
 RESTART_AT=${RESTART_AT:-300}
-RESTART_NODES=${RESTART_NODES:-$NODES}
+# by default the last initial confidant (the last node when every node is one)
+RESTART_NODES=${RESTART_NODES:-$TRUSTED_NODES}
 echo "$RESTART_NODES" | grep -qE '^[0-9]+( [0-9]+)*$' || { echo "bad RESTART_NODES '$RESTART_NODES'"; exit 1; }
 FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
@@ -138,6 +158,13 @@ DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+# the last LOW_STAKE_NODES nodes (never initial confidants) get 1'000 CS, below the minimum stake
+LOW_STAKE_NODES=${LOW_STAKE_NODES:-0}
+[ "$LOW_STAKE_NODES" -le $((NODES - TRUSTED_NODES)) ] \
+    || { echo "LOW_STAKE_NODES must be at most NODES - TRUSTED_NODES ($((NODES - TRUSTED_NODES)))"; exit 1; }
+# stake counts only from StartingDPOS: the check needs it well before the target
+[ "$LOW_STAKE_NODES" -eq 0 ] || { [ "$DPOS_AT" -gt 0 ] && [ $((DPOS_AT + 300)) -le "$TARGET_SEQ" ]; } \
+    || { echo "LOW_STAKE_NODES needs DPOS_AT, at most TARGET_SEQ - 300"; exit 1; }
 SYNCRO_ROUND=${SYNCRO_ROUND:-0}
 JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
@@ -268,6 +295,10 @@ api_settings() {
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
+    # the node asks its new executor for its version every second for this long, and disables it for
+    # good if it never answers: dozens of JVMs starting at once on one machine (a power cut, a big
+    # network) can take longer than the 7 s default
+    echo "executor_check_version_delay=60000"
     cat > "$WORK/n$i/settings.properties" <<PROPS
 node.api.host=127.0.0.1
 node.api.port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))
@@ -316,7 +347,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
-        echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
+        [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
         [ "$j" -ne "$i" ] && echo "127.0.0.1:$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
@@ -902,6 +933,7 @@ while :; do
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
             --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" --syncro-round "$SYNCRO_ROUND" \
+            --low-stake-nodes "$LOW_STAKE_NODES" \
             $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
@@ -910,8 +942,16 @@ while :; do
         echo "contracts: deploying and calling them through node 1"
         (cd "$HERE" && python3 contracts.py "$WORK" "$NODES" "$MASTER_SEED" \
             --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
-            --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final") > "$WORK/contracts.log" 2>&1 &
+            --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
+            --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
+            --stats-file "$WORK/contracts-stats.json") > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
+    fi
+    # contracts.py ended before its first calls were done: nothing would release the restart test
+    if [ -n "$CONTRACTS_PID" ] && [ ! -e "$WORK/contracts-ready" ] && ! kill -0 "$CONTRACTS_PID" 2>/dev/null; then
+        cat "$WORK/contracts.log"
+        echo "FAIL: contracts.py ended before its first calls"
+        exit 1
     fi
     # the calls after the restart must run on the restarted nodes too, so let them catch up first
     if [ "$CONTRACTS" = "1" ] && [ ! -e "$WORK/restart-done" ] && contracts_go_ready 2>/dev/null; then
@@ -1169,4 +1209,26 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# who took part in consensus: trusted per round (from n1's round headers) and how many nodes were
+# trusted at least once (a node logs TRUSTED [index] in the rounds it is trusted in)
+per_round=$(grep -ah 'Trusted count:' "$WORK/n1/node.log" | sed -E 's/.*Trusted count: ([0-9]+).*/\1/' | sort -n | uniq -c \
+    | awk '{printf "%s%s trusted in %s rounds", sep, $2, $1; sep=", "}' || true)
+ever=0
+for i in $(seq 1 "$ALL_NODES"); do
+    grep -aq 'TRUSTED \[' "$WORK/n$i/node.log" && ever=$((ever + 1))
+done
+echo "consensus: $per_round; $ever of $ALL_NODES nodes were trusted at least once (initial confidants: $TRUSTED_NODES)"
+if [ "$LOW_STAKE_NODES" -gt 0 ]; then
+    # once stake counts (StartingDPOS, moved by DPOS_AT; 100 rounds of margin for the order to land),
+    # a node below the minimum stake must never be trusted
+    from=$((DPOS_AT + 100))
+    low_trusted=0
+    for i in $(seq $((NODES - LOW_STAKE_NODES + 1)) "$NODES"); do
+        # rounds print with digit groups (R-1'234.0)
+        n=$(grep -a 'TRUSTED \[' "$WORK/n$i/node.log" | sed -E "s/.*R-([0-9']+)\..*/\1/" | tr -d "'" | awk -v f="$from" '$1 > f' | wc -l || true)
+        [ "$n" -eq 0 ] || { echo "n$i (low stake) was trusted in $n rounds after round $from"; low_trusted=$((low_trusted + 1)); }
+    done
+    [ "$low_trusted" -eq 0 ] || { echo "FAIL: nodes below the minimum stake were elected trusted"; exit 1; }
+    echo "stake: none of the $LOW_STAKE_NODES nodes below the minimum stake was trusted after round $from"
+fi
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

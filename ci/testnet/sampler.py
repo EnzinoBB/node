@@ -164,6 +164,9 @@ def summary(rows, nodes, interval):
             out.append(f"    {k[1]:<16} {max(r['rss_mb'] for r in rs):>6} {statistics.mean(cpus) if cpus else 0:>6.0f} "
                        f"{max(cpus) if cpus else 0:>6.0f} {len({r['pid'] for r in rs}):>4}")
         out.append(f"    sum of peak RSS: {sum(max(r['rss_mb'] for r in procs[k]) for k in keys)} MB")
+        if kind == "exec":
+            # a node that stops stops every executor of the machine (jps), and each node relaunches its own
+            out.append(f"    executor relaunches: {sum(len({r['pid'] for r in procs[k]}) - 1 for k in keys)}")
     per_ts = {}
     for r in rows:
         if r["kind"] in ("node", "exec"):
