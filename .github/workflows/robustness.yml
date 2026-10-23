@@ -286,11 +286,13 @@ jobs:
           - name: contracts-net-loss
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 CONTRACTS=1
             contracts: true
-          # an official stage-1 hash race: with round_elapse_time 10 s a slow round under loss triggers
-          # a bootstrap of the full table, which the official node never completes; fixed by keeping the
-          # hashes of a same-round bootstrap (#77)
+          # an official stage-1 hash race: with round_elapse_time 10 s a slow round under loss can
+          # trigger a bootstrap of the full table, which the official node never completes; fixed by
+          # keeping the hashes of a same-round bootstrap (#77). Intermittent and long (3000 blocks):
+          # run by name, repeated
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
+            manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=3000
