@@ -11,6 +11,7 @@
 
 #include <csnode/bootstrapgate.hpp>
 #include <csnode/bootstrapweight.hpp>
+#include <csnode/blocktakeover.hpp>
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/compressor.hpp>

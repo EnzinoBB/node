@@ -193,6 +193,10 @@ public:
     bool updateLastBlock(cs::RoundPackage& rPackage);
     bool updateLastBlock(cs::RoundPackage& rPackage, const csdb::Pool& poolFrom);
     bool deferredBlockExchange(cs::RoundPackage& rPackage, const csdb::Pool& newPool);
+    // the writer's block from this node's block of the same sequence and the round package's meta
+    static csdb::Pool blockFromPackageMeta(const csdb::Pool& from, const cs::PoolMetaInfo& meta);
+    // a block of this sequence is deferred (not yet on disk), so it can still be replaced
+    bool hasDeferredBlock(cs::Sequence sequence) const;
     bool isSpecial(const csdb::Transaction& t);
     cs::Bytes checkForSpecialTransactions(const std::vector<csdb::Transaction>& trxs, cs::Sequence seq);
     cs::Sequence getLastSeq() const;
@@ -268,6 +272,8 @@ public signals:
 
     /** @brief The new block event. Raised when the next incoming block is finalized and just before stored into chain */
     cs::StoreBlockSignal storeBlockEvent;
+    // the deferred block was replaced by the writer's block of the same sequence (not stored again)
+    cs::StoreBlockSignal lastBlockReplacedEvent;
 
     cs::NeedStopSignal stopNode;
 
