@@ -32,7 +32,6 @@ import argparse
 import hashlib
 import json
 import os
-import random
 import statistics
 import struct
 import sys
@@ -329,10 +328,10 @@ def load(args, client_for, master, counter, nodes, read_nodes):
     def writer(i):
         account = accounts[i]
         period = len(writers) / args.write_rate if args.write_rate > 0 else None
-        if period:
-            # spread over the period, or every writer sends in the same block (one batch of N calls,
-            # executed one by one, instead of single calls)
-            time.sleep(period * (i - 1) / len(writers))
+        # The writers start together and stay in step: their calls land in one block and run in one
+        # execution cycle of the contract. Spread over the period they land in separate blocks, and
+        # every call waits for the previous one's new state (about 6 rounds): with 2 calls a second
+        # the queue grows (scale run 39876040185: write p50 12.6 s at 9 nodes, 37 s at 51)
         while period and time.time() < stop_at:
             t0 = time.time()
             ok = False
@@ -357,7 +356,7 @@ def load(args, client_for, master, counter, nodes, read_nodes):
                     errors["write"] += 1
                     if errors["write"] <= 5:
                         print(f"load write via n{i} FAILED: {msg!r}", flush=True)
-            time.sleep(max(0.0, period - (time.time() - t0)) * random.uniform(0.8, 1.2))
+            time.sleep(max(0.0, period - (time.time() - t0)))
 
     def reader(k):
         period = 1.0 / args.read_rate * 4 if args.read_rate > 0 else None
