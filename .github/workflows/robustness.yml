@@ -293,9 +293,9 @@ jobs:
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
             manual: true
-          # the same livelock made deterministic: a trusted node frozen for 15 s (> round_elapse_time)
-          # is in the bootstrap table but silent; debug logs on three nodes. Fails until the node
-          # stops restarting the consensus on a re-sent table (run by name)
+          # a trusted node frozen for 15 s (> round_elapse_time) with debug logs on three nodes: a
+          # bootstrap with a silent member. The network recovered in both runs so far, so this alone
+          # does not reproduce the livelock seen under loss (run by name, for diagnosis)
           - name: bootstrap-pause
             env: PAUSE_AT=600 PAUSE_SECONDS=15 ROUND_ELAPSE_MS=10000 LOG_DEBUG_NODES=1,2,3 TARGET_SEQ=1500
             manual: true
