@@ -197,6 +197,9 @@ public:
     static csdb::Pool blockFromPackageMeta(const csdb::Pool& from, const cs::PoolMetaInfo& meta);
     // a block of this sequence is deferred (not yet on disk), so it can still be replaced
     bool hasDeferredBlock(cs::Sequence sequence) const;
+    // the round package's pool signatures sign the writer's block built from the deferred block of
+    // that sequence, checked against the deferred block's confidants (no state change)
+    bool packageBlockVerifies(const cs::RoundPackage& rPackage) const;
     bool isSpecial(const csdb::Transaction& t);
     cs::Bytes checkForSpecialTransactions(const std::vector<csdb::Transaction>& trxs, cs::Sequence seq);
     cs::Sequence getLastSeq() const;

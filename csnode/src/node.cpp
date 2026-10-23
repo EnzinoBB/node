@@ -3353,10 +3353,11 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
                 csdebug() << "Current Roundpackage of " << rNum << " will be replaced by new one";
                 roundPackageCache_.push_back(rPackage);
             }
-            else if (verdict == cs::LastBlockVerdict::Take && samePosition && getBlockChain().hasDeferredBlock(own.sequenceNumber)) {
+            else if (verdict == cs::LastBlockVerdict::Take && samePosition && getBlockChain().hasDeferredBlock(own.sequenceNumber)
+                     && getBlockChain().packageBlockVerifies(rPackage)) {
                 // the writer's package carries another block of the same sequence (a stage-3 retry race):
                 // a majority of the round's trusted signed it and the others cannot form a round on their
-                // own, so continue with the writer's round; updateLastBlock takes its block
+                // own, and its signatures verify: continue with the writer's round; updateLastBlock takes its block
                 cslog() << "NODE> round package " << rNum << " carries block #" << own.sequenceNumber << " with real trusted "
                         << cs::TrustedMask::toString(got.realTrustedMask) << " against own " << cs::TrustedMask::toString(mask)
                         << ": taking the writer's package";

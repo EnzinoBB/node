@@ -1764,6 +1764,35 @@ csdb::Pool BlockChain::blockFromPackageMeta(const csdb::Pool& from, const cs::Po
     return tmpPool;
 }
 
+bool BlockChain::packageBlockVerifies(const cs::RoundPackage& rPackage) const {
+    csdb::Pool own;
+    {
+        std::lock_guard lock(dbLock_);
+        if (!deferredBlock_.is_valid() || deferredBlock_.sequence() != rPackage.poolMetaInfo().sequenceNumber) {
+            return false;
+        }
+        own = deferredBlock_.clone();
+    }
+    // the writer's block as updateLastBlock would build it, signed by the package's signers, checked
+    // against this node's own confidants of the round
+    csdb::Pool candidate = blockFromPackageMeta(own, rPackage.poolMetaInfo());
+    if (!candidate.is_valid()) {
+        return false;
+    }
+    auto signatures = rPackage.poolSignatures();
+    candidate.set_signatures(signatures);
+    if (!candidate.compose()) {
+        return false;
+    }
+    Hash hash;
+    const auto bytes = candidate.hash().to_binary();
+    if (bytes.size() != hash.size()) {
+        return false;
+    }
+    std::copy(bytes.cbegin(), bytes.cend(), hash.data());
+    return NodeUtils::checkGroupSignature(candidate.confidants(), rPackage.poolMetaInfo().realTrustedMask, rPackage.poolSignatures(), hash);
+}
+
 bool BlockChain::hasDeferredBlock(cs::Sequence sequence) const {
     std::lock_guard lock(dbLock_);
     return deferredBlock_.is_valid() && deferredBlock_.sequence() == sequence;
@@ -1922,13 +1951,19 @@ bool BlockChain::deferredBlockExchange(cs::RoundPackage& rPackage, const csdb::P
             return false;
         }
         replaced = deferredBlock_;
-        {
-            // the block was applied to the caches when it was deferred: fees and the block reward go to
-            // its real trusted, so move them to the new set (the same undo/redo the uncertain block uses)
-            std::lock_guard cacheLock(cacheMutex_);
-            walletsCacheUpdater_->loadNextBlock(replaced, replaced.confidants(), *this, true);
-            walletsCacheUpdater_->loadNextBlock(tmp_clone, tmp_clone.confidants(), *this, false);
-        }
+    }
+    {
+        // The block was applied to the caches when it was deferred: fees and the block reward went to
+        // its real trusted, so move them to the new set (the undo/redo the uncertain block uses). Under
+        // cacheMutex_ only, as applyBlockToCaches: the cache update may read the storage (dbLock_), so
+        // the two locks are never taken in the other order. The deferred block is replaced and recorded
+        // on the node's processing thread only, so it cannot change in between
+        std::lock_guard cacheLock(cacheMutex_);
+        walletsCacheUpdater_->loadNextBlock(replaced, replaced.confidants(), *this, true);
+        walletsCacheUpdater_->loadNextBlock(tmp_clone, tmp_clone.confidants(), *this, false);
+    }
+    {
+        std::lock_guard lock(dbLock_);
         deferredBlock_ = tmp_clone;
         this->blockHashes_->update(deferredBlock_);
     }
