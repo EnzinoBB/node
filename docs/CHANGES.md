@@ -32,7 +32,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #82 | csnode: a node still syncing logs a missing round table of the network's current round as a warning (the block comes with the sync); an error only when it is not behind |
 
 ## community.10 — 2026-10-23
 

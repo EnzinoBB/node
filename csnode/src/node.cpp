@@ -1084,7 +1084,14 @@ void Node::getCharacteristic(cs::RoundPackage& rPackage) {
     const auto table = conveyer.roundTable(round);
 
     if (table == nullptr) {
-        cserror() << "NODE> cannot access proper round table to add trusted to pool #" << rPackage.poolMetaInfo().sequenceNumber;
+        // a node still syncing gets the packages of the network's rounds without their round tables;
+        // the block comes with the sync, so only a node that is not behind logs an error
+        if (blockChain_.getLastSeq() + 1 < round) {
+            cswarning() << "NODE> no round table to add trusted to pool #" << round << " while syncing (last block #" << blockChain_.getLastSeq() << "), the block comes with the sync";
+        }
+        else {
+            cserror() << "NODE> cannot access proper round table to add trusted to pool #" << round;
+        }
         return;
     }
 
