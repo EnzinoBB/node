@@ -142,7 +142,9 @@ SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
 # a node starts a bootstrap when its round lasts this long. The consensus's own fallback for a
 # silent trusted node takes about 12.5 s, so below that a slow round is pre-empted by a bootstrap,
 # and a bootstrap of a full table re-sent every 10 s never completes (official stage-1 hash race):
-# 20 s by default (mainnet default 60 s); bootstrap-livelock keeps 10 s to reproduce the race
+# 20 s by default (mainnet default 60 s). The starter re-sends its table every round_elapse_time
+# and each same-round table restarts the consensus on every node: with 10 s a round that needs the
+# fallbacks never completes (bootstrap-livelock, bootstrap-pause reproduce it)
 ROUND_ELAPSE_MS=${ROUND_ELAPSE_MS:-20000}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
@@ -229,6 +231,14 @@ NET_FAULT_PCT=${NET_FAULT_PCT:-10}
 SLOW_NODES=${SLOW_NODES:-}
 SLOW_CPU=${SLOW_CPU:-20}
 GARBAGE_AT=${GARBAGE_AT:-0}
+# LOG_DEBUG_NODES (comma separated, default none): those nodes log at debug level (stage and timer
+# messages of the consensus; node.log grows a lot)
+LOG_DEBUG_NODES=${LOG_DEBUG_NODES:-}
+# PAUSE_AT (default 0 = off): at that sequence a node that is trusted in the current round (not n1)
+# is stopped with SIGSTOP for PAUSE_SECONDS (default 15) and continued: the round stalls, the others
+# bootstrap with the paused node in the table, and the network must make progress again after it
+PAUSE_AT=${PAUSE_AT:-0}
+PAUSE_SECONDS=${PAUSE_SECONDS:-15}
 GARBAGE_SECONDS=${GARBAGE_SECONDS:-300}
 GARBAGE_RATE=${GARBAGE_RATE:-200}
 for v in "$NET_FAULT_NODES" "$SLOW_NODES"; do
@@ -377,7 +387,7 @@ diag_port=0
 $(storage_section "$i")
 
 [Core]
-Filter="%Severity% >= info"
+Filter="%Severity% >= $( [[ ",$LOG_DEBUG_NODES," == *",$i,"* ]] && echo debug || echo info )"
 
 [Sinks.file]
 Destination=TextFile
@@ -618,6 +628,25 @@ while :; do
 
     # the whole network killed at once, as after a power cut
     # with contracts, only once the first calls are done: a cut during the deploys would end contracts.py
+    # a trusted node frozen longer than round_elapse_time: a bootstrap with a silent member
+    if [ "$PAUSE_AT" -gt 0 ] && [ "${paused:-0}" -eq 0 ] && [ "$min" -ge "$PAUSE_AT" ]; then
+        paused=1
+        pause_node=""
+        for i in $(seq 2 "$NODES"); do
+            if grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n$i/node.log" | tail -1 | grep -q TRUSTED; then pause_node=$i; break; fi
+        done
+        if [ -n "$pause_node" ]; then
+            echo "pause test: SIGSTOP n$pause_node (trusted) at sequence $min for $PAUSE_SECONDS s"
+            kill -STOP "${PIDS[$pause_node]}" 2>/dev/null || true
+            sleep "$PAUSE_SECONDS"
+            kill -CONT "${PIDS[$pause_node]}" 2>/dev/null || true
+            pause_seq=$(seq_of 1); pause_seq=${pause_seq:-0}
+            echo "pause test: n$pause_node continued at sequence $pause_seq"
+        else
+            echo "pause test: no trusted node other than n1 at sequence $min, nothing paused"
+        fi
+    fi
+
     if [ "$CRASH_ALL_AT" -gt 0 ] && [ "$crashed_all" -eq 0 ] && [ "$min" -ge "$CRASH_ALL_AT" ] \
         && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
         echo "crash test: SIGKILL every node at sequence $min"
