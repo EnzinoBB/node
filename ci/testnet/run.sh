@@ -9,6 +9,7 @@
 #        WORK (default ./testnet-run)
 #        TRUSTED_NODES (default NODES): only the first TRUSTED_NODES nodes are initial confidants
 #        (odd, 5 to 25); the others, up to 61 nodes in all, are ordinary nodes
+#        ROUND_ELAPSE_MS (default 20000): round_elapse_time of every node
 #        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
 #        of the nodes and executors in resources.tsv, and prints a summary at the end
 #        FUND (default 0; needs a -DCREDITS_TESTNET=ON binary): genesis funds go to a generated master
@@ -138,6 +139,11 @@ CONTRACT_LOAD_SECONDS=${CONTRACT_LOAD_SECONDS:-0}
 CONTRACT_WRITE_RATE=${CONTRACT_WRITE_RATE:-1}
 CONTRACT_READ_RATE=${CONTRACT_READ_RATE:-5}
 SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
+# a node starts a bootstrap when its round lasts this long. The consensus's own fallback for a
+# silent trusted node takes about 12.5 s, so below that a slow round is pre-empted by a bootstrap,
+# and a bootstrap of a full table re-sent every 10 s never completes (official stage-1 hash race):
+# 20 s by default (mainnet default 60 s); bootstrap-livelock keeps 10 s to reproduce the race
+ROUND_ELAPSE_MS=${ROUND_ELAPSE_MS:-20000}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
 RESTART_AT=${RESTART_AT:-300}
@@ -358,7 +364,7 @@ ipv6=false
 traverse_nat=false
 min_neighbours=1
 max_neighbours=16
-round_elapse_time=10000
+round_elapse_time=$ROUND_ELAPSE_MS
 
 [host_input]
 ip=127.0.0.1
@@ -1209,6 +1215,11 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
+# round, R-x.1 and up, that never gives way to R-(x+1).0): the last three round headers of n1
+stuck=$(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -3 | grep -vc '\.0 ' || true)
+[ "$stuck" -lt 3 ] || { echo "FAIL: the network ended stuck in a bootstrap round ($(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -1 | sed -E 's/.*(R-[^ ]*).*/\1/'))"; exit 1; }
+
 # who took part in consensus: trusted per round (from n1's round headers) and how many nodes were
 # trusted at least once (a node logs TRUSTED [index] in the rounds it is trusted in)
 per_round=$(grep -ah 'Trusted count:' "$WORK/n1/node.log" | sed -E 's/.*Trusted count: ([0-9]+).*/\1/' | sort -n | uniq -c \
