@@ -105,6 +105,14 @@ quick-starts after a conversion.
   memory and retries.
 - **Pruned storage.** A pruned node answers NoSuchBlocks for blocks it has pruned, so a peer
   asks another node for them. `TransactionsListGet` skips pruned blocks.
+- **Contract replay.** A node that syncs re-executes contract calls to recover their states.
+  For some contracts this is not reproducible (official behaviour): a game that reads its own
+  balance sees it after the block's payout. The state then stays out of date, and the fee of a
+  later payout of the contract can be charged to an earlier caller. Such a node can disagree with
+  the network on a caller's balance by a fee, and mainnet nodes already disagree among themselves
+  on some of these wallets. The node now logs a warning when a state declared by a block is not
+  available; with `compatible_version=false` it would stop at the first block whose transaction
+  its own balances reject.
 
 ## Security and correctness fixes
 
@@ -158,9 +166,13 @@ rounds for both).
 
   Each package includes the JDK of the official release and the community build of the contract
   executor.
-- **`config.ini` in the packages.** It is the official one, with three changes:
+- **`config.ini` in the packages.** It is the official one, with four changes:
   - `[event_report]` is commented out (it reports node events to a fixed address);
   - `executor_commit_max` accepts the community executor;
+  - `compatible_version=true`, the default of the node binary (the official file sets `false`):
+    a synced block that fails the node's own transaction check is logged
+    (`skip block validation`) and stored, instead of stopping the node at it for good. See
+    "Contract replay" below;
   - the pruned package adds a `[storage]` section.
 
   The executor listens on 127.0.0.1 only.

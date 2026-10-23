@@ -35,6 +35,7 @@ lines under the new release.
 | PR | Change |
 |---|---|
 | #82 | csnode: a node still syncing logs a missing round table of the network's current round as a warning (the block comes with the sync); an error only when it is not behind |
+| #83 | packaging, solver: `compatible_version=true` in the mainnet `config.ini` (the binary's default; the official file's `false` stops a syncing node for good at a block whose transaction its replayed balances reject); a warning when a contract state declared by a block is not available while replaying |
 
 ## community.10 — 2026-10-23
 
