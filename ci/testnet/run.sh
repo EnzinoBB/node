@@ -295,10 +295,9 @@ api_settings() {
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
-    # the node asks its new executor for its version this long after starting it, and disables it
-    # for good if it does not answer: dozens of JVMs starting at once on one machine take longer
-    # than the 7 s default. They do start at once: a node that stops kills every contract-executor
-    # JVM of the machine (ExecutorManager, jps), and each node relaunches its own
+    # the node asks its new executor for its version every second for this long, and disables it for
+    # good if it never answers: dozens of JVMs starting at once on one machine (a power cut, a big
+    # network) can take longer than the 7 s default
     echo "executor_check_version_delay=60000"
     cat > "$WORK/n$i/settings.properties" <<PROPS
 node.api.host=127.0.0.1
