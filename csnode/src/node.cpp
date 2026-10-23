@@ -3349,18 +3349,22 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
             const auto& got = rPackage.poolMetaInfo();
             const auto verdict = cs::lastBlockVerdict(mask, got.realTrustedMask, Consensus::MinTrustedNodes);
             const bool samePosition = got.sequenceNumber == own.sequenceNumber && got.previousHash == own.previousHash;
-            if (cs::TrustedMask::trustedSize(got.realTrustedMask) > cs::TrustedMask::trustedSize(mask)) {  // official rule
+            const bool moreTrusted = cs::TrustedMask::trustedSize(got.realTrustedMask) > cs::TrustedMask::trustedSize(mask);
+            const bool deferred = !moreTrusted && verdict == cs::LastBlockVerdict::Take && samePosition
+                                  && getBlockChain().hasDeferredBlock(own.sequenceNumber);
+            const bool verifies = deferred && getBlockChain().packageBlockVerifies(rPackage);
+            if (moreTrusted) {  // official rule
                 csdebug() << "Current Roundpackage of " << rNum << " will be replaced by new one";
                 roundPackageCache_.push_back(rPackage);
             }
-            else if (verdict == cs::LastBlockVerdict::Take && samePosition && getBlockChain().hasDeferredBlock(own.sequenceNumber)
-                     && getBlockChain().packageBlockVerifies(rPackage)) {
+            else if (verifies) {
                 // the writer's package carries another block of the same sequence (a stage-3 retry race):
                 // a majority of the round's trusted signed it and the others cannot form a round on their
                 // own, and its signatures verify: continue with the writer's round; updateLastBlock takes its block
                 cslog() << "NODE> round package " << rNum << " carries block #" << own.sequenceNumber << " with real trusted "
                         << cs::TrustedMask::toString(got.realTrustedMask) << " against own " << cs::TrustedMask::toString(mask)
                         << ": taking the writer's package";
+                getBlockChain().allowTakeover(own.sequenceNumber);
                 roundPackageCache_.push_back(rPackage);
             }
             else {
@@ -3368,9 +3372,12 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
                 // the same block with another set of real trusted is another block: the writer's round
                 // goes on with it, this node keeps its own and will not match the next hashes
                 if (samePosition && verdict != cs::LastBlockVerdict::Same) {
+                    const char* reason = verdict != cs::LastBlockVerdict::Take ? cs::toString(verdict)
+                                         : !deferred ? "the own block is no longer deferred"
+                                                     : "the package's signatures do not sign the writer's block";
                     cswarning() << "NODE> block #" << own.sequenceNumber << " differs from the round package's: real trusted "
                                 << cs::TrustedMask::toString(got.realTrustedMask) << " there, " << cs::TrustedMask::toString(mask)
-                                << " here (" << cs::toString(verdict) << "), this node keeps its own (fork)";
+                                << " here (" << reason << "), this node keeps its own (fork)";
                 }
                 roundPackageCache_.push_back(currentRoundPackage_);
                 rPackage = currentRoundPackage_;

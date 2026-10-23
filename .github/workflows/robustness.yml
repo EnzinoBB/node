@@ -292,6 +292,11 @@ jobs:
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
             manual: true
+          # the same with block rewards and a long transfer load, so that a fork round moves fees and
+          # rewards between sets of signers (the takeover of the writer's block); run by name, repeated
+          - name: bootstrap-livelock-rewards
+            env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 REWARD_ROUND=100 LOAD_SECONDS=2400 TARGET_SEQ=3000
+            manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=3000

@@ -50,3 +50,13 @@ TEST(BlockTakeover, OnlyTakeAndMoreSignaturesLetThePackageWin) {
     EXPECT_FALSE(cs::packageBlockWins(LastBlockVerdict::KeepNoMajority));
     EXPECT_FALSE(cs::packageBlockWins(LastBlockVerdict::KeepOtherSideMayWin));
 }
+
+// the smallest and the in-between rounds: Take needs a majority and fewer than MinTrustedNodes outside
+TEST(BlockTakeover, RoundSizeBoundaries) {
+    EXPECT_EQ(lastBlockVerdict(cs::Bytes(4, 0), cs::Bytes{0, 1, 2, 255}, kMinTrusted), LastBlockVerdict::Take);
+    EXPECT_EQ(lastBlockVerdict(cs::Bytes(6, 0), cs::Bytes{0, 1, 2, 255, 255, 255}, kMinTrusted), LastBlockVerdict::KeepNoMajority);
+    EXPECT_EQ(lastBlockVerdict(cs::Bytes(6, 0), cs::Bytes{0, 1, 2, 3, 255, 255}, kMinTrusted), LastBlockVerdict::Take);
+    EXPECT_EQ(lastBlockVerdict(cs::Bytes(7, 0), cs::Bytes{0, 1, 2, 3, 255, 255, 255}, kMinTrusted), LastBlockVerdict::Take);
+    EXPECT_EQ(lastBlockVerdict(cs::Bytes(8, 0), cs::Bytes{0, 1, 2, 3, 4, 255, 255, 255}, kMinTrusted), LastBlockVerdict::Take);
+    EXPECT_EQ(lastBlockVerdict(cs::Bytes(8, 0), cs::Bytes{0, 1, 2, 3, 255, 255, 255, 255}, kMinTrusted), LastBlockVerdict::KeepNoMajority);
+}
