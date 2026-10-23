@@ -311,7 +311,6 @@ def load(args, client_for, master, counter, nodes, read_nodes):
     # others in a round; a rejected call is an answer, not a fault, and is counted on its own
     rejected = [0]
     lock = threading.Lock()
-    stop_at = time.time() + args.load_seconds
     writers = list(range(1, nodes + 1))
     accounts = {i: Account(hashlib.sha256(master.pk + b"contract writer %d" % i).digest()) for i in writers}
     funder = Client(9090, 300)
@@ -323,10 +322,16 @@ def load(args, client_for, master, counter, nodes, read_nodes):
     deadline = time.time() + 300
     while time.time() < deadline and any(balance(funder, a.pk) < 1000 for a in accounts.values()):
         time.sleep(5)
+    # the load window starts once the writers are funded (funding N accounts takes a block each)
+    stop_at = time.time() + args.load_seconds
 
     def writer(i):
         account = accounts[i]
         period = len(writers) / args.write_rate if args.write_rate > 0 else None
+        # The writers start together and stay in step: their calls land in one block and run in one
+        # execution cycle of the contract. Spread over the period they land in separate blocks, and
+        # every call waits for the previous one's new state (about 6 rounds): with 2 calls a second
+        # the queue grows (scale run 39876040185: write p50 12.6 s at 9 nodes, 37 s at 51)
         while period and time.time() < stop_at:
             t0 = time.time()
             ok = False
