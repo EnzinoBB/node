@@ -1229,6 +1229,11 @@ fi
 stuck=$(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -3 | grep -vc '\.0 ' || true)
 [ "$stuck" -lt 3 ] || { echo "FAIL: the network ended stuck in a bootstrap round ($(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -1 | sed -E 's/.*(R-[^ ]*).*/\1/'))"; exit 1; }
 
+# who signs the blocks, per node and, with mixed binaries, per binary (node 1's API, needs FUND=1)
+if [ "$FUND" = "1" ]; then
+    (cd "$HERE" && python3 signers.py "$WORK" "$NODES" "$(( $(seq_of 1) - 1 ))" $([ -n "$BIN_ALT" ] && echo --alt-even)) || true
+fi
+
 # who took part in consensus: trusted per round (from n1's round headers) and how many nodes were
 # trusted at least once (a node logs TRUSTED [index] in the rounds it is trusted in)
 per_round=$(grep -ah 'Trusted count:' "$WORK/n1/node.log" | sed -E 's/.*Trusted count: ([0-9]+).*/\1/' | sort -n | uniq -c \

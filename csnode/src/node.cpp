@@ -109,6 +109,8 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&blockChain_.stopNode, this, &Node::stop);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::processSpecialInfo);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, static_cast<void (Node::*)(const csdb::Pool&)>(&Node::logStateDigest));
+    // a deferred block replaced by the writer's: fees and reward moved, so the digest of that sequence too
+    cs::Connector::connect(&blockChain_.lastBlockReplacedEvent, this, static_cast<void (Node::*)(const csdb::Pool&)>(&Node::logStateDigest));
     cs::Connector::connect(&blockChain_.uncertainBlock, this, &Node::sendBlockRequestToConfidants);
     cs::Connector::connect(&blockChain_.orderNecessaryBlock, this, &Node::sendNecessaryBlockRequest);
     cs::Connector::connect(&stat_.accountInitiationRequest, this, &Node::accountInitiationRequest);
@@ -3343,22 +3345,39 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
     else {//if trusted node has probably received a new RP with not full stake, but has an RP with full one
         if (rPackage.roundTable().round == currentRoundPackage_.roundTable().round) {
             auto mask = currentRoundPackage_.poolMetaInfo().realTrustedMask;
-            if (cs::TrustedMask::trustedSize(rPackage.poolMetaInfo().realTrustedMask) > cs::TrustedMask::trustedSize(mask)) {
+            const auto& own = currentRoundPackage_.poolMetaInfo();
+            const auto& got = rPackage.poolMetaInfo();
+            const auto verdict = cs::lastBlockVerdict(mask, got.realTrustedMask, Consensus::MinTrustedNodes);
+            const bool samePosition = got.sequenceNumber == own.sequenceNumber && got.previousHash == own.previousHash;
+            const bool moreTrusted = cs::TrustedMask::trustedSize(got.realTrustedMask) > cs::TrustedMask::trustedSize(mask);
+            const bool deferred = !moreTrusted && verdict == cs::LastBlockVerdict::Take && samePosition
+                                  && getBlockChain().hasDeferredBlock(own.sequenceNumber);
+            const bool verifies = deferred && getBlockChain().packageBlockVerifies(rPackage);
+            if (moreTrusted) {  // official rule
                 csdebug() << "Current Roundpackage of " << rNum << " will be replaced by new one";
+                roundPackageCache_.push_back(rPackage);
+            }
+            else if (verifies) {
+                // the writer's package carries another block of the same sequence (a stage-3 retry race):
+                // a majority of the round's trusted signed it and the others cannot form a round on their
+                // own, and its signatures verify: continue with the writer's round; updateLastBlock takes its block
+                cslog() << "NODE> round package " << rNum << " carries block #" << own.sequenceNumber << " with real trusted "
+                        << cs::TrustedMask::toString(got.realTrustedMask) << " against own " << cs::TrustedMask::toString(mask)
+                        << ": taking the writer's package";
+                getBlockChain().allowTakeover(own.sequenceNumber);
                 roundPackageCache_.push_back(rPackage);
             }
             else {
                 csdebug() << "Throw received RP " << rNum << " using the own one";
                 // the same block with another set of real trusted is another block: the writer's round
-                // goes on with it, this node keeps its own and will not match the next hashes (a
-                // stage-3 retry race). Logged only; the decision is the official one
-                const auto& own = currentRoundPackage_.poolMetaInfo();
-                const auto& got = rPackage.poolMetaInfo();
-                if (got.sequenceNumber == own.sequenceNumber && got.previousHash == own.previousHash
-                    && cs::Utils::maskToBits(got.realTrustedMask) != cs::Utils::maskToBits(own.realTrustedMask)) {
+                // goes on with it, this node keeps its own and will not match the next hashes
+                if (samePosition && verdict != cs::LastBlockVerdict::Same) {
+                    const char* reason = verdict != cs::LastBlockVerdict::Take ? cs::toString(verdict)
+                                         : !deferred ? "the own block is no longer deferred"
+                                                     : "the package's signatures do not sign the writer's block";
                     cswarning() << "NODE> block #" << own.sequenceNumber << " differs from the round package's: real trusted "
-                                << cs::TrustedMask::toString(got.realTrustedMask) << " there, " << cs::TrustedMask::toString(own.realTrustedMask)
-                                << " here, this node keeps its own (fork)";
+                                << cs::TrustedMask::toString(got.realTrustedMask) << " there, " << cs::TrustedMask::toString(mask)
+                                << " here (" << reason << "), this node keeps its own (fork)";
                 }
                 roundPackageCache_.push_back(currentRoundPackage_);
                 rPackage = currentRoundPackage_;

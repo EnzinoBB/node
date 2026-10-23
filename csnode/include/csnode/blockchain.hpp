@@ -193,6 +193,16 @@ public:
     bool updateLastBlock(cs::RoundPackage& rPackage);
     bool updateLastBlock(cs::RoundPackage& rPackage, const csdb::Pool& poolFrom);
     bool deferredBlockExchange(cs::RoundPackage& rPackage, const csdb::Pool& newPool);
+    // the writer's block from this node's block of the same sequence and the round package's meta
+    static csdb::Pool blockFromPackageMeta(const csdb::Pool& from, const cs::PoolMetaInfo& meta);
+    // a block of this sequence is deferred (not yet on disk), so it can still be replaced
+    bool hasDeferredBlock(cs::Sequence sequence) const;
+    // the round package's pool signatures sign the writer's block built from the deferred block of
+    // that sequence, checked against the deferred block's confidants (no state change)
+    bool packageBlockVerifies(const cs::RoundPackage& rPackage) const;
+    // the node adopted the writer's round package for the block of this sequence: updateLastBlock may
+    // take the writer's block (once)
+    void allowTakeover(cs::Sequence sequence);
     bool isSpecial(const csdb::Transaction& t);
     cs::Bytes checkForSpecialTransactions(const std::vector<csdb::Transaction>& trxs, cs::Sequence seq);
     cs::Sequence getLastSeq() const;
@@ -268,6 +278,8 @@ public signals:
 
     /** @brief The new block event. Raised when the next incoming block is finalized and just before stored into chain */
     cs::StoreBlockSignal storeBlockEvent;
+    // the deferred block was replaced by the writer's block of the same sequence (not stored again)
+    cs::StoreBlockSignal lastBlockReplacedEvent;
 
     cs::NeedStopSignal stopNode;
 
@@ -551,6 +563,7 @@ private:
     // saved from them and no further block is recorded; the node stops and the next start reads the
     // blocks again from the last checkpoint
     std::atomic_bool cachesTainted_ = false;
+    std::atomic<cs::Sequence> takeoverAllowed_ = cs::kWrongSequence;
     // saves deferredBlock_; an exception of the storage (an engine that needs recovery) stops the node
     bool saveDeferredBlock();
 

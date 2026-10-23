@@ -6,8 +6,10 @@ list of changes, pull request by pull request, see [CHANGES.md](CHANGES.md).
 
 ## What stays the same
 
-- **Network.** The protocol version (532), the block format, the hashes and the consensus rules
-  are unchanged. A community node syncs and takes part in consensus alongside official nodes.
+- **Network.** The protocol version (532), the block format and the hashes are unchanged, and so
+  are the consensus rules, except for the cases listed under "Consensus fixes" below, which only
+  change what a node does when a round ends in conflict. A community node syncs and takes part in
+  consensus alongside official nodes.
 - **Configuration.** The official `config.ini` works unchanged. Without a `[storage]` section the
   node is a full node on BerkeleyDB, like the official one. It opens the same `db/` folder and
   converts nothing.
@@ -123,6 +125,30 @@ consensus rules.
   - the rewards of an uncertain block kept when the trusted mask differs;
   - the revert of a timed delegation;
   - uninitialised consensus settings.
+
+## Consensus fixes
+
+- **Two blocks of one round.** When a trusted node does not get one stage-2 in time, it fetches it
+  with a request that takes exactly as long as the others wait for its stage-3. Depending on a few
+  milliseconds, some trusted nodes finish the round with every signature while the others retry
+  stage 3 without the late node, and the writer publishes the retried block. The two blocks differ
+  only in the set of real trusted. The official node keeps its own block for good, then no longer
+  matches the following rounds (seen in CI as a network stuck in bootstrap). The community node
+  logs this as a fork and, if it is a trusted node that still holds the block undeferred, takes
+  the writer's block when:
+  - a majority of all the trusted of the round signed it, checked against the node's own list of
+    the round's trusted, so a minority of dishonest signers can never make it switch;
+  - the nodes outside that set are too few to form a round on their own block.
+
+  Fees and the block reward move to the new set of signers.
+- **The official "more signatures" rule works.** The official node meant to replace its block by
+  one with more signatures, but the check before the replacement compared the block with itself and
+  always failed. It now works. Residual risk, as in the official design: a package with more
+  signatures that reaches only part of the network would move only that part.
+
+Official nodes on the side that keeps its block behave as before; mixed networks do not fork (CI:
+equal state digests with official binaries on half of the nodes, and the same share of signed
+rounds for both).
 
 ## Packages and Docker
 
