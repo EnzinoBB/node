@@ -286,11 +286,23 @@ jobs:
           - name: contracts-net-loss
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 CONTRACTS=1
             contracts: true
-          # an official stage-1 hash race: with round_elapse_time 10 s a slow round under loss can
-          # trigger a bootstrap of the full table, which then never completes. Intermittent (it
-          # stalled 1 run of 3 at 10 s, none at 3000 blocks in run 39878938046): run by name, repeated
+          # an official bootstrap livelock: with round_elapse_time 10 s a slow round under loss can
+          # trigger a bootstrap; the starter re-sends the table every 10 s and each re-sent table
+          # restarts the consensus, which needs up to 12.5-16.5 s when a stage message is late.
+          # Intermittent and long (3000 blocks): run by name, repeated
           - name: bootstrap-livelock
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
+            manual: true
+          # bootstrap-livelock with debug logs on every node and a shorter target, to see which stage
+          # message is late when it stalls (run by name, several times: it is intermittent)
+          - name: bootstrap-livelock-debug
+            env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 LOG_DEBUG_NODES=1,2,3,4,5,6,7 TARGET_SEQ=2000
+            manual: true
+          # a trusted node frozen for 15 s (> round_elapse_time) with debug logs on three nodes: a
+          # bootstrap with a silent member. The network recovered in both runs so far, so this alone
+          # does not reproduce the livelock seen under loss (run by name, for diagnosis)
+          - name: bootstrap-pause
+            env: PAUSE_AT=600 PAUSE_SECONDS=15 ROUND_ELAPSE_MS=10000 LOG_DEBUG_NODES=1,2,3 TARGET_SEQ=1500
             manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
