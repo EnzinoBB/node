@@ -44,6 +44,7 @@ lines under the new release.
 | #74 | api: contract getters and the deployer's contract list take the deploy the smart contracts keep (a pruned node no longer has its block, and answered getters with an empty success); a getter with nothing to execute, or no executor, now fails |
 | #75 | ci(testnet): the contract load window starts after funding its writers, block rates from the first block (found in the slowdown analysis of the scale runs) |
 | #76 | ci(testnet): round_elapse_time 20 s by default (10 s pre-empted slow rounds with a bootstrap); a run that ends stuck in a bootstrap round fails; bootstrap-livelock exercises an official stage-1 hash race (intermittent; run by name) |
+| #79 | csnode, ci: a node that keeps its own block while the round goes on with another block of the same sequence logs a warning (a fork from a stage-3 retry race, official behaviour); a test network run with such a fork fails |
 
 ## community.9 — 2026-10-22
 

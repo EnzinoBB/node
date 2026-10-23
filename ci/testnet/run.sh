@@ -1215,6 +1215,15 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# two blocks of one sequence: a node kept its own block while the round went on on the writer's
+# (csnode/src/blockchain.cpp updateLastBlock logs it), a fork that nothing reconciles
+forks=$(grep -al 'this node keeps its own (fork)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+if [ -n "$forks" ]; then
+    grep -ah 'this node keeps its own (fork)' "$WORK"/n*/node.log | head -5
+    echo "FAIL: fork, nodes on another block of the same sequence: $forks"
+    exit 1
+fi
+
 # a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
 # round, R-x.1 and up, that never gives way to R-(x+1).0): the last three round headers of n1
 stuck=$(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -3 | grep -vc '\.0 ' || true)
