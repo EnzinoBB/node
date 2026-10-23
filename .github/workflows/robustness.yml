@@ -286,6 +286,12 @@ jobs:
           - name: contracts-net-loss
             env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 CONTRACTS=1
             contracts: true
+          # reproduction of an official stage-1 hash race: with round_elapse_time 10 s a slow round
+          # under loss triggers a bootstrap of the full table, which never completes; fails until the
+          # node keeps the hashes of a same-round bootstrap (manual: run by name)
+          - name: bootstrap-livelock
+            env: NET_FAULT=loss NET_FAULT_PCT=15 NET_FAULT_NODES=3,5 ROUND_ELAPSE_MS=10000 TARGET_SEQ=3000
+            manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=3000
@@ -302,7 +308,8 @@ jobs:
     # a manual run can pick scenarios; the others stop at once
     env:
       # the scenarios with a NODE_STORAGE list are laid out for 7 nodes
-      SELECTED: ${{ (inputs.only == '' || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') }}
+      # manual scenarios (known failures kept as reproductions) run only when named in `only`
+      SELECTED: ${{ ((inputs.only == '' && matrix.manual != true) || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') }}
     steps:
       - name: Skip unselected scenario
         if: env.SELECTED != 'true'
