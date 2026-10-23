@@ -32,6 +32,10 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.10 — 2026-10-23
+
 | PR | Change |
 |---|---|
 | #67 | csdb, ci, docs: conversion follow-ups from the review of #65 (contract-records message, keep a copy of `db/` before converting from berkeleydb, sturdier db-convert scenario) |
@@ -46,6 +50,12 @@ lines under the new release.
 | #76 | ci(testnet): round_elapse_time 20 s by default (10 s pre-empted slow rounds with a bootstrap); a run that ends stuck in a bootstrap round fails; bootstrap-livelock exercises an official stage-1 hash race (intermittent; run by name) |
 | #79 | csnode, ci: a node that keeps its own block while the round goes on with another block of the same sequence logs a warning (a fork from a stage-3 retry race, official behaviour); a test network run with such a fork fails |
 | #80 | csnode: a trusted node whose block of the last round differs from the writer's only in the real trusted set takes the writer's block when a majority of the round's trusted signed it (verified against its own confidants) and the other set cannot form a round; fees and reward move to the new set; the official "more signatures" replacement, whose consistency check could never pass, now works (the rebuilt block carries the reward and the bootstrap flag). Consensus-relevant |
+
+#70, #71 and #80 change what a node does in consensus edge cases (bootstrap with more than 8
+confidants, bootstrap tables checked against the node's own state, two blocks of one round); see
+[differences.md](differences.md). #73 and #74 fix the contract executor start and contract reads on
+pruned nodes. The rest is CI: smart contracts in the robustness suite, networks of up to 61 nodes,
+stake-based election and nodes below the minimum stake, a scale workflow, fork detection.
 
 ## community.9 — 2026-10-22
 
