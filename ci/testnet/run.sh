@@ -142,7 +142,7 @@ SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
 # a node starts a bootstrap when its round lasts this long. The consensus's own fallback for a
 # silent trusted node takes about 12.5 s, so below that a slow round is pre-empted by a bootstrap,
 # and a bootstrap of a full table re-sent every 10 s never completes (official stage-1 hash race):
-# 20 s by default (mainnet default 60 s); bootstrap-livelock keeps 10 s to reproduce the race
+# 20 s by default (mainnet default 60 s); bootstrap-livelock keeps 10 s for the race fixed in #77
 ROUND_ELAPSE_MS=${ROUND_ELAPSE_MS:-20000}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}

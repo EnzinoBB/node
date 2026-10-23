@@ -639,7 +639,9 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
 
     cs::Conveyer::instance().updateRoundTable(rNum, roundTable);
     stat_.onRoundChanged();
-    onRoundStart(roundTable, false);
+    // a table of the round this node is in restarts that round: the stage-1 hashes already received
+    // stay (the starter keeps its own, see onRoundTimeElapsed and bootstrap); another round starts afresh
+    onRoundStart(roundTable, cs::bootstrapKeepsRoundHashes(rNum, currentRound));
     reviewConveyerHashes();
 
     if (cs::ConfigHolder::instance().config()->isSyncOn()) {
@@ -3566,7 +3568,12 @@ void Node::sendHash(cs::RoundNumber round) {
 }
 
 void Node::getHash(const uint8_t* data, const size_t size, cs::RoundNumber rNum, const cs::PublicKey& sender) {
-    if (myLevel_ != Level::Confidant) {
+    // Not a confidant of the current table: the sender's table of the same round lists this node, as
+    // in a bootstrap this node has not taken yet. The official node drops the hash, so the last node
+    // to take a bootstrap table never gets enough hashes and the bootstrap can repeat for ever (a
+    // stage-1 race). The solver caches a verified hash of the round after the last block and replays
+    // it when the table arrives (gotConveyerSync); a hash of any other round is dropped as before
+    if (myLevel_ != Level::Confidant && !cs::isHashKeptWhileNotConfidant(rNum, blockChain_.getLastSeq())) {
         csdebug() << "NODE> ignore hash as no confidant";
         return;
     }
@@ -3659,6 +3666,9 @@ void Node::getHash(const uint8_t* data, const size_t size, cs::RoundNumber rNum,
         myRealTrustedSize = cs::TrustedMask::trustedSize(lastTrusted);
     }
 
+    if (myLevel_ != Level::Confidant) {
+        csdebug() << "NODE> cache hash of round " << rNum << " until a table of this round lists this node";
+    }
     solver_->gotHash(std::move(sHash), myRealTrustedSize);
 }
 

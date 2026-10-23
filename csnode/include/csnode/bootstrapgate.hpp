@@ -42,6 +42,18 @@ inline bool isBootstrapStallAccepted(uint64_t msSinceRoundChange, uint64_t msSin
     return msSinceRoundChange >= bootstrapStallThresholdMs(roundElapseMs);
 }
 
+// A hash is evidence for the round after this node's last block only (stage 1 compares it with the
+// last block's hash): a node that is not a confidant keeps such a hash for a table of that round
+inline bool isHashKeptWhileNotConfidant(RoundNumber rNum, Sequence lastSeq) {
+    return rNum == lastSeq + 1;
+}
+
+// A bootstrap table of the round the node is already in restarts that round: the hashes already
+// received stay valid (the official node keeps them across its own same-round table changes)
+inline bool bootstrapKeepsRoundHashes(RoundNumber tableRound, RoundNumber currentRound) {
+    return tableRound == currentRound;
+}
+
 }  // namespace cs
 
 #endif  // BOOTSTRAPGATE_HPP

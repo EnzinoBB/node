@@ -43,6 +43,7 @@ lines under the new release.
 | #73 | api: the executor version check asks every second up to `executor_check_version_delay` instead of once after it (the node starts as soon as its executor answers); with `executor_multi_instance` a stopping node no longer kills the other nodes' executors |
 | #74 | api: contract getters and the deployer's contract list take the deploy the smart contracts keep (a pruned node no longer has its block, and answered getters with an empty success); a getter with nothing to execute, or no executor, now fails |
 | #76 | ci(testnet): round_elapse_time 20 s by default (10 s pre-empted slow rounds with a bootstrap); a run that ends stuck in a bootstrap round fails; bootstrap-livelock reproduces an official stage-1 hash race (run by name) |
+| #77 | csnode: a node keeps the stage-1 hashes of a same-round bootstrap (official race: the last node to take a bootstrap table never got enough hashes, and the bootstrap could repeat for ever) |
 
 ## community.9 — 2026-10-22
 

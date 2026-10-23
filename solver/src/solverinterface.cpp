@@ -117,12 +117,12 @@ void SolverCore::gotHash(const cs::StageHash&& sHash, uint8_t currentTrustedSize
     if (sHash.realTrustedSize < currentTrustedSize) {
         csdebug() << "Stake value is lower than that in this node, trow this hash";
     }
-    auto rNum = cs::Conveyer::instance().currentRoundNumber();
-    bool isBootstrap = pnode->isBootstrapRound();
+    // one entry per sender: a later hash of the same sender replaces the earlier one (realTrustedSize
+    // has no other use), so hashes kept across bootstrap retries do not pile up
     auto it = std::find_if(
-        recv_hash.cbegin(), recv_hash.cend(), 
-        [sHash, rNum, isBootstrap](const cs::StageHash& sh) {
-            return ((sHash.sender == sh.sender) && (isBootstrap || sHash.realTrustedSize > sh.realTrustedSize) && (sHash.round == rNum));
+        recv_hash.cbegin(), recv_hash.cend(),
+        [&sHash](const cs::StageHash& sh) {
+            return sHash.sender == sh.sender;
         }
     );
     if (it != recv_hash.cend()) {

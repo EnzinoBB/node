@@ -7,6 +7,8 @@
 using cs::bootstrapStallThresholdMs;
 using cs::isBootstrapRoundInWindow;
 using cs::isBootstrapStallAccepted;
+using cs::bootstrapKeepsRoundHashes;
+using cs::isHashKeptWhileNotConfidant;
 
 // the rounds an honest starter sends to a receiver: its last block + 1, the receiver being level with
 // it, one block ahead or behind, or still fetching blocks with the network round learned
@@ -60,4 +62,21 @@ TEST(BootstrapGate, YoungOrBootstrappingNodesTakeTheTable) {
     EXPECT_TRUE(isBootstrapStallAccepted(0, 9999, 10000, false));
     EXPECT_FALSE(isBootstrapStallAccepted(0, 10000, 10000, false));
     EXPECT_TRUE(isBootstrapStallAccepted(0, 3600000, 10000, true));
+}
+
+// a node that is not a confidant keeps a hash only for the round after its last block
+TEST(BootstrapGate, HashesKeptWhileNotConfidant) {
+    EXPECT_TRUE(isHashKeptWhileNotConfidant(501, 500));
+    EXPECT_TRUE(isHashKeptWhileNotConfidant(1, 0));
+    EXPECT_FALSE(isHashKeptWhileNotConfidant(500, 500));
+    EXPECT_FALSE(isHashKeptWhileNotConfidant(502, 500));
+    EXPECT_FALSE(isHashKeptWhileNotConfidant(0, 0));
+}
+
+// a bootstrap table of the current round keeps its hashes, any other round starts afresh
+TEST(BootstrapGate, SameRoundBootstrapKeepsHashes) {
+    EXPECT_TRUE(bootstrapKeepsRoundHashes(501, 501));
+    EXPECT_FALSE(bootstrapKeepsRoundHashes(501, 0));
+    EXPECT_FALSE(bootstrapKeepsRoundHashes(500, 501));
+    EXPECT_FALSE(bootstrapKeepsRoundHashes(502, 501));
 }

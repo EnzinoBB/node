@@ -81,6 +81,13 @@ quick-starts after a conversion.
   that is several blocks behind and has not learned the round yet, takes the next table instead.
   A bootstrap through the diag API must name a round within two of what the nodes know (their
   last block + 1, as the sending node uses when it raises the round).
+- **A bootstrap that completes.** Each node sends its stage-1 hash as soon as it takes a bootstrap
+  table; the official node drops a hash that arrives before it has taken the table itself, so the
+  last node to take it never gets enough hashes and, with a short `round_elapse_time`, the
+  bootstrap repeats for ever. The community node keeps those hashes (verified as usual) and uses
+  them when the table arrives. It never accepts a hash an official confidant would reject, and the
+  block is built from the same stage messages, so a mixed network does not fork; official nodes
+  still drop theirs.
 - **State kept across a quick start.** Pending consensus-settings changes, special orders and
   deployed smart contracts survive a quick start. The official node can lose them, or apply
   them differently, after a quick start.
