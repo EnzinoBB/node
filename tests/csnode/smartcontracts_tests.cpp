@@ -1,6 +1,7 @@
 #define TESTING
 
 #include <solver/smartcontracts.hpp>
+#include <solver/statefetcher.hpp>
 #include "clientconfigmock.hpp"
 #include "gtest/gtest.h"
 #include <csdb/transaction.hpp>
@@ -158,4 +159,52 @@ TEST(SmartContract, StaleMeansNotTheDeclaredState) {
     EXPECT_TRUE(cs::SmartContracts::is_stale(item));             // another state
     item.state.clear();
     EXPECT_TRUE(cs::SmartContracts::is_stale(item));             // no state at all
+}
+
+// step 3 of the contract state sync plan: a peer's state is taken only for the declared call and hash
+TEST(SmartContract, StateReplyIsCheckedAgainstTheDeclaration) {
+    using Check = cs::SmartContracts::StateReplyCheck;
+    cs::SmartContracts::StateItem item;
+    const std::string good = "state after 9.2";
+    cs::SmartContractRef declared;
+    declared.sequence = 9;
+    declared.transaction = 2;
+    cs::SmartContractRef older = declared, newer = declared;
+    older.sequence = 8;
+    newer.sequence = 10;
+
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, good, item), Check::Undeclared);
+    item.declared_ref = declared;
+    item.declared_hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(good.data()), good.size());
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, good, item), Check::Accepted);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, "a forged state", item), Check::HashMismatch);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, "", item), Check::HashMismatch);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(older, good, item), Check::Older);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(newer, good, item), Check::Newer);
+}
+
+TEST(SmartContract, StateFetcherPacesAndBacksOff) {
+    cs::StateFetcher f;
+    std::vector<csdb::Address> contracts;
+    for (uint8_t i = 1; i <= 20; ++i) {
+        contracts.push_back(csdb::Address::from_public_key(cs::Bytes(32, i)));
+        f.markStale(contracts.back());
+    }
+    EXPECT_TRUE(f.isWanted(contracts[0]));
+    // at most 16 a round, the rest the next round
+    EXPECT_EQ(f.due(100).size(), cs::StateFetcher::kRequestsPerRound);
+    EXPECT_EQ(f.due(101).size(), 4u);
+    EXPECT_TRUE(f.due(102).empty());
+    // asked again after the backoff, which doubles with each attempt up to the cap
+    EXPECT_EQ(f.due(100 + cs::StateFetcher::kBaseBackoff).size(), cs::StateFetcher::kRequestsPerRound);
+    EXPECT_EQ(cs::StateFetcher::backoff(0), 50u);
+    EXPECT_EQ(cs::StateFetcher::backoff(1), 100u);
+    EXPECT_EQ(cs::StateFetcher::backoff(20), cs::StateFetcher::kMaxBackoff);
+    // a verified state ends the requests, and a reply for a contract not asked for is not an answer
+    f.done(contracts[0]);
+    EXPECT_FALSE(f.isWanted(contracts[0]));
+    EXPECT_FALSE(f.isWanted(csdb::Address::from_public_key(cs::Bytes(32, 99))));
+    EXPECT_EQ(f.size(), 19u);
+    f.reset();
+    EXPECT_EQ(f.size(), 0u);
 }
