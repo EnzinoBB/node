@@ -152,7 +152,7 @@ struct Fixture {
         const auto t = root / "target";
         EXPECT_TRUE(csdb::backend::detect((t / "db").string(), false).empty());
         EXPECT_FALSE(fs::exists(t / "qs" / "150"));
-        EXPECT_FALSE(fs::exists(t / "qs" / "150.import"));
+        EXPECT_FALSE(fs::exists(t / "qs" / "150.tmp"));
         EXPECT_FALSE(fs::exists(t / "caches" / "hashdb"));
         EXPECT_FALSE(fs::exists(t / "caches" / "seqdb"));
         EXPECT_FALSE(fs::exists(t / "snapshot.json"));
@@ -309,6 +309,23 @@ TEST(SnapshotImport, RebuiltBlockWithoutSignaturesOrConfirmationsRejected) {
     if (built.ok) {
         EXPECT_FALSE(fx.import(built).ok);
         fx.expectNothingLeft();
+    }
+}
+
+TEST(SnapshotImport, FailedRocksDbImportLeavesNoFiles) {
+    Fixture fx("snapshot_import_rocksdb_fail");
+    auto& bytes = fx.chain.blocks[120];
+    const auto pool = csdb::Pool::from_binary(cs::Bytes(bytes));
+    bytes[pool.hashingLength() + sizeof(size_t)] ^= 1;
+    const auto built = fx.build();
+    ASSERT_TRUE(built.ok) << built.error;
+    EXPECT_FALSE(fx.import(built, "rocksdb").ok);
+    fx.expectNothingLeft();
+    // RocksDB writes on close: nothing may appear after the cleanup
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(fx.root / "target" / "db", ec)) {
+        EXPECT_NE(e.path().extension(), ".sst") << e.path();
+        EXPECT_NE(e.path().filename(), "CURRENT");
     }
 }
 

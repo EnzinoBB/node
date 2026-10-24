@@ -148,6 +148,12 @@ int run(const Config& config, const std::string& outDir) {
 int runImport(const Config& config, const std::string& manifestFile) {
     auto sayImport = []() -> std::ostream& { return std::cout << "import-snapshot: "; };
     const std::string dbPath = config.getPathToDB();
+    // db/ first, so that the import holds db/.lock while it writes: a node started in this folder
+    // meanwhile finds it in use
+    {
+        std::error_code ec;
+        fs::create_directories(dbPath, ec);
+    }
     if (dbcheck::lockedByAnotherProcess(dbPath)) {
         sayImport() << "a node is running on " << dbPath << ": stop it first" << std::endl;
         return 2;

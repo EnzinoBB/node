@@ -4,7 +4,9 @@
 #include <fstream>
 #include <vector>
 
+#include <fcntl.h>
 #include <sodium.h>
+#include <unistd.h>
 
 #include <csdb/database.hpp>
 #include <csdb/storage_backend.hpp>
@@ -70,6 +72,15 @@ bool fileMatches(const fs::path& path, const SnapshotFile& f, uint64_t chunkSize
     return true;
 }
 
+// on disk before the next step relies on it: a power cut must not leave a truncated checkpoint
+void syncPath(const fs::path& path, bool directory) {
+    const int fd = ::open(path.c_str(), directory ? O_RDONLY | O_DIRECTORY : O_RDONLY);
+    if (fd >= 0) {
+        ::fsync(fd);
+        ::close(fd);
+    }
+}
+
 bool stopped(const std::atomic<bool>* stop) {
     return stop && stop->load();
 }
@@ -81,7 +92,9 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
     std::error_code ec;
     const cs::Sequence S = m.seq;
     const fs::path qsFinal = nodeDir / "qs" / std::to_string(S);
-    const fs::path qsTmp = nodeDir / "qs" / (std::to_string(S) + ".import");
+    // ".tmp": the node's checkpoint manager removes such a leftover at its start and never takes it
+    // for a checkpoint
+    const fs::path qsTmp = nodeDir / "qs" / (std::to_string(S) + ".tmp");
     const fs::path caches = nodeDir / "caches";
     bool createdDb = false, createdQs = false, createdCaches = false;
 
@@ -98,6 +111,7 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
         if (createdCaches) {
             fs::remove_all(caches / "hashdb", ec);
             fs::remove_all(caches / "seqdb", ec);
+            fs::remove(caches / "blockhashes.rebuild", ec);
         }
         result.ok = false;
         result.error = reason;
@@ -154,6 +168,7 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
             return static_cast<bool>(out);
         });
         out.close();
+        syncPath(qsTmp / name, false);
         if (!ok || written != f->rawSize || !out) {
             return failWith(f->name + " does not decompress to its declared size", f->name);
         }
@@ -174,10 +189,12 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
     }
     createdDb = true;
     createdCaches = true;
-    {
+    // the database and the hash databases are closed when this returns: on failure their files are
+    // removed only then (RocksDB writes on close)
+    const auto [dbError, dbErrorFile] = [&]() -> std::pair<std::string, std::string> {
         auto db = csdb::backend::open(backend, dbPath.string());
         if (!db || !db->is_open()) {
-            return failWith("cannot create the " + backend + " database in " + dbPath.string());
+            return {"cannot create the " + backend + " database in " + dbPath.string(), std::string{}};
         }
         fs::create_directories(caches, ec);
         BlockHashes hashes(caches.string());
@@ -237,11 +254,11 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
         }, blocksFile ? blocksFile->rawSize : 0);
         if (!read || expected != S + 1) {
             hashes.close();
-            return failWith(reason.empty() ? "blocks.bin.lz4 is truncated or malformed" : reason, "blocks.bin.lz4");
+            return {reason.empty() ? "blocks.bin.lz4 is truncated or malformed" : reason, "blocks.bin.lz4"};
         }
         if (!batch.empty() && !db->put_batch(batch)) {
             hashes.close();
-            return failWith("cannot write blocks to the database");
+            return {"cannot write blocks to the database", std::string{}};
         }
 
         // 4. contract data
@@ -284,14 +301,21 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
             });
             if (!ok || !good || !pending.empty() || total != f->rawSize) {
                 hashes.close();
-                return failWith("contracts.bin.lz4 does not restore", f->name);
+                return {"contracts.bin.lz4 does not restore", f->name};
             }
         }
         if (!db->flush()) {
             hashes.close();
-            return failWith("cannot flush the database");
+            return {"cannot flush the database", std::string{}};
         }
         hashes.close();
+        if (hashes.rebuildRequested()) {
+            return {"cannot write the block hash databases", std::string{}};
+        }
+        return {};
+    }();
+    if (!dbError.empty()) {
+        return failWith(dbError, dbErrorFile);
     }
     if (!csdb::backend::writeMarker(dbPath.string(), backend)) {
         return failWith("cannot write the database marker");
@@ -303,6 +327,7 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
         return failWith("cannot move the checkpoint into place: " + ec.message());
     }
     createdQs = true;
+    syncPath(qsTmp.parent_path(), true);
     {
         std::ofstream out(nodeDir / "snapshot.json", std::ios::binary | std::ios::trunc);
         out << m.toJson();
@@ -311,6 +336,8 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
             return failWith("cannot write snapshot.json");
         }
     }
+    syncPath(nodeDir / "snapshot.json", false);
+    syncPath(nodeDir, true);
     result.ok = true;
     return result;
 }
