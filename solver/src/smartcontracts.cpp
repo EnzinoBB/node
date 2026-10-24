@@ -1533,6 +1533,38 @@ void SmartContracts::on_remove_block(const csdb::Pool& block) {
                         prev_seq = tmp;
                     }
 
+                    // the removed new_state declared the contract's state: the declaration goes back to the
+                    // latest successful new_state of the contract left on the chain, unknown without one
+                    if (item.declared_ref == ref) {
+                        item.declared_ref = SmartContractRef{};
+                        item.declared_hash = cs::Hash{};
+                        for (auto it_seq = all_contract_blocks.crbegin(); it_seq != all_contract_blocks.crend() && item.declared_hash == cs::Zero::hash; ++it_seq) {
+                            const csdb::Pool b = bc.loadBlock(*it_seq);
+                            const auto& trs = b.transactions();
+                            for (auto it_t = trs.crbegin(); it_t != trs.crend(); ++it_t) {
+                                if (!is_new_state(*it_t) || absolute_address(it_t->target()) != abs_addr) {
+                                    continue;
+                                }
+                                const csdb::UserField h = it_t->user_field(trx_uf::new_state::Hash);
+                                const csdb::UserField r = it_t->user_field(trx_uf::new_state::RefStart);
+                                if (!h.is_valid() || !r.is_valid()) {
+                                    continue;
+                                }
+                                const std::string bytes = h.value<std::string>();
+                                cs::Hash hash{};
+                                if (bytes.size() != hash.size()) {
+                                    continue;
+                                }
+                                std::copy(bytes.cbegin(), bytes.cend(), hash.begin());
+                                if (hash != cs::Zero::hash) {
+                                    item.declared_ref = SmartContractRef(r);
+                                    item.declared_hash = hash;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
                     // go through all blocks and re-execute contract
                     std::string executed_state;
                     csdb::Transaction executed_transaction;
@@ -3558,6 +3590,7 @@ void SmartContracts::net_update_contract_state(const csdb::Address& contract_abs
         }
         else {
             cswarning() << kLogPrefix << "ignore a state of " << to_base58(contract_abs_addr) << ", a contract this node does not know";
+            state_fetcher_.done(contract_abs_addr);
             return;
         }
 
@@ -3837,9 +3870,12 @@ Bytes SmartContracts::StateItem::to_bytes() {
             ++it;
         }
     }
-    // appended: a checkpoint of an earlier build has none, and an earlier build ignores them
-    os << declared_ref.sequence << declared_ref.transaction;
-    os << declared_hash;
+    // appended only when known: an item without a declaration keeps the bytes of earlier builds, whose
+    // checkpoints are checked against hashes of these bytes (quick_start_hashes.dat) when they load
+    if (declared_ref.is_valid() && declared_hash != cs::Zero::hash) {
+        os << declared_ref.sequence << declared_ref.transaction;
+        os << declared_hash;
+    }
     return data;
 }
 
