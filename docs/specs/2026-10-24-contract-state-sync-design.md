@@ -451,3 +451,12 @@ reply to our joiner. Whether 4a95aaaf builds against the current submodules has 
    healing on the next call enough?
 5. Should the fetcher ask the neighbours too when the confidants give no verified reply, in the
    first version or later?
+
+## Decisions (2026-10-24)
+
+1. Fee attribution: the rule of the live nodes (step 1), consensus-relevant, approved by the user.
+2. `sync_contract_execution` on by default in the first release (provisional re-execution, then the fetch).
+3. The published snapshot chain is not rebuilt now; a rebuild from a fixed full sync is a later decision.
+4. No unverified "majority repair" for contracts whose last call is pruned.
+5. Neighbours as sources: a later version; confidants first.
+
