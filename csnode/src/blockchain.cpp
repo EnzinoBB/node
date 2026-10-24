@@ -97,16 +97,31 @@ bool BlockChain::tryQuickStart(
     // trust the caches only if their head is still the block this node has at that sequence
     cs::Sequence loadedHead = 0;
     bool ok = serializationManPtr_->load([this, &loadedHead](const cs::CheckpointHead& head) {
-        if (cs::isCheckpointOnChain(head, [this](cs::Sequence seq) { return blockHashes_->find(seq).to_binary(); })) {
-            loadedHead = head.sequence;
-            return true;
+        if (!cs::isCheckpointOnChain(head, [this](cs::Sequence seq) { return blockHashes_->find(seq).to_binary(); })) {
+            cswarning() << "QUICK START: checkpoint head #" << head.sequence << " is not on this chain, skip it";
+            return false;
         }
-        cswarning() << "QUICK START: checkpoint head #" << head.sequence << " is not on this chain, skip it";
-        return false;
+        // the caches must hold the state the checkpoint was saved with (no file: saved by an earlier build)
+        if (const auto saved = serializationManPtr_->getLoadedDigest(); saved.has_value()) {
+            const auto loaded = checkpointDigest();
+            if (loaded != *saved) {
+                cserror() << "QUICK START: checkpoint #" << head.sequence << " declares "
+                          << cs::stateDigestLine(head.sequence, saved->digest, saved->wallets)
+                          << ", its caches hold " << cs::stateDigestLine(head.sequence, loaded.digest, loaded.wallets)
+                          << (loaded.settings != saved->settings ? " and other consensus settings" : "") << ", skip it";
+                return false;
+            }
+        }
+        loadedHead = head.sequence;
+        return true;
     });
 
     if (ok) {
         cslog() << "Caches for QUICK START loaded successfully!";
+        if (loadedHead != 0) {
+            const auto loaded = checkpointDigest();
+            cslog() << cs::stateDigestLine(loadedHead, loaded.digest, loaded.wallets) << " checkpoint loaded";
+        }
         // The caches hold the head block. A live checkpoint of an earlier build was saved before
         // recordBlock advanced lastSequence_ to that block, so it reads one less: reading the database
         // from there would apply the head block a second time and change the balances.
@@ -422,7 +437,9 @@ void BlockChain::onReadFromDB(csdb::Pool block, bool* shouldStop) {
             head.sequence = blockSeq;
             head.head_hash = block.hash().to_binary();
             head.prev_hash = block.previous_hash().to_binary();
-            if (serializationManPtr_->save(blockSeq, head)) {
+            const auto digest = checkpointDigest();
+            if (serializationManPtr_->save(blockSeq, head, digest)) {
+                cslog() << cs::stateDigestLine(blockSeq, digest.digest, digest.wallets) << " checkpoint";
                 serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
                 lastCheckpointWallClock_ = now;
                 if (byCount) {
@@ -1030,7 +1047,9 @@ void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
         head.sequence = pool.sequence();
         head.head_hash = pool.hash().to_binary();
         head.prev_hash = pool.previous_hash().to_binary();
-        if (serializationManPtr_->save(pool.sequence(), head)) {
+        const auto digest = checkpointDigest();
+        if (serializationManPtr_->save(pool.sequence(), head, digest)) {
+            cslog() << cs::stateDigestLine(pool.sequence(), digest.digest, digest.wallets) << " checkpoint";
             serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
             lastCheckpointWallClock_ = now;
             if (byCount) {
@@ -1041,6 +1060,35 @@ void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
             cserror() << "Cannot save caches with version " << pool.sequence();
         }
     }
+}
+
+cs::CheckpointDigest BlockChain::checkpointDigest() const {
+    cs::CheckpointDigest result;
+    const auto& wallets = multiWallets();
+    result.digest = wallets.stateDigest();
+    result.wallets = wallets.size();
+    result.settings = consensusSettingsDigest();
+    return result;
+}
+
+std::array<uint8_t, 32> BlockChain::consensusSettingsDigest() const {
+    cs::Bytes data;
+    cs::ODataStream<cs::Bytes> stream(data);
+    stream << blockRewardIntegral_ << blockRewardFraction_ << miningCoefficientIntegral_ << miningCoefficientFraction_;
+    stream << static_cast<uint8_t>(stakingOn_) << static_cast<uint8_t>(miningOn_) << TimeMinStage1_;
+    const auto& pending = pendingConsensusSettings_;
+    stream << pending.round << static_cast<uint8_t>(pending.stakingOn) << static_cast<uint8_t>(pending.miningOn);
+    stream << pending.blockReward.integral() << pending.blockReward.fraction();
+    stream << pending.miningCoefficient.integral() << pending.miningCoefficient.fraction();
+    stream << startingDPOS_;
+    stream << static_cast<uint32_t>(specialOrders_.size());
+    for (const auto& [kind, payload] : specialOrders_) {
+        stream << kind << payload;
+    }
+    const cs::Hash hash = cscrypto::calculateHash(data.data(), data.size());
+    std::array<uint8_t, 32> result{};
+    std::copy(hash.begin(), hash.end(), result.begin());
+    return result;
 }
 
 csdb::PoolHash BlockChain::getHashBySequence(cs::Sequence seq) const {
@@ -1343,8 +1391,10 @@ void BlockChain::close() {
 
     csinfo() << "Blockchain: try to save caches for QUICK START.";
 
-    if (serializationManPtr_->save(0, headInfo)) {
+    const auto digest = checkpointDigest();
+    if (serializationManPtr_->save(0, headInfo, digest)) {
       csinfo() << "Blockchain: caches for QUICK START saved successfully.";
+      cslog() << cs::stateDigestLine(headInfo.sequence, digest.digest, digest.wallets) << " checkpoint";
     }
     else {
       csinfo() << "~Blockchain: couldn't save caches for QUICK START.";

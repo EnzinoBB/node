@@ -4,6 +4,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <optional>
 #include <sstream>
 #include <vector>
@@ -92,6 +93,7 @@ struct CachesSerializationManager::Impl {
     const std::vector <std::string> hashesDivisions = {"blockchain", "smartcontracts","walletscache","walletsIds","roundstat","tokensmaster","apihandler"};
 
     std::optional<CheckpointHead> loadedHead_{};
+    std::optional<CheckpointDigest> loadedDigest_{};
     std::optional<size_t> loadedVersion_{};
     bool completedFromGenesis_ = false;
     bool loadedFromCompleted_ = false;
@@ -391,6 +393,7 @@ struct CachesSerializationManager::Impl {
 
     bool loadVersion(size_t version, const std::function<bool(const CheckpointHead&)>& verify) {
         csinfo() << "CachesSerializationManager: try to load version " << version;
+        loadedDigest_.reset();
         try {
             std::filesystem::path p(kQuickStartRoot);
             p /= std::to_string(version);
@@ -429,6 +432,7 @@ struct CachesSerializationManager::Impl {
                 return false;
             }
             loadedHead_ = loadHead(p);   // nullopt for legacy (no head.bin)
+            loadedDigest_ = CheckpointDigest::read(p / CheckpointDigest::kFileName);   // nullopt before it existed
             loadedFromCompleted_ = loadSentinel(p);
             // a completed snapshot remains completed after a successful reload
             if (loadedFromCompleted_) completedFromGenesis_ = true;
@@ -436,6 +440,7 @@ struct CachesSerializationManager::Impl {
                 cserror() << "CachesSerializationManager: chain-binding verification failed for version "
                           << version << "; quarantining";
                 loadedHead_.reset();
+                loadedDigest_.reset();
                 loadedFromCompleted_ = false;
                 clearInMem();
                 quarantineVersion(version);
@@ -544,7 +549,7 @@ bool CachesSerializationManager::save(size_t version) {
     return save(version, CheckpointHead{});
 }
 
-bool CachesSerializationManager::save(size_t version, const CheckpointHead& head) {
+bool CachesSerializationManager::save(size_t version, const CheckpointHead& head, const std::optional<CheckpointDigest>& digest) {
     if (!pImpl_->bindingsReady()) {
         cserror() << "CachesSerializationManager: save error: "
                   << "bindings are not ready";
@@ -578,6 +583,9 @@ bool CachesSerializationManager::save(size_t version, const CheckpointHead& head
         pImpl_->saveSentinel(tmp_path);
         if (!head.head_hash.empty()) {
             pImpl_->saveHead(tmp_path, head);
+        }
+        if (digest.has_value() && !digest->write(tmp_path / CheckpointDigest::kFileName)) {
+            throw std::runtime_error("cannot write state digest");
         }
     } catch (const std::exception& e) {
         cserror() << "CachesSerializationManager: error on save: " << e.what();
@@ -651,6 +659,7 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
     }
 
     pImpl_->loadedHead_.reset();
+    pImpl_->loadedDigest_.reset();
     pImpl_->loadedVersion_.reset();
     pImpl_->loadedFromCompleted_ = false;
 
@@ -719,6 +728,10 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
 
 std::optional<CheckpointHead> CachesSerializationManager::getLoadedHead() const {
     return pImpl_->loadedHead_;
+}
+
+std::optional<CheckpointDigest> CachesSerializationManager::getLoadedDigest() const {
+    return pImpl_->loadedDigest_;
 }
 
 std::optional<size_t> CachesSerializationManager::getLoadedVersion() const {

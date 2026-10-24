@@ -93,6 +93,10 @@ quick-starts after a conversion.
   `STATE DIGEST #<sequence> <hex>`. It is a digest of all wallet state, so nodes, builds and
   backends can be compared: two nodes that agree on the chain must print the same digest at the
   same sequence.
+  Every checkpoint saves the digest of the state it holds, with a hash of the consensus settings,
+  as `qs/<sequence>/state_digest.bin`, and logs it (`STATE DIGEST #<sequence> ... checkpoint`). A
+  quick start recomputes it from the loaded caches, logs `... checkpoint loaded`, and moves a
+  checkpoint whose caches do not match it aside to `qs/<sequence>.bad`.
 - **Stopping on errors.** Some errors that the official node can survive in an inconsistent
   state now stop the node, and are logged with `cserror`:
   - a block that cannot be stored;

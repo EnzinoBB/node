@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <string>
+
 #include <csnode/nodecore.hpp>
 #include <csnode/statedigest.hpp>
 
@@ -76,4 +80,78 @@ TEST(WalletState, DelegationOrderDoesNotMatter) {
     (*w2.delegateTargets_)[other] = { cs::TimeMoney(1'000'000, 3'000, csdb::Amount{ 2 }), cs::TimeMoney(1'000'000, 2'000, csdb::Amount{ 1 }) };
 
     ASSERT_EQ(cs::serializeWalletState(w1), cs::serializeWalletState(w2));
+}
+
+namespace {
+cs::CheckpointDigest sampleCheckpointDigest() {
+    cs::CheckpointDigest d;
+    for (size_t i = 0; i < d.digest.size(); ++i) {
+        d.digest[i] = static_cast<uint8_t>(i);
+        d.settings[i] = static_cast<uint8_t>(255 - i);
+    }
+    d.wallets = 147463;
+    return d;
+}
+
+std::filesystem::path tempFile(const char* name) {
+    return std::filesystem::temp_directory_path() / name;
+}
+}  // namespace
+
+TEST(CheckpointDigest, WriteReadRoundTrip) {
+    const auto file = tempFile("state_digest_roundtrip.bin");
+    const auto d = sampleCheckpointDigest();
+    ASSERT_TRUE(d.write(file));
+    const auto read = cs::CheckpointDigest::read(file);
+    ASSERT_TRUE(read.has_value());
+    EXPECT_EQ(*read, d);
+    std::filesystem::remove(file);
+}
+
+TEST(CheckpointDigest, MissingFileReadsNothing) {
+    EXPECT_FALSE(cs::CheckpointDigest::read(tempFile("state_digest_missing.bin")).has_value());
+}
+
+TEST(CheckpointDigest, TruncatedOrLongerFileRejected) {
+    const auto file = tempFile("state_digest_truncated.bin");
+    ASSERT_TRUE(sampleCheckpointDigest().write(file));
+    const auto size = std::filesystem::file_size(file);
+    std::filesystem::resize_file(file, size - 1);
+    EXPECT_FALSE(cs::CheckpointDigest::read(file).has_value());
+    std::filesystem::resize_file(file, size + 1);
+    EXPECT_FALSE(cs::CheckpointDigest::read(file).has_value());
+    std::filesystem::remove(file);
+}
+
+TEST(CheckpointDigest, UnknownVersionRejected) {
+    const auto file = tempFile("state_digest_version.bin");
+    ASSERT_TRUE(sampleCheckpointDigest().write(file));
+    {
+        std::fstream f(file, std::ios::binary | std::ios::in | std::ios::out);
+        const char version = 2;
+        f.write(&version, 1);
+    }
+    EXPECT_FALSE(cs::CheckpointDigest::read(file).has_value());
+    std::filesystem::remove(file);
+}
+
+TEST(CheckpointDigest, ComparesEveryField) {
+    const auto d = sampleCheckpointDigest();
+    auto other = d;
+    other.wallets += 1;
+    EXPECT_NE(d, other);
+    other = d;
+    other.settings[0] ^= 1;
+    EXPECT_NE(d, other);
+    other = d;
+    other.digest[31] ^= 1;
+    EXPECT_NE(d, other);
+}
+
+TEST(CheckpointDigest, LogLineHasTheScriptsFormat) {
+    const auto d = sampleCheckpointDigest();
+    const auto line = cs::stateDigestLine(186400000, d.digest, d.wallets);
+    EXPECT_EQ(line.rfind("STATE DIGEST #186400000 000102", 0), 0u);
+    EXPECT_EQ(line.substr(line.size() - std::string(" wallets 147463").size()), " wallets 147463");
+    EXPECT_EQ(line.size(), std::string("STATE DIGEST #186400000 ").size() + 64 + std::string(" wallets 147463").size());
 }

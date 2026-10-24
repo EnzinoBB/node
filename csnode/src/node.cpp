@@ -4475,9 +4475,7 @@ void Node::logStateDigest(const csdb::Pool& pool) {
 
 void Node::logStateDigest(cs::Sequence sequence) {
     const auto& wallets = blockChain_.multiWallets();
-    const auto digest = wallets.stateDigest();
-    cslog() << "STATE DIGEST #" << sequence << " " << cs::Utils::byteStreamToHex(digest.data(), digest.size())
-            << " wallets " << wallets.size();
+    cslog() << cs::stateDigestLine(sequence, wallets.stateDigest(), wallets.size());
 }
 
 void Node::validateBlock(const csdb::Pool& block, bool* shouldStop) {
