@@ -71,6 +71,7 @@ add_library(csnode
   include/csnode/statedigest.hpp
   include/csnode/snapshot_manifest.hpp
   include/csnode/snapshot_builder.hpp
+  include/csnode/blockverifier.hpp
   include/csnode/sendcachedata.hpp
   include/csnode/eventreport.hpp
   include/csnode/idatastream.hpp
@@ -113,6 +114,7 @@ add_library(csnode
   src/statedigest.cpp
   src/snapshot_manifest.cpp
   src/snapshot_builder.cpp
+  src/blockverifier.cpp
   src/sendcachedata.cpp
   src/eventreport.cpp
   src/poolcache.cpp
