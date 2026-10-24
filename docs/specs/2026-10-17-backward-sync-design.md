@@ -36,7 +36,9 @@ What changed on master and what it changes here. Marked **[changed]** in the sec
   block-hash databases are rebuilt when they do not match the stored range (`blockchain.cpp:266-279`,
   `blockhashes.cpp:102-131`), which section 5 must not trigger by accident; `seq_no` is 0-based on
   every backend.
-- **Index rebuild after a quick start (#53, #54)** is what section 6 uses at block 0.
+- **Index rebuild after a quick start (#53, #54)** stays the fallback for a damaged index. The
+  backfill indexes each block as it stores it (section 6), so that the history is usable at once,
+  without a restart **[changed 2026-10-24, user's decision: no restart, everything dynamic]**.
 - **Conversion (#49–#52, #63, #65, #67)** refuses a database whose first block is above 0 to
   berkeleydb (`storage_convert.cpp:328-334`). Once the backfill reached block 0 that conversion is
   allowed, so a node from a snapshot can end as a BerkeleyDB folder the official node opens.
@@ -114,11 +116,28 @@ What changed on master and what it changes here. Marked **[changed]** in the sec
   (`blockchain.cpp:1025-1028`) and at close (`blockchain.cpp:1322`). The hash and index databases
   (`cs::Lmdb`) run with `MDB_NOSYNC | MDB_WRITEMAP | MDB_MAPASYNC` (`lmdbxx/lmdb.hpp:43`) and are
   flushed at the same points.
+- **The transaction index.** One LMDB table (`caches/indexdb`), key = public key (32 bytes) ‖
+  sequence (8 bytes, native byte order, so keys of one wallet are not in sequence order), value
+  = the previous block holding a transaction of that wallet, or `kWrongSequence` for none
+  (`transactionsindex.cpp:28-35`, `448-458`). Each wallet's history is a chain newest → oldest:
+  `TransactionsIterator` starts at the wallet cache's last transaction and follows
+  `getPrevTransBlock` (`transactionsiterator.cpp:8-13`, `51-80`), stopping at a block it cannot
+  load (#62: on a pruned node the oldest stored entry still points to a pruned block, whose own
+  entry pruning removed, `transactionsindex.cpp:460-476`) or at `kWrongSequence` (what a rebuild
+  from stored blocks writes at a wallet's oldest stored entry, `transactionsindex.cpp:244-246`).
+  Writes happen on the transport's processor thread (`applyBlockToCaches`, `blockchain.cpp:964`);
+  API threads read through their own LMDB read transactions. `getPreviousPoolSeq` stops the node
+  if an entry points to itself (`blockchain.cpp:2394-2410`). Every `cs::Lmdb::insert` is one
+  write transaction (`lmdbxx/lmdb.hpp:165-183`).
 - **Non-empty blocks.** `TransactionsListGet` walks `previousNonEmpty_`
   (`apihandler.cpp:2760-2800`, `blockchain.cpp:439-452`), a map saved in every checkpoint
   (`blockchain_serializer.cpp:73-75`) and never pruned. Every published snapshot descends from the
   first one, whose node synced from block 0: the map of a snapshot node covers the whole chain, and
   the walk skips the blocks it cannot load (#46).
+- **Other API reads of history** go to the storage by sequence or by hash: `PoolInfoGet`,
+  `PoolListGet`, `PoolTransactionsGet`, `TransactionGet` (`loadBlock`, `loadTransaction`,
+  `blockchain.cpp:580-640`); wallet transaction counts come from the wallet cache; contract
+  getters use the deploy the smart contracts keep (#74).
 - **The responders' anti-duplicate log.** Active only once special order 35 has set
   `Consensus::syncroChangeRound` (`node.cpp:4408-4413`, default `ULLONG_MAX`,
   `consensus.cpp:129`); every function of the log returns at once below that round
@@ -207,8 +226,7 @@ A block that fails 1–3 is dropped with its whole batch, the peer is marked, an
 requested from another peer. Blocks of a batch may arrive in any order and batches out of order:
 they wait in a buffer of at most 2 × 4 × `backfill_batch` blocks, and are stored strictly
 downwards. Smart signatures, also outside the hashed part, are not verified: checking them needs
-the wallet state of that time (`deepBlockValidation`). Residual risk and an optional sample
-cross-check: section 9.
+the wallet state of that time (`deepBlockValidation`). Residual risk, accepted: section 9.
 
 ### 4. Storage **[changed: no count, synchronous on RocksDB]**
 
@@ -222,9 +240,15 @@ cross-check: section 9.
   - is called under `dbLock_`, the lock of every other storage call.
 - **Strictly downwards**: after a crash the stored range has no hole; `first_sequence()` is where
   the backfill resumes, no other watermark is kept.
-- **Durability.** `Storage::flush()` (LMDB `mdb_env_sync`, RocksDB `SyncWAL`) every 10,000
-  backfilled blocks or 60 s, then the hash databases' flush (section 5), so that a power cut loses
-  at most that window, as it may lose the forward blocks since the last checkpoint today.
+- **Durability.** Every 10,000 backfilled blocks or 60 s: the index database's flush (section 6),
+  the hash databases' flush (section 5), then `Storage::flush()` (LMDB `mdb_env_sync`, RocksDB
+  `SyncWAL`), so that after a power cut the caches are never behind the storage by more than the
+  window the OS flushed on its own, and the window itself is bounded, as the forward blocks since
+  the last checkpoint are today.
+- **RocksDB and LMDB alike.** Neither backend orders its writes: a block of any sequence is one
+  `put` with its key (`database_lmdb.cpp:120-141`, `database_rocksdb.cpp:178-197`), so a RocksDB
+  node backfills exactly as an LMDB one, from the first block it has down to 0. The only LMDB
+  point is the snapshot itself (section 8).
 - **BerkeleyDB.** Each put fills the record `seq + 1` just below the lowest stored one, deleted by
   an earlier pruning. The same code path as LMDB and RocksDB; the scenario `backfill-berkeleydb`
   is the proof.
@@ -244,54 +268,137 @@ cross-check: section 9.
   storage, both loops ending at the first block that needs nothing. Without this, a crash during
   the backfill could leave more than the 128 entries of slack and trigger a full rebuild of the
   hash databases, which reads every stored block.
-- Nothing else is touched: the wallet caches, the transaction index, `previousNonEmpty_`,
-  `lastNonEmptyBlock_` and the counters already describe the full history.
+- **Non-empty blocks.** `previousNonEmpty_` already covers the chain by lineage (above). As
+  insurance, a backfilled block Q with transactions is merged under `dbLock_`: N = the lowest key
+  above Q in the map; if N exists and `previousNonEmpty_[N].poolSeq != Q`, then
+  `previousNonEmpty_[Q] = previousNonEmpty_[N]` and `previousNonEmpty_[N] = {Q, count}`. Merged
+  entries reach disk with the next checkpoint. `lastNonEmptyBlock_` and
+  `totalTransactionsCount_` are not touched (the lineage's values).
+- Nothing else is touched: the wallet caches and the counters already describe the full history.
 
-### 6. Transaction index
+### 6. Transaction index **[changed 2026-10-24: indexed online, no restart]**
 
-The index links each wallet's transactions by a pointer to its previous block. During the backfill
-it is left as the snapshot brought it, and live blocks keep updating it as on any node:
+The user's rule: when the blocks are there the node uses them at once, with nothing to restart,
+with or without Docker. So each backfilled block is indexed as it is stored, and a wallet's
+history grows downwards while the node runs. The rebuild after a quick start (#53/#54) stays only
+as the fallback for a damaged index.
 
-- an API history follows the pointers down to the oldest block whose own entry exists, so it stops
-  at the snapshot's range: truncated but correct, as on a pruned node (#62);
-- at block 0 the node writes a key of its own in the index database (`__rebuild_requested__`),
-  distinct from the incomplete flag that would keep the node from the Trusted role. The next start
-  quick-starts and rebuilds the whole index from the stored blocks, through the path #54 added
-  (`blockchain.cpp:143-153`, `256-262`), then clears the key.
+**The chain of a wallet during the backfill.** For wallet A the entries newest → oldest end at
+the oldest stored block holding A, whose value names either a pruned block P (the snapshot's
+lineage pruned it) or `kWrongSequence` (the index was rebuilt from stored blocks). Call that
+entry the **tail** of A. Blocks are backfilled strictly downwards, so when block Q arrives every
+block between Q and the first stored one is already stored and indexed, and the tail is the
+smallest indexed block of A above Q.
 
-Rejected: completing the index backwards with a persisted map of pending pointers (the first
-draft). It kept a second, incremental way of building the index next to the forward one, with its
-own crash cases, for a result the rebuild after a quick start already gives (about 15 minutes on
-the whole chain by #54's measurement on the first 4.4 M blocks, likely more; the mainnet test
-measures it).
+**Indexing one backfilled block Q** (addresses deduplicated as `updateFromNextBlock` does,
+`transactionsindex.cpp:412-454`), before the block goes to the storage:
 
-`TransactionsListGet` needs no rebuild: `previousNonEmpty_` already covers the chain (above), and
-the blocks it skipped as pruned are now loadable.
+1. `tail = tailOf(A)`: a per-wallet record in the index database, key `'t' ‖ public key`
+   (33 bytes, never equal to a 40-byte entry key), value = the lowest indexed sequence of A. The
+   record is valid if the entry (A, tail) exists; otherwise, and when there is no record, the tail
+   is found by walking A's chain from the wallet cache's last transaction down to the first entry
+   whose value is `kWrongSequence` or below the first stored block, as `TransactionsIterator`
+   does without loading blocks. The walk happens once per wallet, costs one LMDB read per entry
+   and is bounded by A's transactions in the stored range; a wallet with no entry at all (its only
+   transactions are below the first stored block, so its last transaction in the wallet cache
+   names an unstored block) has no tail.
+2. If there is a tail: set (A, tail) → Q, unless its value is Q already (a pruned lineage left it
+   pointing at Q).
+3. Insert (A, Q) → `kWrongSequence` if that key is absent (a crash may have left it with a lower
+   value already; keep it).
+4. Write the tail record (A) → Q.
+
+Then write `__backfill_floor__` → Q in the index database, and only then store the block
+(section 4). Every write is one LMDB transaction, as every write of the index is today.
+
+**Why this is right.** Step 2 never writes a pointer to itself (Q < tail), so the node never
+stops for an inconsistent index. A reader between the writes sees at worst a chain that ends one
+block early (an entry pointing at Q before (A, Q) exists, or at Q before Q is stored): the same
+truncated history it gets today for a pruned block. Pointers written by the forward index above
+the tail are never changed. A live block with A updates the head of the chain
+(`TransactionsIndex::update` takes the previous block from the wallet cache,
+`transactionsindex.cpp:412-438`); the backfill updates the tail; both run on the transport's
+processor thread, so they never interleave. API threads read through LMDB read transactions,
+unchanged.
+
+**Crash safety.** The index is written before the block, so a block in the storage is always
+indexed unless the index lost committed writes (LMDB with `MDB_NOSYNC` after a power cut loses a
+suffix of its transactions). At start, with `F = __backfill_floor__` and `first` = the storage's
+first block: if `first < F`, the blocks `F − 1 .. first` are re-indexed from the storage with the
+same four steps (idempotent: the tail record or the walk gives the right tail, step 3 keeps an
+existing entry); if `F < first`, entries exist for blocks not stored: harmless, they are refreshed
+when the blocks are fetched again. The index and hash databases are flushed before the storage at
+every flush point (section 4), which makes `first < F` the rare case. A tail record left stale by
+a crash (written after the entries) is corrected by step 1's validity check on the next block of
+that wallet. `rebuildFrom` (the fallback) resets the whole database, tail records and floor
+included; its result has no tails, which step 1 then derives by walking.
+
+**Ranges not backfilled yet.** The API answers as a pruned node answers today: a history stops at
+the lowest stored block of that wallet (#62); `TransactionsListGet` skips blocks it cannot load
+(#46); `PoolInfoGet`, `PoolListGet`, `TransactionGet` report the block as not found; wallet
+transaction counts are complete (wallet cache). As soon as a block is stored, every one of these
+sees it.
+
+**Cost.** One or a few LMDB writes per address per block, on the thread that stores the block:
+most mainnet blocks are empty; a block with 100 transactions costs a few milliseconds.
 
 ### 7. Progress and completion
 
 - **Visibility.** A log line every 100,000 blocks: lowest stored block, blocks per second, peers in
-  use, estimated time left. One line at every peer mark, one at every pause and resume. No API
-  change in this version.
-- **At block 0:** `BACKFILL: full history stored, blocks 0..N; the transaction index is rebuilt at
-  the next start`. The node keeps running; the slow-start check accepts the database again by
-  itself (`storage.cpp:322-333` sees block 0). Whether the node should restart on its own is an
-  open point (section 12).
+  use, estimated time left. One line at every peer mark, one at every pause and resume. The
+  periodic status line gets `oldest stored = K`. No API change in this version.
+- **At block 0:** `BACKFILL: full history stored, blocks 0..N`. Nothing else happens: the index and
+  the hash databases already cover the chain, every API call already serves it, and the slow-start
+  check accepts the database by itself (`storage.cpp:322-333` sees block 0). Conversion to
+  berkeleydb is allowed from then on.
 
 ### 8. Docker, packaging, configuration **[changed]**
 
 - **Configuration keys** (`[storage]`): `backfill` (`on`/`off`, default `on`; without effect on
   pruned nodes), `backfill_batch` (1..1000, default 100), `backfill_rate` (blocks per second,
   default 1000, 0 = unlimited).
+- **RocksDB nodes and the snapshot [changed 2026-10-24].** Backward sync is native on RocksDB
+  (section 4). What is LMDB is the published snapshot's block database. Three ways to start a
+  RocksDB full node from it were weighed:
+  - (a) restore the snapshot, then let the node convert its small block database to RocksDB once
+    at its first start, with the existing conversion;
+  - (b) publish a RocksDB snapshot next to the LMDB one;
+  - (c) teach the restore to write the snapshot's blocks into the configured backend.
+
+  (a) is chosen: it reuses the conversion that CI already tests in every direction, on a
+  database of 100,000 to 200,000 blocks (seconds: the conversion to RocksDB runs at about
+  38,000 blocks/s, `docs/storage.md`), and needs no second publishing pipeline (b: twice the
+  release assets under the 2 GB limit, twice the checks) and no new restore code in the node (c).
+  To need no command-line flag, the start-up check (`client/src/dbcheck.cpp:190-300`) converts
+  without asking when `db/` holds an LMDB database, `config.ini` asks for `rocksdb` and
+  `snapshot.json` lies next to `db/` (a restore writes it; the node never does), logging
+  `the restored snapshot is converted to rocksdb before the start`. `--convert-db` keeps working
+  as the explicit way. BerkeleyDB: a database whose first block is above 0 cannot be converted to
+  it (`storage_convert.cpp:328-334`), so a BerkeleyDB full node still syncs from block 0, or is
+  converted from an LMDB or RocksDB node once its backfill reached block 0. After the start a
+  RocksDB node backfills like an LMDB one.
 - **Entrypoint.** Pruned to full is allowed: `switching from pruned to full storage: the node
-  keeps its blocks and fetches the older ones in the background (backfill)`. A full LMDB node with
-  an empty data directory restores the latest snapshot like a pruned one and backfills, instead
-  of syncing from block 0. A full RocksDB node restores the snapshot and starts with
-  `--convert-db` once, so that the node converts the small LMDB database to RocksDB (seconds) and
-  backfills there. A full BerkeleyDB node still syncs from block 0: a pruned database cannot be
-  converted to berkeleydb. `CREDITS_SNAPSHOT=off` keeps the old behaviour.
-- **Docs.** `docs/storage.md` (keys, "Full and pruned"), `packaging/docker/README.md` (the
-  storage table), `docs/differences.md`, `docs/CHANGES.md`.
+  keeps its blocks and fetches the older ones in the background (backfill)`. A full node with an
+  empty data directory on lmdb or rocksdb restores the latest snapshot like a pruned one (the
+  rocksdb case is then converted by the node as above) and backfills, instead of syncing from
+  block 0. A full BerkeleyDB node still syncs from block 0. `CREDITS_SNAPSHOT=off` keeps the old
+  behaviour.
+- **Without Docker [new].** Backward sync is in the node, not in the image: a node run from the
+  release package does the same. The release packages ship `snapshot-restore.sh` (today it is
+  only in the image). A full node from a snapshot by hand:
+  1. unpack the full package (`...-linux-x64-full.tar.gz`), `cd csnode`;
+  2. `./snapshot-restore.sh . https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/latest.json`
+     (needs `curl`, `zstd`, `tar`, `python3`): it checks the archive's SHA-256 and puts `db/`,
+     `caches/`, `qs/`, the `.dat` files and `snapshot.json` in place;
+  3. in `config.ini`, `[storage]` with `db_backend=lmdb` or `db_backend=rocksdb` and no
+     `prune_keep_blocks` (the full package's default section);
+  4. start the node. It quick-starts from the snapshot's checkpoint, syncs the last hours forward,
+     and logs `BACKFILL: full node with blocks N..M: fetching 0..N-1 from peers in the background`;
+  5. check by hand that the first `STATE DIGEST #<seq>` line of the log equals `state_digest` in
+     `snapshot.json` (the entrypoint does this for Docker).
+  Documented in `docs/storage.md` ("A full node from a snapshot") and the README.
+- **Docs.** `docs/storage.md` (keys, "Full and pruned", "A full node from a snapshot"),
+  `packaging/docker/README.md` (the storage table), `docs/differences.md`, `docs/CHANGES.md`.
 
 ### 9. Security **[changed]**
 
@@ -303,8 +410,8 @@ the blocks it skipped as pruned are now loadable.
   confidants inside it. The smart signatures are outside the hash and are not verified (section
   3): a peer could serve an old block with an altered or missing smart-signature tail, which the
   node would store and later serve. The forward path detects it only with the solver's state of
-  that time. Mitigation offered as an optional step: request 1 batch in 50 from a second peer as
-  well and compare the bytes; a difference marks both peers and takes the batch from a third.
+  that time. The user accepted this residual risk on 2026-10-24; a sample cross-check of the
+  bytes from a second peer stays a later option, outside the plan.
 - **Bounded memory.** Replies are accepted only for sequences of a batch in flight, from its peer;
   the buffer holds at most 8 batches; at most 4 requests are in flight. The decompressed reply is
   bounded as for forward sync (#4, #7).
@@ -337,18 +444,21 @@ the blocks it skipped as pruned are now loadable.
 replies stored strictly downwards, buffer bound, resume from `first`); block verification on
 generated signed blocks (valid, altered signature, altered transaction, wrong sequence, genesis);
 `pool_save_backfill` on LMDB and on the in-memory database of `storage_writer_tests.cpp`
-(RocksDB when built); the hash databases' bottom-edge repair; the index rebuild key.
+(RocksDB when built); the hash databases' bottom-edge repair; the backward indexing of
+`TransactionsIndex` on a temporary index (tails, pruned-lineage pointers, rebuilt-index pointers,
+a wallet first seen late, idempotent re-indexing, the floor repair at start) and its concurrent
+readers.
 
 **Private network** (`robustness.yml`, all with matching state digests; `ci/testnet/run.sh` gets
 `BACKFILL=1`, which makes the node joining from the snapshot a full node):
 
 | Scenario | What happens | Must show |
 | --- | --- | --- |
-| `backfill-join` | n8 joins from a snapshot of n6 (taken after two prunings) as a full LMDB node | It reaches block 0; every block 0..T has the same hash on n8 and n1 (`compare_blocks.py` over the API); after a restart its wallet histories equal n1's |
-| `backfill-rocksdb` | The same, n8 converts the snapshot to RocksDB at its first start | The same |
+| `backfill-join` | n8 joins from a snapshot of n6 (taken after two prunings) as a full LMDB node | It reaches block 0; every block 0..T has the same hash on n8 and n1 (`compare_blocks.py` over the API); its wallet histories, read while it runs and without a restart, equal n1's; histories read in the middle of the backfill are n1's truncated at n8's lowest stored block, never wrong |
+| `backfill-rocksdb` | The same, n8 configured for RocksDB: the node converts the restored snapshot at its first start | The same, and `block database: rocksdb` in its log |
 | `backfill-berkeleydb` | n4 (pruned BerkeleyDB from block 0) switched to full | The same, on BerkeleyDB |
 | `backfill-trusted` | `storage-switch` as today: n6, an initial confidant, pruned to full, backfills while trusted | It reaches block 0; the network's block rate does not drop; digests equal |
-| `backfill-crash` | n8 killed three times during the backfill | It resumes from its lowest block each time; no hole (every block compares) |
+| `backfill-crash` | n8 killed three times during the backfill, once right after a flush and once with `__backfill_floor__` above its first stored block (test build: skip the index write of one block) | It resumes from its lowest block each time, re-indexes the gap at start; no hole (every block compares); histories equal n1's |
 | `backfill-tamper` | One peer (test build) serves blocks with an altered signature tail, another with an altered transaction | Each is refused and logged, the blocks come from another peer, both peers are marked |
 | `backfill-order35` | Special order 35 sets `syncroChangeRound` on every node | The joining node logs the paced peers, receives no `DuplicatedRequest` after the first, and finishes |
 | `backfill-mixed` | `node_alt_ref` = a master without this code on the even nodes | The history comes from nodes without this code (the joining node runs the new binary) |
@@ -356,9 +466,11 @@ generated signed blocks (valid, altered signature, altered transaction, wrong se
 **Mainnet.** A Docker full node from the published snapshot, on this host next to the pruned
 container, backfills for a day without slowing forward sync: rate, CPU, memory and disk growth
 are recorded; balances and histories are compared with the monitor (`check_node.py balances`,
-`history`) before and after the restart that rebuilds the index; the index rebuild time is
-measured. Then, optionally, the backfill is left to finish and the database converted to
-berkeleydb to check the official binary opens it.
+`history`) while it runs: balances always equal; histories equal the monitor's for wallets whose
+transactions all lie in the stored range, and the node's truncated list is a suffix of the
+monitor's for the others (`check_node.py history` gets a `--min-stored` option for that). One
+restart is made to check the resume (no hole, floor repair). Then, optionally, the backfill is
+left to finish and the database converted to berkeleydb to check the official binary opens it.
 
 ### 12. Open points for the user
 
@@ -366,15 +478,15 @@ Resolved since the first draft: the snapshot exists; the rate question is answer
 and `backfill_rate`; the Docker entrypoint change is designed (section 8); BerkeleyDB stays in,
 as its own last step.
 
-Remaining:
-1. **Restart at block 0.** Should the node restart itself when the backfill ends (Docker restarts
-   the container, systemd needs `Restart=`), or only log that a restart rebuilds the index? The
-   design logs and waits for the operator; the index stays truncated until then.
-2. **Default rate.** `backfill_rate=1000` (about 2 MB/s, 2 days) or a gentler default such as 300
-   (7 days)? The mainnet test may show the responders set the limit anyway.
-3. **Smart-signature tails.** Accept the residual risk, or add the sample cross-check of section 9
-   (second peer for 1 batch in 50)?
-4. **Full RocksDB nodes in Docker.** Restore the LMDB snapshot and convert at the first start (the
-   design), or keep RocksDB full nodes syncing from block 0?
-5. **Trusted nodes.** Keep backfilling while trusted (the design), or pause in the rounds where the
-   node is a confidant? The `backfill-trusted` scenario decides whether a pause is needed.
+Decided by the user on 2026-10-24:
+1. **No restart, everything dynamic.** Backfilled blocks are usable as soon as they are stored,
+   index included (section 6); nothing waits for a restart, with or without Docker.
+2. **`backfill_rate=1000`** by default.
+3. **Smart-signature tails:** the residual risk is accepted; the sample cross-check is not in the
+   plan (a later option).
+4. **RocksDB:** backward sync is native on RocksDB; the restored LMDB snapshot is converted once
+   by the node at its first start (section 8).
+5. **Trusted nodes** keep backfilling; the `backfill-trusted` scenario measures it.
+
+Remaining: none that blocks the plan. The mainnet test (plan, step 7) reports the measured rate
+and whether mainnet peers have order 35 active.

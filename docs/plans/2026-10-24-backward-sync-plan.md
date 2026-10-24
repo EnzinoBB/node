@@ -48,13 +48,12 @@ async (RocksDB-style) `MemoryDb` storage the block is in the database at once, n
 (`write_queue_search` false). With RocksDB built (`CSDB_USE_ROCKSDB`): the same on a temporary
 RocksDB.
 
-## Step 2. `csnode`: BlockChain support (small-medium)
+## Step 2. `csnode`: BlockChain support, online indexing (medium)
 
 **Files.** `csnode/include/csnode/blockchain.hpp`, `csnode/src/blockchain.cpp`,
 `csnode/include/csnode/blockhashes.hpp`, `csnode/src/blockhashes.cpp`,
 `csnode/include/csnode/transactionsindex.hpp`, `csnode/src/transactionsindex.cpp`,
-`tests/csnode/blockhashes_tests.cpp`, `tests/csnode/transactionsindex_tests.cpp` (new or
-extended).
+`tests/csnode/blockhashes_tests.cpp`, `tests/csnode/transactionsindex_backfill_tests.cpp` (new).
 
 **BlockChain.**
 
@@ -63,26 +62,85 @@ extended).
 // expected to have this hash. kWrongSequence / empty when the storage is full from block 0.
 struct BackfillAnchor { cs::Sequence first; csdb::PoolHash prevHash; };
 BackfillAnchor getBackfillAnchor() const;          // under dbLock_: pool_load(first).previous_hash()
-// stores a verified block first - 1: hash databases, storage, firstStoredSeq_; false if not stored
+// stores a verified block first - 1: transaction index, hash databases, non-empty map, storage,
+// firstStoredSeq_, in that order; false if not stored (the index and the hashes then hold the
+// block ahead of the storage, which the start-up repair and the next attempt both tolerate)
 bool storeBackfilledBlock(const csdb::Pool& pool);
-// Storage::flush() then the hash databases' flush, in that order (see BlockHashes::flush)
+// index flush, hash databases' flush, then Storage::flush(), in that order
 bool flushBackfill();
-// at block 0: asks for the index rebuild at the next start (TransactionsIndex::requestRebuild)
-void onBackfillComplete();
 ```
 
 `storeBackfilledBlock` (under `dbLock_`, as `pruneStep`, `blockchain.cpp:330`): check
 `pool.sequence() + 1 == firstStoredSeq_` and `pool.hash() == anchor.prevHash` once more (cheap,
-guards a caller bug); `blockHashes_->update(pool)` first (`blockhashes.cpp:35-54`), then
-`storage_.pool_save_backfill(pool)`; on failure remove the hash entry again and return false; on
-success `firstStoredSeq_ = pool.sequence()`; if `pool.sequence() == 1`, `uuid_ =
-uuidFromBlock(pool)` (as `blockchain.cpp:1637`); log at debug. Wrap the storage call in the same
-try/catch as `saveDeferredBlock` (`blockchain.cpp:1263-1275`): an engine that needs recovery stops
-the node.
+guards a caller bug); `trxIndex_->indexBackfilledBlock(pool)` (below); `blockHashes_->update(pool)`
+(`blockhashes.cpp:35-54`); `mergeNonEmptyBlock(pool)` (design, section 5: `previousNonEmpty_`
+lower_bound merge, a private helper next to `updateNonEmptyBlocks`, `blockchain.cpp:439-452`);
+then `storage_.pool_save_backfill(pool)`; on failure return false (nothing to undo: both caches
+tolerate an entry ahead of the storage); on success `firstStoredSeq_ = pool.sequence()`; if
+`pool.sequence() == 1`, `uuid_ = uuidFromBlock(pool)` (as `blockchain.cpp:1637`); log at debug.
+Wrap the storage call in the same try/catch as `saveDeferredBlock` (`blockchain.cpp:1263-1275`):
+an engine that needs recovery stops the node.
 
-Start-up (`BlockChain::init`, before the `consistentWith` check at `blockchain.cpp:266-279`): when
-`firstStoredSeq_ > 0` call `blockHashes_->repairBottom(first, last, load)` (below), then the
-existing check.
+Start-up (`BlockChain::init`, after `firstStoredSeq_` is known, `blockchain.cpp:225-230`, and
+before the `consistentWith` check at `blockchain.cpp:266-279`): when `firstStoredSeq_ > 0`,
+`trxIndex_->repairBackfillFloor(first, load)` and `blockHashes_->repairBottom(first, last, load)`
+(below), then the existing checks. Both are bounded by the blocks a crash left unindexed and log
+what they did.
+
+**TransactionsIndex: backward indexing (the design's section 6).**
+
+```cpp
+// Backward sync: indexes a block below every indexed one, linking it under each of its wallets'
+// lowest indexed block (the tail). Idempotent: a block may be indexed again after a crash.
+void indexBackfilledBlock(const csdb::Pool& pool);
+// the lowest block the backfill indexed (key __backfill_floor__), kWrongSequence if none
+Sequence backfillFloor() const;
+// at start: re-indexes the stored blocks floor - 1 .. first that a crash left unindexed
+// (first < floor); returns how many
+size_t repairBackfillFloor(Sequence first, const std::function<csdb::Pool(Sequence)>& load);
+```
+
+Keys, all in the one table of `caches/indexdb` (`transactionsindex.cpp:28-35`): entries stay
+`pubkey(32) ‖ seq(8)`; a tail record is `'t' ‖ pubkey(32)` (33 bytes) with an 8-byte sequence
+value; the floor is the string key `__backfill_floor__` next to `__last_indexed__`,
+`__incomplete__`, `__walked_complete__` (`transactionsindex.cpp:20-22`). `hasIndexEntries()` and
+`looksEmpty()` must not count tail records as entries (check the key length).
+
+`indexBackfilledBlock(pool)`, for each address of the block once (source and target, mapped to
+the public key as `updateFromNextBlock` does, `transactionsindex.cpp:412-438`):
+
+```
+tail = tailOf(key):
+    rec = value of 't'‖key if present
+    if rec present and entry (key, rec) exists: tail = rec
+    else: tail = walkTail(key)   // below; kWrongSequence when the wallet has no entry
+if tail != kWrongSequence and value of (key, tail) != seq:  set (key, tail) -> seq
+if (key, seq) absent:                                      insert (key, seq) -> kWrongSequence
+if tail != seq:                                            insert 't'‖key -> seq
+after all addresses:                                       insert __backfill_floor__ -> seq
+```
+
+`walkTail(key)`: `cur = bc_.getLastTransaction(address).pool_seq()` (the wallet cache, as
+`TransactionsIterator` starts, `transactionsiterator.cpp:8-13`); if invalid or no entry
+(key, cur): `kWrongSequence`; loop: `prev = getPrevTransBlock(key, cur)`; if `prev ==
+kWrongSequence` or `prev < bc_.getFirstStoredSequence()` or no entry (key, prev): return `cur`;
+else `cur = prev`. One LMDB read per step, no block loads. Count the steps in a debug line.
+
+`repairBackfillFloor(first, load)`: `F = backfillFloor()`; if `F == kWrongSequence || first >= F`
+return 0; for `seq = F - 1 .. first`: `indexBackfilledBlock(load(seq))` (skip an invalid pool);
+log `trxIndex: re-indexed N backfilled blocks F-1..first left unindexed by a crash`.
+
+`rebuildFrom` (`transactionsindex.cpp:237-294`) already resets the database (tail records and
+floor go with it); after it, `tailOf` derives tails by walking. `onPruneBlock`
+(`transactionsindex.cpp:460-476`) stays as it is: tail records of a node that prunes become
+stale and `tailOf` rejects them (no entry at `rec`). `trimToFloor` (`--set-bc-top`) is not
+affected: it deletes entries above a floor; tail records (33-byte keys) must be skipped by its
+scan (check the key length there, `transactionsindex.cpp:326-360`).
+
+Thread model: `indexBackfilledBlock` runs on the transport's processor thread inside
+`storeBackfilledBlock`, as `update` runs inside `applyBlockToCaches` (`blockchain.cpp:964`); API
+readers use LMDB read transactions and may see a chain one block short for a moment (the design,
+section 6). No lock is added.
 
 **BlockHashes.**
 
@@ -96,19 +154,42 @@ void flush();
 size_t repairBottom(cs::Sequence first, cs::Sequence last, const std::function<csdb::Pool(cs::Sequence)>& load);
 ```
 
-**TransactionsIndex.** A persistent key `__rebuild_requested__` (next to `kIncompleteKey`,
-`transactionsindex.cpp:20-22`): `requestRebuild()` writes it and flushes; `rebuildRequested()`
-reads it at `init()`; `BlockChain::init` treats it as `trxIndex_->recreate()` in the decision at
-`blockchain.cpp:143-153` (quick start, then `deferRebuild()`), and `rebuildFrom`
-(`transactionsindex.cpp:237-294`) removes the key when it ends. It must not set the incomplete
-flag (`isReady()`, `transactionsindex.cpp:85-89`, gates the Trusted role).
+The fallback for a damaged index is unchanged: the rebuild after a quick start
+(`blockchain.cpp:143-153`, `256-262`). Nothing sets the incomplete flag (`isReady()`,
+`transactionsindex.cpp:85-89`, gates the Trusted role).
 
 **Tests.** `repairBottom`: databases holding 10..20 with storage 12..20 → entries 10, 11 removed;
-databases holding 14..20 with storage 12..20 → 12, 13 inserted; nothing to do → 0; mixed. Index:
-`requestRebuild()` then a new `TransactionsIndex` on the same folder reports
-`rebuildRequested()`, `isReady()` true; after `rebuildFrom` the key is gone. `storeBackfilledBlock`
-on a `BlockChain` opened on a temporary LMDB folder with blocks 50..60 and a checkpoint is heavier
-than the existing `blockchain_tests.cpp`; cover it in step 3's node-level test and in CI instead.
+databases holding 14..20 with storage 12..20 → 12, 13 inserted; nothing to do → 0; mixed.
+
+Index (`transactionsindex_backfill_tests.cpp`, on a `TransactionsIndex` over a temporary folder
+and a minimal `BlockChain` whose wallet cache the test fills through `storeBlock`-free means: the
+existing tests construct `BlockChain(genesis, start)` without a database, `blockchain_tests.cpp:
+42-46`; `getLastTransaction` and `getFirstStoredSequence` are what the index needs, so either
+construct blocks through `recordBlock` on a temporary LMDB storage, or give `TransactionsIndex`
+two injectable callbacks for them in the test build; the implementer picks the lighter one):
+
+1. Pruned lineage: wallet A in blocks 100, 150 (both "pruned": entries removed by `onPruneBlock`,
+   first stored = 180) and 200, 250 (indexed forward). Backfill 179..100 in order: after 150,
+   (A,200) → 150 unchanged, (A,150) → none, tail(A) = 150; after 100, (A,150) → 100, (A,100) →
+   none; `getPrevTransBlock` chain from 250 reads 200, 150, 100, none.
+2. Rebuilt index: the same wallet, index built with `rebuildFrom(180, 250)` ((A,200) → none);
+   after 150: (A,200) → 150.
+3. A wallet first seen late: B only in block 120, last transaction in the wallet cache = 120:
+   after 120, (B,120) → none and tail(B) = 120; a history walk starts at 120 and finds it.
+4. Idempotence: index block 150 twice, and index 100 then 150 again (a crash scenario): the chain
+   is the same as in case 1 and no entry points to itself.
+5. Stale tail record: tail(A) = 150 but the entry (A,150) was removed (as pruning does): indexing
+   130 walks and finds the real tail.
+6. `repairBackfillFloor`: floor = 150, storage first = 120 with blocks 120..149 holding A and C:
+   returns 30 and the chains are complete.
+7. Readers: an API-style walk (`getPrevTransBlock` in a loop from another thread) during 10,000
+   backfilled blocks never reads an entry pointing to itself and never throws; lengths are
+   monotonic non-decreasing per wallet between walks.
+8. `hasIndexEntries`/`looksEmpty` ignore tail records; `trimToFloor` leaves them alone.
+
+`storeBackfilledBlock` on a `BlockChain` opened on a temporary LMDB folder with blocks 50..60 and
+a checkpoint is heavier than the existing `blockchain_tests.cpp`; cover it in step 3's node-level
+test and in CI instead.
 
 ## Step 3. The backfill itself: `cs::BackwardSync` and the Node wiring (large)
 
@@ -218,8 +299,9 @@ our request in its log: not used again`; else mark 1 h; reassign its batch. `Dup
 `chain.storeBackfilledBlock(block)`; on a storage failure (full disk) keep the block in the buffer,
 set `retryAt = now + 60 s`, return; on success `confirmationsCheck(lastStored_, block)`,
 `lastStored_ = block`, `expectedHash_ = block.previous_hash()`, `--next_`, counters; at block 0:
-`chain.onBackfillComplete()`, log `BACKFILL: full history stored, blocks 0..M; the transaction
-index is rebuilt at the next start`, deactivate. On a verification failure: drop every buffered
+`chain.flushBackfill()`, log `BACKFILL: full history stored, blocks 0..M`, deactivate (nothing
+else: the index, the hash databases and every API call already cover the chain, the design's
+sections 6 and 7). On a verification failure: drop every buffered
 block of that batch's range, mark the peer 1 h (`failures++`), reassign the batch, log
 `BACKFILL: block N from peer X rejected (<reason>): batch requested again`.
 
@@ -286,7 +368,7 @@ generated blocks: blocks 0..300 built with `csdb::Pool`, confidants = 3 generate
 
 Cases: (1) four batches go to four distinct peers, ascending inside, consecutive downwards;
 (2) replies out of order (batch 2 before batch 1) are stored strictly downwards, `first` reaches 0,
-`onBackfillComplete` called once; (3) a block with one altered signature byte is rejected
+the completion line logged once; (3) a block with one altered signature byte is rejected
 ("signatures"), its peer marked, the batch resent to another peer; an altered transaction byte
 ("hash"); a block with the wrong sequence; (4) a peer that never answers: reassignment after 30 s,
 cooldown 60 s; (5) `AwaitAnswer` sets 6-s pacing for that peer only, the others keep 200 ms;
@@ -305,39 +387,54 @@ robustness scenario now shows n6 backfilling to 0 (its end check changes in step
 the scenario is expected to fail on "oldest block after the switch" and is run with the step-5
 branch).
 
-## Step 4. Packaging, Docker and documentation (small-medium)
+## Step 4. Start from a snapshot on any backend, packaging, Docker, documentation (medium)
 
-**Files.** `packaging/docker/entrypoint.sh`, `packaging/docker/README.md`,
+**Files.** `client/src/dbcheck.cpp`, `tests/csnode/dbcheck_tests.cpp`, `.github/workflows/release.yml`,
+`packaging/docker/entrypoint.sh`, `packaging/docker/README.md`,
 `packaging/docker/test/test-entrypoint.sh`, `docs/storage.md`, `docs/differences.md`,
-`docs/CHANGES.md`, `docs/specs/2026-10-17-backward-sync-design.md` (the design, moved from
-`docs/backward-sync` with this plan next to it as `docs/plans/...`).
+`docs/CHANGES.md`, `README.md`, `docs/specs/2026-10-17-backward-sync-design.md` and
+`docs/plans/2026-10-24-backward-sync-plan.md` (already on `docs/backward-sync`).
+
+**RocksDB from the LMDB snapshot (the design's section 8, option a).** In the start-up check
+(`client/src/dbcheck.cpp`: `Facts`, `decide` at 190, `checkImpl` at 211), a new fact
+`restoredSnapshot` = `snapshot.json` exists in the working directory (the parent of `--db-path`,
+where `snapshot-restore.sh` puts it; the node never writes that file). When the database in
+`db/` is lmdb, the configured backend is rocksdb and `restoredSnapshot` holds, `decide` answers
+convert-without-asking, with the log line `the restored snapshot is converted to rocksdb before
+the start` (the same path as `--convert-db`, `convertNow` at 120). Any other combination keeps
+today's rules; to berkeleydb the conversion itself refuses a first block above 0
+(`storage_convert.cpp:328-334`), and the message gains `a snapshot cannot start a berkeleydb
+node: use lmdb or rocksdb, or sync from block 0`. Unit test in `dbcheck_tests.cpp` on `decide`.
+
+**Packages.** `release.yml` adds `packaging/docker/snapshot-restore.sh` to both packages next to
+the node binary (it needs only `curl`, `zstd`, `tar`, `python3`); the full package's
+`config.ini` keeps its `[storage]` section with `db_backend` only.
 
 **Entrypoint.**
 - `entrypoint.sh:123-125`: replace the refusal by `log "switching from pruned to full storage:
   the node keeps its blocks and fetches the older ones in the background (backfill)"`.
-- Snapshot restore (`entrypoint.sh:130-141`): also when `cfg_mode = full`:
-  - `cfg_backend = lmdb`: restore as for a pruned node; the node backfills;
-  - `cfg_backend = rocksdb`: restore, then `CONVERT_ARGS=(--convert-db)` for this start only
-    (write a marker `.convert-snapshot` removed after the node started once; the node converts
-    the ~160k-block LMDB database in place, seconds, and backfills into RocksDB);
-  - `cfg_backend = berkeleydb`: keep syncing from block 0 (`log "snapshots cannot be converted to
-    berkeleydb: syncing from block 0"`).
-  The digest check after a restore (`entrypoint.sh:157-192`) applies unchanged (the start-up digest
-  is the checkpoint's, whatever the backend).
-- `write_config`: a full node's `[storage]` keeps `db_backend` only; `backfill` is on by default.
+- Snapshot restore (`entrypoint.sh:130-141`): also when `cfg_mode = full` and `cfg_backend` is
+  `lmdb` or `rocksdb` (the node converts the rocksdb case by itself, above; no `--convert-db`
+  from the entrypoint); `berkeleydb` keeps syncing from block 0 (`log "snapshots hold an LMDB
+  database that cannot become berkeleydb: syncing from block 0"`). The digest check after a
+  restore (`entrypoint.sh:157-192`) applies unchanged (the start-up digest is the checkpoint's,
+  whatever the backend).
 - `test-entrypoint.sh:158-163` ("pruned to full: refused") becomes "pruned to full: allowed, logs
-  the backfill line"; new cases: full+lmdb first start restores the snapshot; full+rocksdb restores
-  and passes `--convert-db` once (`stub-args`), not on the second start; full+berkeleydb does not
-  restore.
+  the backfill line"; new cases: full+lmdb and full+rocksdb first starts restore the snapshot
+  (the stub node sees `snapshot.json`); full+berkeleydb does not restore.
 
 **Docs.** `storage.md`: the three keys in the settings table; "Full and pruned": going from pruned
 to full keeps the database and the node fetches the older blocks in the background, from the
-lowest stored block down to 0, in the order of the chain; what the log shows; the restart that
-rebuilds the index; disk space needed (about 400 GB LMDB/BerkeleyDB, 130 GB RocksDB for the whole
-chain today, section 10 of the design); `berkeleydb` conversion allowed once block 0 is stored.
-`docker/README.md`: the storage table ("Pruned to full: allowed; the node backfills") and the
-snapshot paragraph (full nodes on lmdb and rocksdb start from the snapshot too).
-`differences.md`: a paragraph under "New options". `CHANGES.md`: the PR lines.
+lowest stored block down to 0, in the order of the chain, usable as they arrive (histories grow
+downwards, nothing to restart); what the log shows; disk space needed (about 400 GB
+LMDB/BerkeleyDB, 130 GB RocksDB for the whole chain today, section 10 of the design);
+`berkeleydb` conversion allowed once block 0 is stored. A new section "A full node from a
+snapshot" with the five steps of the design's section 8 (without Docker: unpack, restore, set
+`db_backend`, start, compare the first `STATE DIGEST` with `snapshot.json`), and the rocksdb
+conversion at the first start. `docker/README.md`: the storage table ("Pruned to full: allowed;
+the node backfills") and the snapshot paragraph (full nodes on lmdb and rocksdb start from the
+snapshot too). `README.md`: one line pointing to that section. `differences.md`: a paragraph
+under "New options". `CHANGES.md`: the PR lines.
 
 ## Step 5. CI: private-network scenarios (medium)
 
@@ -347,13 +444,16 @@ CREDITS_TESTNET`).
 
 **`run.sh`.** New parameters:
 - `BACKFILL=1` (needs `SNAPSHOT_AT`): the joining node (`JOIN_NODE = NODES + 1`) restores the
-  snapshot as a **full** node: `storage_section` writes `db_backend=lmdb` (or `BACKFILL_BACKEND`,
-  `rocksdb` with `EXTRA_ARGS_<join>=--convert-db` on its first start) and no `prune_keep_blocks`;
-  its API is opened (`api_settings`, port 9100 + node) for the comparison. The node is started
-  with `BIN`, never `BIN_ALT` (the mixed scenario needs the new binary there; today
-  `start_node` picks `BIN_ALT` for even nodes, `run.sh:391-395`).
+  snapshot as a **full** node: `storage_section` writes `db_backend=lmdb` (or `BACKFILL_BACKEND`:
+  `rocksdb`, converted by the node at its first start because `snapshot.json` is there, step 4)
+  and no `prune_keep_blocks`; its API is opened (`api_settings`, port 9100 + node) for the
+  comparisons. The node is started with `BIN`, never `BIN_ALT` (the mixed scenario needs the new
+  binary there; today `start_node` picks `BIN_ALT` for even nodes, `run.sh:391-395`).
 - `BACKFILL_CRASH=N`: the joining node is killed with SIGKILL N times while its oldest stored
-  block is above 0 (read from the status line of step 3c), 20 s apart, and restarted.
+  block is above 0 (read from the status line of step 3c), 20 s apart, and restarted; the second
+  kill lands within a second of a `BACKFILL: flushed` log line, and before the third the test
+  build skips the index writes of one block (`./testnet-skip-index-once`, read in
+  `storeBackfilledBlock`), so that the floor is above the first stored block at the restart.
 - `BACKFILL_TAMPER=<node>,<kind>`: a test build reads `./testnet-tamper-replies` (`kind` =
   `signature`: the first signature byte of every served block below `TAMPER_BELOW` flipped;
   `transaction`: a byte of the first transaction's amount) in `Node::sendBlockReply`, as
@@ -368,10 +468,16 @@ End checks (after the existing ones, `run.sh:1104-1117`):
   `PoolInfoGet(seq, 0)` on both for every sequence (hash, prevHash, transactionsCount, confidants,
   realTrusted); any difference or a block not found on one side fails. T = the lowest common
   sequence at the end. 3,000 blocks × 2 calls take under a minute on the loopback;
-- after a restart of the joining node (the existing restart machinery, or a dedicated stop/start
-  at the end): `trxIndex rebuilt from the stored blocks 0..` in its log, then
+- histories, with no restart (`compare_histories.py`, in the same file as `compare_blocks.py`):
   `TransactionsGet(address, 0, 100)` for every funded key (`signers.py` keys) and for the master key
-  on n1 and on the joining node: equal lists of (poolSeq, index); `WalletTransactionsCountGet` equal;
+  on n1 and on the joining node, as lists of (poolSeq, index): once in the middle of the backfill
+  (when the joining node's oldest stored block is still above the first funding block), the joining
+  node's list must equal n1's list restricted to `poolSeq >= oldest stored`, and
+  `WalletTransactionsCountGet` must already be equal (wallet cache); at the end, equal lists. The
+  joining node's log must have no `Inconsistent transaction index` and no `trxIndex: rebuilding`
+  line (the online index is used, not the fallback);
+- `BACKFILL_CRASH`: after the restart that follows the skipped index write, the log has
+  `trxIndex: re-indexed 1 backfilled blocks`; the histories check at the end passes;
 - `BACKFILL_TAMPER`: the joining node logged `rejected (signatures)` and `rejected (hash)` at
   least once each, and `peer ... marked`; the tampering nodes' blocks are nevertheless all present
   (they came from others);
@@ -412,30 +518,33 @@ refuses a put (it should not), the design's BerkeleyDB paragraph is revisited be
 merged. Also a unit test on `DatabaseBerkeleyDB` in `database_berkeleydb_tests.cpp`: put 50..60,
 remove 50..54 by hash, put 54, 53: `get(53)` works, iterator first key is 53.
 
-## Step 7. Optional hardening: sample cross-check of block bytes (small; needs the user's decision)
+## Step 7. Mainnet test and release (operations, not code)
 
-`backfill_crosscheck` (1 in N batches, default 0 = off): the batch is also requested from a second
-peer; the bytes (`to_binary()`) of each block must be equal; a difference marks both peers,
-rejects the batch and requests it from a third. Covers the smart-signature tail that section 3
-cannot verify. Unit test with two fake peers differing in one byte of a smart signature.
+1. On this host, a node from the release package (not Docker: the way of the design's section 8,
+   "Without Docker") in a directory of its own, `db_backend=lmdb`, API on a free port, built from
+   the step-5 branch; then the same in a Docker container (`credits-full-c4`,
+   `CREDITS_STORAGE=full`, `CREDITS_DB_BACKEND=rocksdb`) to cover the entrypoint and the
+   conversion at the first start. The pruned container `credits-pruned-c3` is not touched.
+2. Record every hour for 24 h: oldest stored block, `BACKFILL:` rate lines, CPU and memory,
+   database size, the forward `Last written sequence` lag against the pruned node (must stay
+   within a few blocks), `DuplicatedRequest`/`AwaitAnswer` counts (tell whether mainnet peers
+   have order 35 active).
+3. `check_node.py balances --count 50` and `history --count 20 --min-stored` (new option: a
+   wallet whose monitor history has blocks below the node's oldest stored block is compared on
+   the blocks at or above it, and the node's list must be exactly that suffix) against the
+   monitor while it backfills, every few hours: balances equal, histories equal or an exact
+   suffix.
+4. One stop and restart during the backfill: resume from the lowest stored block, no
+   `trxIndex: rebuilding`, no hole (`compare_blocks.py` cannot run against mainnet: check instead
+   that `PoolInfoGet` finds every block in 20 random windows of 1,000 below the old lowest).
+5. Report: rate, ETA for the whole chain, disk, CPU, whether the default `backfill_rate` should
+   change; release as community.12 with `docs/CHANGES.md` updated.
+6. Later, when the backfill reaches 0 (days): `history` without `--min-stored` must equal the
+   monitor's; `--convert-only` to berkeleydb and open the folder with the official 4.2.532 binary
+   (the upgrade-compat check in reverse).
 
-## Step 8. Mainnet test and release (operations, not code)
-
-1. On this host, a second Docker container (`credits-full-c4`, data directory of its own, API on
-   a free port, `CREDITS_STORAGE=full`, lmdb) from the published snapshot, built from the step-5
-   branch. The pruned container `credits-pruned-c3` is not touched.
-2. Record every hour for 24 h: oldest stored block, `BACKFILL:` rate lines, container CPU and
-   memory (`docker stats`), `db/lmdb/data.mdb` size, the forward `Last written sequence` lag
-   against the pruned node (must stay within a few blocks), `DuplicatedRequest`/`AwaitAnswer`
-   counts (tell whether mainnet peers have order 35 active).
-3. `check_node.py balances --count 50` and `history --count 20` against the monitor while it
-   backfills; the histories must be correct up to the snapshot's range.
-4. Stop it, restart: time of `trxIndex rebuilt from the stored blocks`; then `history` again:
-   full histories must equal the monitor's.
-5. Report: rate, ETA for the whole chain, disk, index rebuild time, whether the default
-   `backfill_rate` should change; release as community.12 with `docs/CHANGES.md` updated.
-6. Later, when the backfill reaches 0 (days): `--convert-only` to berkeleydb and open the folder
-   with the official 4.2.532 binary (the upgrade-compat check in reverse).
+Later option, not in this plan (the user accepted the residual risk): a sample cross-check of
+block bytes from a second peer for the smart-signature tails the node cannot verify.
 
 ## Security considerations (summary for the reviewer)
 
@@ -443,8 +552,11 @@ cannot verify. Unit test with two fake peers differing in one byte of a smart si
   peer; each block must hash to the previous hash of the verified block above it (anchored by the
   snapshot's lowest block) and its signatures must verify against the confidants inside the hash;
   the buffer holds at most 8 batches; 4 requests in flight; `backfill_rate` caps the load.
-- Not verified: smart-signature tails (step 7 optional). Not needed: the round confirmations are
-  inside the hash and are checked only to report an inconsistent chain.
+- Not verified: smart-signature tails (residual risk accepted by the user). Not needed: the round
+  confirmations are inside the hash and are checked only to report an inconsistent chain.
+- The online index never writes an entry pointing to itself (the condition that stops the node,
+  `blockchain.cpp:2394-2410`) and never changes a pointer the forward index wrote above a wallet's
+  tail; a crash leaves at worst unindexed stored blocks, re-indexed at the next start.
 - The responders' anti-duplicate log (order 35) is detected per peer and respected; a peer that
   would refuse every lower request is not asked again.
 - Nothing consensus-relevant: no change to how blocks are built, signed, chosen or applied; the
@@ -456,10 +568,9 @@ cannot verify. Unit test with two fake peers differing in one byte of a smart si
 | Step | Content | Size |
 | --- | --- | --- |
 | 1 | `Storage::pool_save_backfill` + tests | S (≈150 lines + tests) |
-| 2 | BlockChain anchor/store/flush, `BlockHashes::repairBottom`/`flush`, index rebuild key + tests | S-M (≈250 lines + tests) |
+| 2 | BlockChain anchor/store/flush, online backward indexing (`indexBackfilledBlock`, tails, floor, repair), `BlockHashes::repairBottom`/`flush`, non-empty map merge + tests | M (≈450 lines + ≈400 tests) |
 | 3 | `cs::BackwardSync`, Node wiring, config keys, unit tests | L (≈900 lines + ≈500 tests) |
-| 4 | Entrypoint, Docker tests, docs | S-M |
-| 5 | `run.sh` parameters, `compare_blocks.py`, tamper hook, 6 scenarios, storage-switch update | M |
+| 4 | Snapshot conversion at the first start (dbcheck), packages ship `snapshot-restore.sh`, entrypoint, Docker tests, docs incl. "A full node from a snapshot" | M |
+| 5 | `run.sh` parameters, `compare_blocks.py`/`compare_histories.py`, tamper and skip-index hooks, 6 scenarios, storage-switch update | M |
 | 6 | BerkeleyDB scenario and unit test | S |
-| 7 | Optional cross-check | S |
-| 8 | Mainnet test, release | operations, 2-3 days of wall clock |
+| 7 | Mainnet test (package and Docker), release | operations, 2-3 days of wall clock |
