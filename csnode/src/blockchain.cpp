@@ -105,9 +105,11 @@ bool BlockChain::tryQuickStart(
         if (const auto saved = serializationManPtr_->getLoadedDigest(); saved.has_value()) {
             const auto loaded = checkpointDigest();
             if (loaded != *saved) {
-                cserror() << "QUICK START: checkpoint #" << head.sequence << " declares "
-                          << cs::stateDigestLine(head.sequence, saved->digest, saved->wallets)
-                          << ", its caches hold " << cs::stateDigestLine(head.sequence, loaded.digest, loaded.wallets)
+                // no "STATE DIGEST #" here: scripts take the digest of a block from lines with that prefix
+                cserror() << "QUICK START: checkpoint #" << head.sequence << " declares state "
+                          << cs::Utils::byteStreamToHex(saved->digest.data(), saved->digest.size()) << " (" << saved->wallets << " wallets)"
+                          << ", its caches hold " << cs::Utils::byteStreamToHex(loaded.digest.data(), loaded.digest.size())
+                          << " (" << loaded.wallets << " wallets)"
                           << (loaded.settings != saved->settings ? " and other consensus settings" : "") << ", skip it";
                 return false;
             }
