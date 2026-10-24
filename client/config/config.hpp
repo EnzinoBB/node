@@ -70,6 +70,26 @@ struct StorageData {
     size_t rocksdbMemtableMb = 256;         // RocksDB write_buffer_size (MiB); 0 = built-in default
 };
 
+// [snapshot]: snapshots served by this node and fetched from other nodes at a first start
+// (docs/snapshots.md). Read again by the config observer: every key but fetch applies while the
+// node runs.
+struct SnapshotData {
+    uint16_t servePort = 0;                         // 0: no snapshot service
+    std::string serveBind;                          // empty: all interfaces
+    size_t serveMaxConnections = 8;                 // more get 503
+    size_t serveRateKbps = 0;                       // upload cap of all connections; 0: unlimited
+    size_t snapshotBlocks = 101'000;                // blocks before the checkpoint in a snapshot
+    std::string fetch = "auto";                     // auto: restore at a start on an empty database; off: never
+    std::string sources;                            // host:port,host:port
+    std::string sourcesFile = "snapshot_sources.txt";
+    bool probeKnownHosts = true;                    // also try every known host at the default port
+    std::string githubManifest = "https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/latest.json";
+    size_t minSources = 3;                          // independent sources that must agree
+    std::string fallback = "github";                // github: GitHub alone when fewer agree; none: sync from block 0
+    size_t fetchConnections = 4;
+    size_t fetchRateKbps = 0;                       // 0: unlimited
+};
+
 struct ApiData {
     // on by default:
     uint16_t port = 9090;
@@ -226,6 +246,10 @@ public:
         return poolSyncData_;
     }
 
+    const SnapshotData& getSnapshotSettings() const {
+        return snapshotData_;
+    }
+
     const StorageData& getStorageSettings() const {
         return storageData_;
     }
@@ -356,6 +380,10 @@ public:
 
 private:
     static Config readFromFile(const std::string& fileName);
+public:
+    // the [snapshot] section, defaults for missing keys, a warning and the default for a bad value
+    static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
+private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);
     void readPoolSynchronizerData(const boost::property_tree::ptree& config);
@@ -408,6 +436,7 @@ private:
 
     PoolSyncData poolSyncData_;
     StorageData storageData_;
+    SnapshotData snapshotData_;
     ApiData apiData_;
     DbSQLData dbSQLData_;
 
@@ -453,6 +482,9 @@ bool operator!=(const PoolSyncData& lhs, const PoolSyncData& rhs);
 
 bool operator==(const ApiData& lhs, const ApiData& rhs);
 bool operator!=(const ApiData& lhs, const ApiData& rhs);
+
+bool operator==(const SnapshotData& lhs, const SnapshotData& rhs);
+bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs);
 
 bool operator==(const DbSQLData& lhs, const DbSQLData& rhs);
 bool operator!=(const DbSQLData& lhs, const DbSQLData& rhs);
