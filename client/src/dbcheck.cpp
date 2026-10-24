@@ -300,6 +300,10 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
 
 }  // namespace
 
+bool lockedByAnotherProcess(const std::string& dbPath) {
+    return lockDatabase(dbPath) == Lock::Busy;
+}
+
 int check(const std::string& dbPath, const std::string& configured, bool convertFlag, bool convertOnly, uint32_t batch) {
     // No engine exception may escape: print it and stop with nothing changed. The signal handlers
     // are installed and restored inside convertNow, around csdb::convert::run only.

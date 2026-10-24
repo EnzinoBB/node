@@ -11,6 +11,7 @@
 
 #include <params.hpp>
 #include "dbcheck.hpp"
+#include "snapshot_export.hpp"
 #include <version.hpp>
 
 #include <sys/types.h>
@@ -60,6 +61,7 @@ int main(int argc, char* argv[]) {
         ("convert-db", "convert an existing block database to the configured db_backend without asking")
         ("convert-only", "convert the block database to the configured db_backend, then exit")
         ("convert-batch", po::value<uint32_t>()->default_value(100000), "blocks per conversion batch (1 to 1000000)")
+        ("export-snapshot", po::value<std::string>(), "build the snapshot of the latest periodic checkpoint into the given folder, then exit (the node must be stopped)")
         ("config-file", po::value<std::string>(), "path to configuration file (default: \"config.ini\")")
         ("public-key-file", po::value<std::string>(), "path to public key file (default: \"NodePublic.txt\")")
         ("private-key-file", po::value<std::string>(), "path to private key file (default: \"NodePrivate.txt\")")
@@ -206,6 +208,10 @@ int main(int argc, char* argv[]) {
         if (!config.enterWithSeed()) {
             return EXIT_FAILURE;
         }
+    }
+
+    if (vm.count("export-snapshot") > 0) {
+        return snapshot_export::run(config, vm["export-snapshot"].as<std::string>());
     }
 
     if (vm.count(cmdline::argDumpKeys) > 0) {

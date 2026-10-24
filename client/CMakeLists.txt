@@ -48,6 +48,8 @@ add_executable(client
   src/main.cpp
   src/dbcheck.cpp
   src/dbcheck.hpp
+  src/snapshot_export.cpp
+  src/snapshot_export.hpp
   "${CMAKE_CURRENT_BINARY_DIR}/version.cpp" include/client/version.hpp
 )
 

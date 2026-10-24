@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -35,6 +36,9 @@ struct CheckpointHead {
 
 // True when the checkpoint head is the block the chain holds at that sequence, or when this
 // cannot be checked (checkpoint without head, or hash not known locally).
+// head.bin of a checkpoint directory; nullopt when missing or malformed
+std::optional<CheckpointHead> readCheckpointHead(const std::filesystem::path& dir);
+
 bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Bytes(cs::Sequence)>& chainHashAt);
 
 class CachesSerializationManager {

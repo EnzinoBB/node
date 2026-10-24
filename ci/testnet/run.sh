@@ -672,6 +672,26 @@ while :; do
         echo "snapshot test: n$PRUNE_NODE stopped, head $head_digest"
         "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
             | sed 's/^/snapshot test: /'
+        # format 2: the node builds the snapshot of its latest periodic checkpoint itself; the
+        # manifest must declare the digest the checkpoint logged when it was saved
+        rc=0
+        (cd "$WORK/n$PRUNE_NODE" && exec "$BIN" --db-path db --config-file config.ini --export-snapshot "$WORK/snapshot2") \
+            > "$WORK/export.log" 2>&1 || rc=$?
+        grep -a 'export-snapshot:' "$WORK/export.log" | sed 's/^/snapshot test: /'
+        [ "$rc" = 0 ] || { tail -20 "$WORK/export.log"; echo "FAIL: --export-snapshot exited $rc"; exit 1; }
+        python3 - "$WORK/snapshot2" "$WORK/n$PRUNE_NODE/node.log" <<'PY' || exit 1
+import json, os, re, sys
+root, log = sys.argv[1:]
+dirs = [d for d in os.listdir(root) if d.isdigit()]
+assert len(dirs) == 1, dirs
+m = json.load(open(os.path.join(root, dirs[0], "snapshot.json")))
+lines = re.findall(r"STATE DIGEST #(\d+) ([0-9A-Fa-f]{64}) wallets (\d+) checkpoint$", open(log, errors="replace").read(), re.M)
+saved = {int(s): (d.lower(), int(w)) for s, d, w in lines}
+if saved.get(m["seq"]) != (m["state_digest"], m["wallets"]):
+    print(f"FAIL: format-2 snapshot of #{m['seq']} declares {m['state_digest']}, the checkpoint logged {saved.get(m['seq'])}")
+    sys.exit(1)
+print(f"snapshot test: format-2 snapshot of #{m['seq']} ({m['first_block']}..{m['seq']}), digest as logged at the checkpoint, {len(m['files'])} files")
+PY
         start_node "$PRUNE_NODE"
         if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
             f=$(ls "$WORK"/snapshot/credits-pruned-*.tar.zst)

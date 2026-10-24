@@ -263,35 +263,7 @@ struct CachesSerializationManager::Impl {
     }
 
     std::optional<CheckpointHead> loadHead(const std::filesystem::path& dir) {
-        std::ifstream f(dir / kHeadFile, std::ios::binary);
-        if (!f.is_open()) return std::nullopt;
-        uint32_t magic = 0;
-        f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-        if (!f || magic != kHeadMagic) {
-            cswarning() << "CachesSerializationManager: head.bin magic mismatch in " << dir;
-            return std::nullopt;
-        }
-        CheckpointHead head;
-        uint64_t seq = 0;
-        f.read(reinterpret_cast<char*>(&seq), sizeof(seq));
-        head.sequence = static_cast<cs::Sequence>(seq);
-        uint16_t hh = 0;
-        f.read(reinterpret_cast<char*>(&hh), sizeof(hh));
-        if (hh) {
-            head.head_hash.resize(hh);
-            f.read(reinterpret_cast<char*>(head.head_hash.data()), hh);
-        }
-        uint16_t ph = 0;
-        f.read(reinterpret_cast<char*>(&ph), sizeof(ph));
-        if (ph) {
-            head.prev_hash.resize(ph);
-            f.read(reinterpret_cast<char*>(head.prev_hash.data()), ph);
-        }
-        if (!f) {
-            cswarning() << "CachesSerializationManager: head.bin truncated in " << dir;
-            return std::nullopt;
-        }
-        return head;
+        return readCheckpointHead(dir);
     }
 
     std::vector<std::string> divideHashes(const std::string& initial) const {
@@ -637,6 +609,38 @@ bool CachesSerializationManager::save(size_t version, const CheckpointHead& head
     // publish succeeded — drop the backup
     std::filesystem::remove_all(backup_path, ec);
     return true;
+}
+
+std::optional<CheckpointHead> readCheckpointHead(const std::filesystem::path& dir) {
+    std::ifstream f(dir / "head.bin", std::ios::binary);
+    if (!f.is_open()) return std::nullopt;
+    uint32_t magic = 0;
+    f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+    if (!f || magic != 0x44414548u) {
+        cswarning() << "CachesSerializationManager: head.bin magic mismatch in " << dir;
+        return std::nullopt;
+    }
+    CheckpointHead head;
+    uint64_t seq = 0;
+    f.read(reinterpret_cast<char*>(&seq), sizeof(seq));
+    head.sequence = static_cast<cs::Sequence>(seq);
+    uint16_t hh = 0;
+    f.read(reinterpret_cast<char*>(&hh), sizeof(hh));
+    if (hh) {
+        head.head_hash.resize(hh);
+        f.read(reinterpret_cast<char*>(head.head_hash.data()), hh);
+    }
+    uint16_t ph = 0;
+    f.read(reinterpret_cast<char*>(&ph), sizeof(ph));
+    if (ph) {
+        head.prev_hash.resize(ph);
+        f.read(reinterpret_cast<char*>(head.prev_hash.data()), ph);
+    }
+    if (!f) {
+        cswarning() << "CachesSerializationManager: head.bin truncated in " << dir;
+        return std::nullopt;
+    }
+    return head;
 }
 
 bool isCheckpointOnChain(const CheckpointHead& head, const std::function<cs::Bytes(cs::Sequence)>& chainHashAt) {
