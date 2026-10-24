@@ -221,6 +221,14 @@ tested in the private network (step 7).
 **Pass.** Tests green; on the test network a node with `serve_port` set serves `curl
 http://…/snapshot/latest.json` and `curl -r 0-1048575` of a file.
 
+**Only synced nodes serve (user's rule, 2026-10-24).** Any node may serve, whatever its stake, but
+only while it is synced with the network and only a snapshot it has finished building: the routes
+answer `503 Retry-After` while the node's last block is more than a few rounds behind the current
+round (the `wait-head` rule of `ci/snapshot/check_node.py`: within 3 rounds) or while no snapshot is
+built; `latest.json` carries the node's last block at the time of the request (`synced_to`, outside
+the signed line, informative), and the fetcher (5a) drops sources whose `synced_to` is far behind
+the others'. Tests: a node in slow start answers 503; it serves once at the head.
+
 ## Step 5a. Fetcher: sources, agreement, download (large)
 
 **Files.** New `csnode/include/csnode/snapshot_fetcher.hpp`, `csnode/src/snapshot_fetcher.cpp`,
