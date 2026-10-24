@@ -31,6 +31,9 @@ on:
       timeout_min:
         description: 'Minutes each network has to reach its target sequence'
         default: '60'
+      scenario:
+        description: 'More run.sh variables as NAME=value pairs, as a robustness scenario (e.g. PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3300)'
+        default: ''
 
 permissions:
   contents: read
@@ -210,10 +213,17 @@ jobs:
           FUND: '1'
           LOAD_SECONDS: '300'
           WORK: ${{ github.workspace }}/testnet-run
+          SCENARIO: ${{ inputs.scenario || '' }}
         run: |
           chmod +x build/node
           IFS=, read -r CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE <<< "$CONTRACT_LOAD"
           export CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE
+          # NAME=value pairs only, as the robustness scenarios
+          for kv in $SCENARIO; do
+            echo "$kv" | grep -qE '^[A-Z_]+=[a-z0-9,:]+$' || { echo "bad scenario entry $kv"; exit 1; }
+            export "$kv"
+          done
+          [ -z "$SCENARIO" ] || echo "scenario: $SCENARIO"
           ci/testnet/run.sh build/node 2>&1 | tee testnet-run.log
           exit "${PIPESTATUS[0]}"
 

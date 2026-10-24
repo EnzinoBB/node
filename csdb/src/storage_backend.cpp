@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstdio>
 #include <fstream>
+#include <iostream>
 #include <fcntl.h>
 #include <unistd.h>
 
@@ -120,7 +121,11 @@ std::shared_ptr<Database> open(const std::string& name, const std::string& dir) 
 #if defined(CSDB_USE_ROCKSDB)
     if (name == "rocksdb") {
         auto db = std::make_shared<DatabaseRocksDB>();
-        return db->open(dir) ? db : nullptr;
+        if (db->open(dir)) {
+            return db;
+        }
+        std::cerr << "rocksdb: cannot open " << dir << ": " << db->last_error_message() << std::endl;
+        return nullptr;
     }
 #endif
 #if !defined(CSDB_USE_ROCKSDB) || defined(CSDB_USE_BERKELEYDB)

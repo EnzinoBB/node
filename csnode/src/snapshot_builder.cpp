@@ -226,10 +226,16 @@ bool decompressFile(const std::filesystem::path& file, const std::function<bool(
 }
 }  // namespace snapshot_lz4
 
-bool forEachSnapshotBlock(const std::filesystem::path& blocksFile, const std::function<bool(cs::Sequence, cs::Bytes&&)>& visit) {
+bool forEachSnapshotBlock(const std::filesystem::path& blocksFile, const std::function<bool(cs::Sequence, cs::Bytes&&)>& visit,
+                          uint64_t maxRawBytes) {
     // records may span lz4 blocks: keep the unparsed tail
     std::vector<uint8_t> pending;
+    uint64_t total = 0;
     bool ok = snapshot_lz4::decompressFile(blocksFile, [&](const uint8_t* data, size_t size) {
+        total += size;
+        if (total > maxRawBytes) {
+            return false;
+        }
         pending.insert(pending.end(), data, data + size);
         size_t pos = 0;
         while (pending.size() - pos >= 8) {

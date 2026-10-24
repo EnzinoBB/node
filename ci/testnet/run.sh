@@ -59,9 +59,10 @@
 #        precedence over DB_BACKEND, and every pruned node must prune
 #        SNAPSHOT_AT (default 0 = off, needs PRUNE_NODE): at that sequence the pruned node is stopped,
 #        started once without peers to log the digest of its head, packaged with
-#        packaging/docker/snapshot-make.sh and started again; one more node (NODES + 1) restores the
-#        snapshot with snapshot-restore.sh and joins; with SNAPSHOT_CORRUPT=1 the archive is truncated
-#        first, so the restore must fail and that node syncs from block 0
+#        --export-snapshot (format 2) and started again; one more node (NODES + 1) restores the
+#        snapshot with --import-snapshot into its own backend and joins; with SNAPSHOT_CORRUPT=1 the
+#        blocks file is truncated first, so the restore must fail and that node syncs from block 0.
+#        SNAPSHOT_FORMAT=1: packaging/docker/snapshot-make.sh and snapshot-restore.sh instead
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -190,6 +191,7 @@ CRASH_ALL_AT=${CRASH_ALL_AT:-0}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
+SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
@@ -472,7 +474,9 @@ seq_of() {
 # STATE DIGEST is the digest of its head, and stop it again
 digest_offline() {
     local i=$1 dir="$WORK/n$1" before
-    kill -TERM "${PIDS[$i]}"; wait "${PIDS[$i]}" 2>/dev/null || true
+    # this runs in a subshell ($(...)): wait cannot wait for the node, which is not its child
+    kill -TERM "${PIDS[$i]}"
+    for _ in $(seq 1 180); do kill -0 "${PIDS[$i]}" 2>/dev/null || break; sleep 1; done
     pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
     # an empty hosts file stops the node ("No hosts specified"): one host nobody listens on
     echo "127.0.0.1:9 11111111111111111111111111111111" > "$dir/hosts-none.txt"
@@ -481,18 +485,22 @@ digest_offline() {
         /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
         section == "[host_input]" && /^port=/ { print "port=" port; next }
         { print }' "$dir/config.ini" > "$dir/config-offline.ini"
-    before=$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)
+    # the start-up line only ("... wallets <n>" at the end), not the checkpoint lines
+    local startup='STATE DIGEST #[0-9]+ [0-9A-Fa-f]+ wallets [0-9]+ *$'
+    before=$(grep -acE "$startup" "$dir/node.log" || true)
     (cd "$dir" && exec "$BIN" --db-path db --config-file config-offline.ini </dev/null >> stdout.log 2>&1) &
     local pid=$! deadline=$(( $(date +%s) + 300 ))
-    while [ "$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)" -le "${before:-0}" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+    while [ "$(grep -acE "$startup" "$dir/node.log" || true)" -le "${before:-0}" ] && [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 2
     done
     kill -TERM "$pid"; wait "$pid" 2>/dev/null || true
-    if [ "$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)" -le "${before:-0}" ]; then
+    for _ in $(seq 1 180); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    pkill -f "[c]ontract-executor.*n$i/" 2>/dev/null || true
+    if [ "$(grep -acE "$startup" "$dir/node.log" || true)" -le "${before:-0}" ]; then
         echo "FAIL: n$i logged no start-up digest without peers" >&2
         return 1
     fi
-    grep -a 'STATE DIGEST #' "$dir/node.log" | tail -1 | sed 's/^.*STATE DIGEST/STATE DIGEST/'
+    grep -aE "$startup" "$dir/node.log" | tail -1 | sed 's/^.*STATE DIGEST/STATE DIGEST/'
 }
 
 # the lowest sequence among the nodes of the restart test
@@ -670,14 +678,19 @@ while :; do
         snapshot_done=1
         head_digest=$(digest_offline "$PRUNE_NODE") || exit 1
         echo "snapshot test: n$PRUNE_NODE stopped, head $head_digest"
-        "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
-            | sed 's/^/snapshot test: /'
+        if [ "$SNAPSHOT_FORMAT" = 1 ]; then
+            "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
+                | sed 's/^/snapshot test: /'
+        fi
         # format 2: the node builds the snapshot of its latest periodic checkpoint itself; the
         # manifest must declare the digest the checkpoint logged when it was saved
+        # who still holds the database files (RocksDB's LOCK allows one process)
+        { fuser -v "$WORK/n$PRUNE_NODE"/db/LOCK "$WORK/n$PRUNE_NODE"/db/lmdb/lock.mdb 2>&1 || true; } | sed 's/^/snapshot test: holder: /'
+        ps -eo pid,ppid,etimes,args | grep -a "n$PRUNE_NODE\b\|contract-executor" | grep -v grep | sed 's/^/snapshot test: process: /' || true
         rc=0
         (cd "$WORK/n$PRUNE_NODE" && exec "$BIN" --db-path db --config-file config.ini --export-snapshot "$WORK/snapshot2") \
             > "$WORK/export.log" 2>&1 || rc=$?
-        grep -a 'export-snapshot:' "$WORK/export.log" | sed 's/^/snapshot test: /'
+        grep -a 'export-snapshot:\|rocksdb: cannot' "$WORK/export.log" | sed 's/^/snapshot test: /'
         [ "$rc" = 0 ] || { tail -20 "$WORK/export.log"; echo "FAIL: --export-snapshot exited $rc"; exit 1; }
         python3 - "$WORK/snapshot2" "$WORK/n$PRUNE_NODE/node.log" <<'PY' || exit 1
 import json, os, re, sys
@@ -693,14 +706,28 @@ if saved.get(m["seq"]) != (m["state_digest"], m["wallets"]):
 print(f"snapshot test: format-2 snapshot of #{m['seq']} ({m['first_block']}..{m['seq']}), digest as logged at the checkpoint, {len(m['files'])} files")
 PY
         start_node "$PRUNE_NODE"
-        if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
-            f=$(ls "$WORK"/snapshot/credits-pruned-*.tar.zst)
-            head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
-            echo "snapshot test: archive truncated"
-        fi
         rc=0
-        "$REPO/packaging/docker/snapshot-restore.sh" "$WORK/n$JOIN_NODE" "$WORK/snapshot/latest.json" \
-            > "$WORK/restore.log" 2>&1 || rc=$?
+        if [ "$SNAPSHOT_FORMAT" = 1 ]; then
+            if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+                f=$(ls "$WORK"/snapshot/credits-pruned-*.tar.zst)
+                head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+                echo "snapshot test: archive truncated"
+            fi
+            "$REPO/packaging/docker/snapshot-restore.sh" "$WORK/n$JOIN_NODE" "$WORK/snapshot/latest.json" \
+                > "$WORK/restore.log" 2>&1 || rc=$?
+        else
+            manifest=$(ls "$WORK"/snapshot2/*/snapshot.json)
+            if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+                f="$(dirname "$manifest")/blocks.bin.lz4"
+                head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+                echo "snapshot test: blocks.bin.lz4 truncated"
+            fi
+            # the joining node restores the snapshot itself into its configured backend
+            (cd "$WORK/n$JOIN_NODE" && exec "$BIN" --db-path db --config-file config.ini --import-snapshot "$manifest") \
+                > "$WORK/restore.log" 2>&1 || rc=$?
+            grep -a 'import-snapshot:' "$WORK/restore.log" > "$WORK/restore.short" || true
+            mv "$WORK/restore.short" "$WORK/restore.log"
+        fi
         sed 's/^/snapshot test: /' "$WORK/restore.log"
         echo "snapshot test: restore exit $rc; n$JOIN_NODE joins at sequence $min"
         if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ "$rc" != 2 ]; then echo "FAIL: a truncated snapshot was restored"; exit 1; fi

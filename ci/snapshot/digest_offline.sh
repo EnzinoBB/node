@@ -16,7 +16,8 @@ awk '
     { print }' config.ini > config-offline.ini
 # the node's console output of this run (the packaged config.ini logs info to the console): a count
 # of digest lines in log/ can go down when the start rotates the logs and removes the oldest file
-digests() { grep -a 'STATE DIGEST #' offline.out 2>/dev/null || true; }
+# the start-up line only: a quick start also logs the digest of the checkpoint it loaded
+digests() { grep -aE 'STATE DIGEST #[0-9]+ [0-9A-Fa-f]+ wallets [0-9]+ *$' offline.out 2>/dev/null || true; }
 ./node --db-path db --config-file config-offline.ini </dev/null > offline.out 2>&1 &
 pid=$!
 deadline=$(( $(date +%s) + timeout ))
