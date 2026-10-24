@@ -276,6 +276,13 @@ jobs:
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 TARGET_SEQ=2500
           # smart contracts (each node with its executor, contracts.py through n1) across the faults:
           # six SIGKILLs of n6 and its executor while contracts are deployed and called
+          # reproduction of the contract state divergence (docs/specs/2026-10-24-contract-state-sync-design.md):
+          # a node that syncs from block 0 through plays of a contract reading its own balance; fails
+          # until contract states are fetched instead of re-executed
+          - name: contracts-dice-join
+            env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300
+            contracts: true
+            manual: true
           - name: contracts-crash
             env: DB_BACKEND=lmdb CRASH_NODE=6 CONTRACTS=1 TARGET_SEQ=1600
             contracts: true

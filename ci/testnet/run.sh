@@ -34,6 +34,8 @@
 #        node reached CONTRACTS_AFTER_AT (default 0); the states are compared once every node,
 #        a joining one too, reached TARGET_SEQ. contracts.py sends everything through n1: a
 #        contract scenario never kills, partitions or slows n1
+#        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
+#        times before the restart test; a node that syncs through the plays re-executes them
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
 #        seconds: CONTRACT_WRITE_RATE (default 1) Counter.next writes a second from every node's
 #        account through its own API, and CONTRACT_READ_RATE (default 5) Counter.get reads (getters,
@@ -175,6 +177,7 @@ SYNCRO_ROUND=${SYNCRO_ROUND:-0}
 JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
 CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
+CONTRACT_DICE=${CONTRACT_DICE:-0}
 [ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
     || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
 PRUNE_NODE=${PRUNE_NODE:-0}
@@ -970,7 +973,7 @@ PY
             --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
             --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
             --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
-            --stats-file "$WORK/contracts-stats.json") > "$WORK/contracts.log" 2>&1 &
+            --stats-file "$WORK/contracts-stats.json" $([ "$CONTRACT_DICE" = 1 ] && echo --dice)) > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
     # contracts.py ended before its first calls were done: nothing would release the restart test
