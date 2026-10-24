@@ -13,6 +13,8 @@
 #include <csdb/database.hpp>
 #include <csdb/storage_backend.hpp>
 #include <csnode/snapshot_builder.hpp>
+#include <csnode/snapshot_importer.hpp>
+#include <csnode/snapshot_manifest.hpp>
 #include <csnode/statedigest.hpp>
 
 namespace snapshot_export {
@@ -138,6 +140,37 @@ int run(const Config& config, const std::string& outDir) {
     }
     say() << "built " << r.dir.string() << ": block " << r.manifest.seq << ", state digest " << r.manifest.stateDigest
           << ", " << r.manifest.wallets << " wallets, " << r.manifest.files.size() << " files, " << bytes / (1 << 20) << " MB" << std::endl;
+    return 0;
+}
+
+int runImport(const Config& config, const std::string& manifestFile) {
+    auto sayImport = []() -> std::ostream& { return std::cout << "import-snapshot: "; };
+    const std::string dbPath = config.getPathToDB();
+    if (dbcheck::lockedByAnotherProcess(dbPath)) {
+        sayImport() << "a node is running on " << dbPath << ": stop it first" << std::endl;
+        return 2;
+    }
+    std::ifstream in(manifestFile, std::ios::binary);
+    if (!in) {
+        sayImport() << "cannot read " << manifestFile << std::endl;
+        return 2;
+    }
+    std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string error;
+    const auto manifest = cs::SnapshotManifest::fromJson(json, &error);
+    if (!manifest) {
+        sayImport() << "not restored: the manifest is refused: " << error << std::endl;
+        return 2;
+    }
+    const auto backend = config.getStorageSettings().dbBackend;
+    sayImport() << "block " << manifest->seq << " (blocks " << manifest->firstBlock << ".." << manifest->seq << "), state digest "
+                << manifest->stateDigest << ", signed by " << manifest->nodeKey << ", into a new " << backend << " database" << std::endl;
+    const auto r = cs::importSnapshot(fs::path(manifestFile).parent_path(), *manifest, fs::current_path(), dbPath, backend);
+    if (!r.ok) {
+        sayImport() << "not restored: " << r.error << (r.fileAtFault.empty() ? "" : " (" + r.fileAtFault + ")") << std::endl;
+        return 2;
+    }
+    sayImport() << "restored block " << manifest->seq << std::endl;
     return 0;
 }
 

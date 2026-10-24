@@ -59,9 +59,10 @@
 #        precedence over DB_BACKEND, and every pruned node must prune
 #        SNAPSHOT_AT (default 0 = off, needs PRUNE_NODE): at that sequence the pruned node is stopped,
 #        started once without peers to log the digest of its head, packaged with
-#        packaging/docker/snapshot-make.sh and started again; one more node (NODES + 1) restores the
-#        snapshot with snapshot-restore.sh and joins; with SNAPSHOT_CORRUPT=1 the archive is truncated
-#        first, so the restore must fail and that node syncs from block 0
+#        --export-snapshot (format 2) and started again; one more node (NODES + 1) restores the
+#        snapshot with --import-snapshot into its own backend and joins; with SNAPSHOT_CORRUPT=1 the
+#        blocks file is truncated first, so the restore must fail and that node syncs from block 0.
+#        SNAPSHOT_FORMAT=1: packaging/docker/snapshot-make.sh and snapshot-restore.sh instead
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -190,6 +191,7 @@ CRASH_ALL_AT=${CRASH_ALL_AT:-0}
 JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
+SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
@@ -670,8 +672,10 @@ while :; do
         snapshot_done=1
         head_digest=$(digest_offline "$PRUNE_NODE") || exit 1
         echo "snapshot test: n$PRUNE_NODE stopped, head $head_digest"
-        "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
-            | sed 's/^/snapshot test: /'
+        if [ "$SNAPSHOT_FORMAT" = 1 ]; then
+            "$REPO/packaging/docker/snapshot-make.sh" "$WORK/n$PRUNE_NODE" "$WORK/snapshot" "$MDB_COPY" local \
+                | sed 's/^/snapshot test: /'
+        fi
         # format 2: the node builds the snapshot of its latest periodic checkpoint itself; the
         # manifest must declare the digest the checkpoint logged when it was saved
         rc=0
@@ -693,14 +697,28 @@ if saved.get(m["seq"]) != (m["state_digest"], m["wallets"]):
 print(f"snapshot test: format-2 snapshot of #{m['seq']} ({m['first_block']}..{m['seq']}), digest as logged at the checkpoint, {len(m['files'])} files")
 PY
         start_node "$PRUNE_NODE"
-        if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
-            f=$(ls "$WORK"/snapshot/credits-pruned-*.tar.zst)
-            head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
-            echo "snapshot test: archive truncated"
-        fi
         rc=0
-        "$REPO/packaging/docker/snapshot-restore.sh" "$WORK/n$JOIN_NODE" "$WORK/snapshot/latest.json" \
-            > "$WORK/restore.log" 2>&1 || rc=$?
+        if [ "$SNAPSHOT_FORMAT" = 1 ]; then
+            if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+                f=$(ls "$WORK"/snapshot/credits-pruned-*.tar.zst)
+                head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+                echo "snapshot test: archive truncated"
+            fi
+            "$REPO/packaging/docker/snapshot-restore.sh" "$WORK/n$JOIN_NODE" "$WORK/snapshot/latest.json" \
+                > "$WORK/restore.log" 2>&1 || rc=$?
+        else
+            manifest=$(ls "$WORK"/snapshot2/*/snapshot.json)
+            if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+                f="$(dirname "$manifest")/blocks.bin.lz4"
+                head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+                echo "snapshot test: blocks.bin.lz4 truncated"
+            fi
+            # the joining node restores the snapshot itself into its configured backend
+            (cd "$WORK/n$JOIN_NODE" && exec "$BIN" --db-path db --config-file config.ini --import-snapshot "$manifest") \
+                > "$WORK/restore.log" 2>&1 || rc=$?
+            grep -a 'import-snapshot:' "$WORK/restore.log" > "$WORK/restore.short" || true
+            mv "$WORK/restore.short" "$WORK/restore.log"
+        fi
         sed 's/^/snapshot test: /' "$WORK/restore.log"
         echo "snapshot test: restore exit $rc; n$JOIN_NODE joins at sequence $min"
         if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ "$rc" != 2 ]; then echo "FAIL: a truncated snapshot was restored"; exit 1; fi

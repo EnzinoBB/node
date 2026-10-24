@@ -269,6 +269,16 @@ jobs:
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100
           - name: snapshot-corrupt
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_CORRUPT=1 TARGET_SEQ=3100
+          # format 2 across block databases: exported by a pruned BerkeleyDB node into a pruned LMDB one,
+          # and by a pruned RocksDB node into a full RocksDB one; format 1 kept for the previous image
+          - name: snapshot-join-from-berkeleydb
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=4 SNAPSHOT_AT=2300 TARGET_SEQ=3300
+            fixed: true
+          - name: snapshot-join-rocksdb-full
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,rocksdb PRUNE_NODE=6 JOIN_FULL=1 SNAPSHOT_AT=2300 TARGET_SEQ=3300
+            fixed: true
+          - name: snapshot-join-format1
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_FORMAT=1 TARGET_SEQ=3100
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
           - name: storage-switch
             env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=2300 TARGET_SEQ=3300
