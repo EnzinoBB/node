@@ -257,3 +257,41 @@ TEST(SnapshotManifest, OnlyKnownNames) {
     EXPECT_FALSE(cs::SnapshotManifest::isKnownFileName("NodePrivate.txt"));
     EXPECT_FALSE(cs::SnapshotManifest::isKnownFileName("qs-config.ini.lz4"));
 }
+
+TEST(SnapshotBuilder, RemovesOnlySnapshotFolders) {
+    Fixture fx("snapshot_build_only_snapshots");
+    makeCheckpoint(fx.root / "qs" / "200", 200, fx.chain.hashes[200]);
+    fs::create_directories(fx.root / "out" / "100");                  // a numbered folder that is not a snapshot
+    std::ofstream(fx.root / "out" / "100" / "walletscache.dat") << "x";
+    fs::create_directories(fx.root / "out" / "150");                  // an earlier snapshot
+    std::ofstream(fx.root / "out" / "150" / "snapshot.json") << "{}";
+    const auto r = cs::buildSnapshot(fx.input(), fx.root / "out", fx.key);
+    ASSERT_TRUE(r.ok) << r.error;
+    EXPECT_TRUE(fs::exists(fx.root / "out" / "100" / "walletscache.dat"));
+    EXPECT_FALSE(fs::exists(fx.root / "out" / "150"));
+}
+
+TEST(SnapshotBuilder, RefusesToReplaceAFolderThatIsNotASnapshot) {
+    Fixture fx("snapshot_build_refuse");
+    makeCheckpoint(fx.root / "qs" / "200", 200, fx.chain.hashes[200]);
+    // the output root is the checkpoints folder itself: qs/200 must survive
+    const auto r = cs::buildSnapshot(fx.input(), fx.root / "qs", fx.key);
+    EXPECT_FALSE(r.ok);
+    EXPECT_TRUE(fs::exists(fx.root / "qs" / "200" / "walletscache.dat"));
+    EXPECT_TRUE(fs::exists(fx.root / "qs" / "200" / "head.bin"));
+}
+
+TEST(SnapshotManifest, DeepNestingAndLargeBlockNumbersRejected) {
+    EXPECT_FALSE(cs::SnapshotManifest::fromJson(std::string(1000, '[') + std::string(1000, ']')).has_value());
+    Fixture fx("snapshot_manifest_seq");
+    makeCheckpoint(fx.root / "qs" / "200", 200, fx.chain.hashes[200]);
+    const auto r = cs::buildSnapshot(fx.input(), fx.root / "out", fx.key);
+    ASSERT_TRUE(r.ok) << r.error;
+    auto big = r.manifest;
+    big.seq = 1ull << 33;
+    big.sign(fx.key);
+    EXPECT_FALSE(cs::SnapshotManifest::fromJson(big.toJson()).has_value());
+    auto chunks = r.manifest;
+    chunks.files[0].chunks[0][0] = chunks.files[0].chunks[0][0] == 'a' ? 'b' : 'a';
+    EXPECT_FALSE(chunks.verify());
+}

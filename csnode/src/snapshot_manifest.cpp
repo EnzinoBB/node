@@ -1,6 +1,7 @@
 #include <csnode/snapshot_manifest.hpp>
 
 #include <algorithm>
+#include <limits>
 #include <regex>
 #include <sstream>
 
@@ -98,15 +99,21 @@ bool SnapshotManifest::isKnownFileName(const std::string& name) {
 
 std::string SnapshotManifest::filesHash() const {
     std::string lines;
+    // every byte a client checks is covered: whole file and each chunk
     for (const auto& f : files) {
-        lines += f.name + " " + std::to_string(f.size) + " " + f.sha256 + "\n";
+        lines += f.name + " " + std::to_string(f.size) + " " + std::to_string(f.rawSize) + " " + f.sha256;
+        for (const auto& c : f.chunks) {
+            lines += " " + c;
+        }
+        lines += "\n";
     }
     return sha256Hex(reinterpret_cast<const uint8_t*>(lines.data()), lines.size());
 }
 
 std::string SnapshotManifest::signedLine() const {
     return "credits-snapshot/2 " + std::to_string(seq) + " " + headHash + " " + stateDigest + " " +
-           std::to_string(wallets) + " " + settingsDigest + " " + std::to_string(firstBlock) + " " + filesHash();
+           std::to_string(wallets) + " " + settingsDigest + " " + std::to_string(firstBlock) + " " +
+           std::to_string(chunkSize) + " " + filesHash();
 }
 
 void SnapshotManifest::sign(const cs::PrivateKey& key) {
@@ -176,6 +183,26 @@ std::optional<SnapshotManifest> SnapshotManifest::fromJson(const std::string& js
         fail(error, "manifest larger than 1 MB");
         return std::nullopt;
     }
+    // read_json recurses: a nesting depth this format never has is refused before parsing
+    {
+        int depth = 0;
+        bool inString = false;
+        for (size_t i = 0; i < json.size(); ++i) {
+            const char c = json[i];
+            if (inString) {
+                if (c == '\\') ++i;
+                else if (c == '"') inString = false;
+            }
+            else if (c == '"') inString = true;
+            else if (c == '{' || c == '[') {
+                if (++depth > 8) {
+                    fail(error, "nested too deep");
+                    return std::nullopt;
+                }
+            }
+            else if (c == '}' || c == ']') --depth;
+        }
+    }
     boost::property_tree::ptree tree;
     try {
         std::istringstream in(json);
@@ -227,7 +254,7 @@ std::optional<SnapshotManifest> SnapshotManifest::fromJson(const std::string& js
         return std::nullopt;
     };
     if (m.format != kFormat) return reject("format is not 2");
-    if (m.seq == 0 || m.firstBlock > m.seq) return reject("bad block range");
+    if (m.seq == 0 || m.firstBlock > m.seq || m.seq > std::numeric_limits<uint32_t>::max()) return reject("bad block range");
     if (!isHex(m.headHash, 64) || !isHex(m.stateDigest, 64) || !isHex(m.settingsDigest, 64)) return reject("bad hash or digest");
     if (!isHex(m.signature, 128)) return reject("bad signature");
     if (!isPlain(m.created, 32) || !isPlain(m.node, 64) || !isPlain(m.nodeKey, 64)) return reject("bad text field");

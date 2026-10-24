@@ -1,4 +1,5 @@
 #include "snapshot_export.hpp"
+#include "dbcheck.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -44,6 +45,12 @@ std::string nodeVersion() {
     std::ifstream f("VERSION");
     std::string v;
     if (f && std::getline(f, v) && !v.empty() && v.size() <= 64) {
+        // printed into the manifest's JSON as it is: only plain characters
+        for (auto& c : v) {
+            if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
+                c = '_';
+            }
+        }
         return v;
     }
     return std::to_string(Config::getNodeVersion()) + "." + std::to_string(Config::getMinorNodeVersion()) + " " +
@@ -58,6 +65,34 @@ int run(const Config& config, const std::string& outDir) {
     if (S == 0) {
         say() << "no periodic checkpoint with a state digest in qs/ (checkpoints of earlier builds have none)" << std::endl;
         return 1;
+    }
+    // the export reads the database files directly: never next to a running node (BerkeleyDB would
+    // even run recovery on its live environment), never into an empty folder or another backend's
+    if (dbcheck::lockedByAnotherProcess(dbPath)) {
+        say() << "a node is running on " << dbPath << ": stop it first" << std::endl;
+        return 1;
+    }
+    const auto found = csdb::backend::detect(dbPath, true);
+    if (std::find(found.begin(), found.end(), storage.dbBackend) == found.end()) {
+        say() << dbPath << " holds no " << storage.dbBackend << " database (the configured db_backend)" << std::endl;
+        return 1;
+    }
+    // the output must not be a folder of the node's data: the builder replaces numbered folders in it
+    {
+        std::error_code e1, e2;
+        const auto out = fs::weakly_canonical(outDir, e1);
+        const auto here = fs::weakly_canonical(fs::current_path(), e2);
+        if (e1 || out == here) {
+            say() << outDir << " is the node's folder, choose another one" << std::endl;
+            return 1;
+        }
+        for (const fs::path data : {fs::path("qs"), fs::path(dbPath), fs::path("caches")}) {
+            const auto d = fs::weakly_canonical(data, e2);
+            if (!e2 && std::mismatch(d.begin(), d.end(), out.begin(), out.end()).first == d.end()) {
+                say() << outDir << " is inside the node's data (" << data.string() << "), choose another folder" << std::endl;
+                return 1;
+            }
+        }
     }
     auto db = csdb::backend::open(storage.dbBackend, dbPath);
     if (!db || !db->is_open()) {

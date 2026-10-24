@@ -287,6 +287,22 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
         return failWith("the checkpoint's block is not stored");
     }
 
+    // only folders this builder made are replaced or removed: a misdirected outRoot (qs, db, ...)
+    // must lose nothing
+    auto isBuiltSnapshot = [&](const std::filesystem::path& dir) {
+        return std::filesystem::is_regular_file(dir / "snapshot.json", ec);
+    };
+    if (std::filesystem::exists(final, ec) && !isBuiltSnapshot(final)) {
+        return failWith(final.string() + " exists and is not a snapshot");
+    }
+    // a build interrupted earlier left only snapshot files in <S>.tmp
+    for (const auto& entry : std::filesystem::directory_iterator(tmp, ec)) {
+        const auto name = entry.path().filename().string();
+        if (name != "snapshot.json" && !SnapshotManifest::isKnownFileName(name)) {
+            result.error = tmp.string() + " holds " + name + ", which is not a snapshot file";
+            return result;
+        }
+    }
     std::filesystem::remove_all(tmp, ec);
     std::filesystem::create_directories(tmp, ec);
     if (ec) {
@@ -411,7 +427,8 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     }
     for (const auto& entry : std::filesystem::directory_iterator(outRoot, ec)) {
         const auto name = entry.path().filename().string();
-        if (name != std::to_string(S) && !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isdigit(c) != 0; })) {
+        if (name != std::to_string(S) && !name.empty() && std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isdigit(c) != 0; }) &&
+            isBuiltSnapshot(entry.path())) {
             std::filesystem::remove_all(entry.path(), ec);
         }
     }

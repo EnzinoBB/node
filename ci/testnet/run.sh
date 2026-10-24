@@ -685,7 +685,7 @@ root, log = sys.argv[1:]
 dirs = [d for d in os.listdir(root) if d.isdigit()]
 assert len(dirs) == 1, dirs
 m = json.load(open(os.path.join(root, dirs[0], "snapshot.json")))
-lines = re.findall(r"STATE DIGEST #(\d+) ([0-9A-Fa-f]{64}) wallets (\d+) checkpoint\b", open(log, errors="replace").read())
+lines = re.findall(r"STATE DIGEST #(\d+) ([0-9A-Fa-f]{64}) wallets (\d+) checkpoint$", open(log, errors="replace").read(), re.M)
 saved = {int(s): (d.lower(), int(w)) for s, d, w in lines}
 if saved.get(m["seq"]) != (m["state_digest"], m["wallets"]):
     print(f"FAIL: format-2 snapshot of #{m['seq']} declares {m['state_digest']}, the checkpoint logged {saved.get(m['seq'])}")
