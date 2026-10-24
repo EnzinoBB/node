@@ -69,6 +69,7 @@ add_library(csnode
   include/csnode/configholder.hpp
   include/csnode/multiwallets.hpp
   include/csnode/statedigest.hpp
+  include/csnode/blockverifier.hpp
   include/csnode/sendcachedata.hpp
   include/csnode/eventreport.hpp
   include/csnode/idatastream.hpp
@@ -109,6 +110,7 @@ add_library(csnode
   src/configholder.cpp
   src/multiwallets.cpp
   src/statedigest.cpp
+  src/blockverifier.cpp
   src/sendcachedata.cpp
   src/eventreport.cpp
   src/poolcache.cpp
