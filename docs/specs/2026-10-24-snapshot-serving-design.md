@@ -561,23 +561,14 @@ matching at the end:
 on this host restores with `sources=127.0.0.1:9511`, `min_sources=2` and GitHub, which is the
 first agreement between a node and the workflow; then the weekly job's first `snapshots.md`.
 
-## 14. Open questions for the user
+## 14. Decisions (2026-10-24)
 
-1. **HTTPS to GitHub through the system `curl`** (the design) or OpenSSL in the static build?
-   `curl` is on nearly every host and in the image; OpenSSL costs build changes and CA-bundle
-   handling.
-2. **Serving on by default?** The binary defaults to off. Should the pruned package's `config.ini`
-   and the Docker `.env.example` enable it (port 9511, `serve_rate_kbps=2000`), so that the
-   network gets sources without operators acting? Operators then open one more port.
-3. **`min_sources=3` and `fallback=github`**: keep, or `fallback=none` once enough nodes serve?
-4. **Compression**: lz4 (in tree, measured in step 3) or add zstd (2.6x on format 1) as a
-   third-party library? Decide on the lz4 numbers.
-5. **GitHub moves to checkpoint blocks** (section 10): a published snapshot up to a day older
-   than today's, in exchange for agreement with nodes. Alternative: GitHub stays at the head and
-   never agrees with anybody, counting only as the fallback.
-6. **Second digest** over the consensus settings of `blockchain.dat` in `state_digest.bin` and
-   the manifest now (section 7, third row)?
-7. **Signature checks on import** (about a minute): keep, or hash chain only as a quick start
-   does for blocks read from the database?
-8. **Step 0 measurement** of digest families: may the local node's logs be read for the comparison
-   with the CI run (it means reading, not touching, the container's files)?
+1. **HTTPS to GitHub through the system `curl`.** No OpenSSL in the static build.
+2. **Serving on by default in the packages and in Docker** (port 9511, `serve_rate_kbps=2000`).
+   The binary alone defaults to off; `config.ini` turns it off without a restart.
+3. **`min_sources=3` with `fallback=github`.** To be reviewed once enough nodes serve.
+4. **Compression**: decided in step 3a on the lz4 numbers (zstd as a library if lz4 is far behind).
+5. **GitHub moves to checkpoint blocks** (section 10), so that it can agree with nodes.
+6. **Second digest over the consensus settings**: now, in `state_digest.bin` and the manifest.
+7. **Signature checks on import**: kept.
+8. **Step 0**: the local node's logs are read (not touched) for the digest-family measurement.
