@@ -56,8 +56,11 @@ csdb::Pool signedBlock(cs::Sequence seq, const Keys& keys, uint64_t signers, con
         p.add_confirmation_mask((1ull << prev->pub.size()) - 1);
         p.add_round_confirmations(confirmations);
     }
-    EXPECT_TRUE(p.compose());
-    const cs::Hash hash = toHash(p.hash());
+    // the signatures are outside the hashed part: the hash of a composed copy is the block's hash,
+    // and the signatures are set before the block itself is composed (it is read-only after)
+    auto probe = p.clone();
+    EXPECT_TRUE(probe.compose());
+    const cs::Hash hash = toHash(probe.hash());
     std::vector<cs::Signature> sigs;
     for (size_t i = 0; i < keys.priv.size(); ++i) {
         if (signers >> i & 1) {
@@ -65,7 +68,8 @@ csdb::Pool signedBlock(cs::Sequence seq, const Keys& keys, uint64_t signers, con
         }
     }
     p.set_signatures(sigs);
-    return csdb::Pool::from_binary(p.to_binary_updated());
+    EXPECT_TRUE(p.compose());
+    return csdb::Pool::from_binary(p.to_binary());
 }
 }  // namespace
 
@@ -108,10 +112,10 @@ TEST(BlockVerifier, AlteredOrMissingSignatureFails) {
     p.set_confidants(keys.pub);
     p.add_number_trusted(3);
     p.add_real_trusted(0b111);
-    ASSERT_TRUE(p.compose());
     std::vector<cs::Signature> one{block.signatures().front()};
     p.set_signatures(one);
-    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(csdb::Pool::from_binary(p.to_binary_updated()), reason));
+    ASSERT_TRUE(p.compose());
+    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(csdb::Pool::from_binary(p.to_binary()), reason));
 }
 
 TEST(BlockVerifier, GenesisNeedsNoSignature) {
