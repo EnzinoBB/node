@@ -77,6 +77,33 @@ bool anyDone(const State& s) {
 }
 
 // the next batch to convert after what the state records; false when every block is converted
+bool nextBatch(const State& s, uint32_t batch, int64_t& lo, int64_t& hi);
+
+bool allConverted(const State& s) {
+    int64_t lo = 0, hi = 0;
+    return !nextBatch(s, 1, lo, hi);
+}
+
+// blocks the state still leaves in the old database
+uint64_t blocksLeft(const State& s) {
+    if (s.ascending) return s.doneUpTo < 0 ? uint64_t(s.last) - s.first + 1 : uint64_t(int64_t(s.last) - s.doneUpTo);
+    return s.doneDownTo < 0 ? uint64_t(s.last) - s.first + 1 : uint64_t(s.doneDownTo - int64_t(s.first));
+}
+
+// Opening BerkeleyDB runs recovery, which throws when it cannot replay the log: an engine that does
+// not open gives nullptr and the reason
+std::shared_ptr<Database> openOld(const std::string& name, const std::string& dir, std::string& error) {
+    try {
+        auto db = backend::open(name, dir);
+        if (!db) error = "it does not open";
+        return db;
+    }
+    catch (const std::exception& e) {
+        error = e.what();
+        return nullptr;
+    }
+}
+
 bool nextBatch(const State& s, uint32_t batch, int64_t& lo, int64_t& hi) {
     if (s.ascending) {
         lo = s.doneUpTo < 0 ? int64_t(s.first) : s.doneUpTo + 1;
@@ -178,7 +205,7 @@ bool writeState(const std::string& dbPath, const State& s) {
     return syncWrite(fs::path(dbPath) / kStateFile, o.str());
 }
 
-uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, uint32_t batch) {
+uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, const std::string& to, uint32_t batch) {
     const auto files = backend::files(from, dbPath);
     if (files.empty()) return 0;    // opening would create an empty database
     uint64_t bytes = 0;
@@ -191,9 +218,20 @@ uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, u
         std::error_code ec;
         const fs::path dir(dbPath);
         const uint64_t done = fs::exists(dir / kStateFile, ec) ? folderBytes(dir / kNewDir) : 0;
-        return (bytes > done ? bytes - done : 0) + kMargin;
+        // the new database in its own format: RocksDB's compressed blocks take several times their
+        // size in LMDB or BerkeleyDB
+        const uint64_t target = (from == "rocksdb" && to != "rocksdb") ? bytes * kExpansionFromRocksDb : bytes;
+        return (target > done ? target - done : 0) + kMargin;
     }
-    auto db = backend::open(from, dbPath);
+    // a resumed conversion knows how many blocks are left without opening the old database, which
+    // may not open any more once every block is converted
+    if (State st; fs::exists(fs::path(dbPath) / kStateFile) && readState(dbPath, st) && st.from == from) {
+        const uint64_t left = blocksLeft(st);
+        if (left == 0) return kMargin;
+        return 2 * (bytes / left) * std::min<uint64_t>(batch, left) + kMargin;
+    }
+    std::string error;
+    auto db = openOld(from, dbPath, error);
     if (!db) return bytes;
     auto it = db->new_iterator();
     if (!it) return bytes;
@@ -257,8 +295,27 @@ Result run(const Options& opt) {
         return finish(opt, st, r, started);
     }
 
-    auto oldDb = backend::open(opt.from, opt.dbPath);
-    if (!oldDb) return failed(r, "cannot open the " + opt.from + " database");
+    // Every block is in .convert-new, flushed and verified batch by batch: the old database is only
+    // compared with it before its files are deleted. One that does not open (a crash in its last
+    // compaction can leave a BerkeleyDB log that recovery cannot replay) is skipped.
+    const bool withoutOld = resuming && allConverted(st) && st.contractsCopied;
+    std::string openError;
+    auto oldDb = openOld(opt.from, opt.dbPath, openError);
+    if (!oldDb) {
+        if (!resuming) return failed(r, "cannot open the " + opt.from + " database: " + openError);
+        if (allConverted(st) && !st.contractsCopied) {
+            return failed(r, "the " + opt.from + " database cannot be opened (" + openError
+                             + "); its contract records are not copied yet: db/.convert and db/.convert-new are kept");
+        }
+        if (!withoutOld) {
+            int64_t lo = 0, hi = 0;
+            nextBatch(st, 1, lo, hi);
+            const int64_t a = st.ascending ? lo : int64_t(st.first), b = st.ascending ? int64_t(st.last) : hi;
+            return failed(r, "the " + opt.from + " database cannot be opened (" + openError + "); blocks " + std::to_string(a) + ".." + std::to_string(b)
+                             + " are not converted yet: db/.convert and db/.convert-new are kept");
+        }
+        say(opt, "the " + opt.from + " database cannot be opened (" + openError + "): every block is already in db/.convert-new, finishing without it");
+    }
     if (!resuming) {
         // the iterator closes before anything is written: a BerkeleyDB cursor holds page locks
         auto it = oldDb->new_iterator();
@@ -312,7 +369,8 @@ Result run(const Options& opt) {
 
     // A batch recorded before a crash may still be partly in the old database: remove what is left
     // of it, each block only if the new database holds the same bytes under its sequence
-    if (anyDone(st)) {
+    // with every block converted the old files are deleted at the end anyway
+    if (anyDone(st) && !allConverted(st)) {
         std::vector<cs::Bytes> leftovers;
         const int64_t bottom = st.ascending ? std::max<int64_t>(st.first, st.doneUpTo - int64_t(opt.batch) + 1) : st.doneDownTo;
         const int64_t top = st.ascending ? st.doneUpTo : std::min<int64_t>(st.last, st.doneDownTo + int64_t(opt.batch) - 1);
@@ -329,6 +387,7 @@ Result run(const Options& opt) {
         if (!leftovers.empty()) {
             if (!oldDb->remove_batch(leftovers)) return failed(r, "cannot remove converted blocks: " + oldDb->last_error_message());
             oldDb->compact();
+            if (!oldDb->checkpoint()) return failed(r, "cannot checkpoint the " + opt.from + " database: " + oldDb->last_error_message());
             say(opt, "removed " + std::to_string(leftovers.size()) + " blocks already converted before the restart");
         }
     }
@@ -351,7 +410,7 @@ Result run(const Options& opt) {
             if (!pool.is_valid() || pool.sequence() != seq) return failed(r, at + " does not parse");
             auto key = pool.hash().to_binary();
             // the hash index must lead to this very block: removal goes by hash. Compared by bytes,
-            // as seq_no() returns sequence + 1 on BerkeleyDB and RocksDB and the sequence on LMDB
+            // independent of how each backend stores the sequence
             cs::Bytes byKey;
             if (!oldDb->get(key, &byKey) || byKey != bytes) return failed(r, at + " is stored under another hash");
             if (st.ascending) {
@@ -400,13 +459,22 @@ Result run(const Options& opt) {
         for (auto& b : blocks) keys.push_back(std::move(b.hash_key));
         blocks.clear();
         if (!oldDb->remove_batch(keys)) return failed(r, "cannot remove converted blocks from the " + opt.from + " database: " + oldDb->last_error_message());
-        if (!oldDb->compact()) say(opt, "compaction of the " + opt.from + " database failed: " + oldDb->last_error_message());
+        // After the last batch the old files are deleted moments later: no compaction, whose truncation
+        // of the emptied files is what a crash leaves recovery unable to replay. After the others, a
+        // checkpoint right away puts BerkeleyDB's log and files in step again. On lmdb and rocksdb it
+        // is their flush(), a sync per batch: cheap, and a source that cannot sync stops the
+        // conversion, resumable, rather than leaving its removals undurable.
+        int64_t nextLo = 0, nextHi = 0;
+        const bool more = nextBatch(st, opt.batch, nextLo, nextHi);
+        if (more) {
+            if (!oldDb->compact()) say(opt, "compaction of the " + opt.from + " database failed: " + oldDb->last_error_message());
+            if (!oldDb->checkpoint()) return failed(r, "cannot checkpoint the " + opt.from + " database: " + oldDb->last_error_message());
+        }
         if (opt.hook) opt.hook(Step::Removed, uint32_t(lo), uint32_t(hi));
 
         say(opt, "converted blocks " + (st.ascending ? std::to_string(st.first) + ".." + std::to_string(hi)
                                                       : std::to_string(lo) + ".." + std::to_string(st.last)));
-        int64_t nextLo = 0, nextHi = 0;
-        if (nextBatch(st, opt.batch, nextLo, nextHi) && opt.stopRequested && opt.stopRequested()) {
+        if (more && opt.stopRequested && opt.stopRequested()) {
             r.stopped = true;
             return failed(r, "stopped on request, the conversion resumes at the next start");
         }
@@ -437,9 +505,10 @@ Result run(const Options& opt) {
         newDb->forEachContractData([&](const cs::Bytes&, const cs::Bytes&) { ++n; return true; });
         r.contracts = n;
     }
+    if (opt.hook) opt.hook(Step::Checked, st.first, st.last);
 
     // the old files are deleted next, irreversibly: whatever is left in them must be in the new database
-    {
+    if (oldDb) {
         auto it = oldDb->new_iterator();
         if (!it) return failed(r, "cannot read the " + opt.from + " database");
         for (it->seek_to_first(); it->is_valid(); it->next()) {
@@ -455,7 +524,7 @@ Result run(const Options& opt) {
             }
         }
     }
-    {
+    if (oldDb) {
         std::string bad;
         bool readOk = oldDb->forEachContractData([&](const cs::Bytes& k, const cs::Bytes& v) {
             cs::Bytes inNew;

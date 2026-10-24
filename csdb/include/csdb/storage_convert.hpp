@@ -8,16 +8,20 @@
 // newest blocks first from berkeleydb, which shrinks from the end, oldest first from the others.
 // Each batch is removed from the old database only after it is written, synced, read back and
 // recorded in db/.convert. A crash or a stop resumes from db/.convert, in the recorded order.
+// Once every block is converted the old database is no longer needed: a resume that cannot open it
+// (a BerkeleyDB environment recovery cannot replay) finishes without it.
 namespace csdb::convert {
 
-enum class Step { Read, Written, Verified, Recorded, Removed };
+// Checked: every block converted and the whole new database verified, the old one not yet looked at
+enum class Step { Read, Written, Verified, Recorded, Removed, Checked };
 
 struct Options {
     std::string dbPath;                 // the node's db/ folder
     std::string from;                   // backend now on disk
     std::string to;                     // configured backend
     uint32_t batch = 100000;
-    std::function<void(Step, uint32_t lo, uint32_t hi)> hook;   // tests: throw to simulate a crash
+    // tests and test-network builds: throw (or raise SIGKILL) to simulate a crash at a step
+    std::function<void(Step, uint32_t lo, uint32_t hi)> hook;
     std::function<bool()> stopRequested;                        // checked between batches
     std::function<void(const std::string&)> log;
 };
@@ -50,8 +54,11 @@ struct State {                          // db/.convert
 
 bool readState(const std::string& dbPath, State& out);    // false if absent or malformed
 bool writeState(const std::string& dbPath, const State& s);
-// free space the conversion needs; a resumed conversion from lmdb or rocksdb counts what .convert-new holds
-uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, uint32_t batch);
+// free space the conversion from `from` to `to` needs; a resumed conversion from lmdb or rocksdb counts
+// what .convert-new holds. RocksDB compresses its blocks: from rocksdb to an uncompressed backend the
+// new database is several times the size of the old one (kExpansionFromRocksDb)
+constexpr uint64_t kExpansionFromRocksDb = 4;   // measured 3.5x on mainnet (rocksdb 3,274 MB -> berkeleydb 11,568 MB)
+uint64_t estimatePeakBytes(const std::string& dbPath, const std::string& from, const std::string& to, uint32_t batch);
 Result run(const Options& opt);         // starts a new conversion or resumes db/.convert
 
 }  // namespace csdb::convert

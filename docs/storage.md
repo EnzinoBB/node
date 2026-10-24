@@ -127,7 +127,8 @@ berkeleydb target has to grow from its first record.
 | Source | Peak use |
 |---|---|
 | berkeleydb | the database plus one batch and the compaction space: about 1 GB beyond the database on mainnet |
-| lmdb, rocksdb | about the old plus the whole new database: their files do not shrink until the conversion ends |
+| lmdb | about the old plus the whole new database: its files do not shrink until the conversion ends |
+| rocksdb | the old database plus the new one, which is up to 4 times larger in lmdb or berkeleydb (RocksDB compresses its blocks: 3.3 GB became 11.6 GB in berkeleydb on mainnet) |
 
 The node estimates the peak before starting and stops (exit 3) when the free space is lower,
 naming both numbers.
@@ -150,6 +151,23 @@ Ctrl-C or SIGTERM during a conversion stops it after the current batch: `convers
 resumes at the next start` (exit 0). A crash or a power cut leaves `db/.convert` consistent as
 well. The next start resumes from the recorded batch, with or without `--convert-db`, as long as
 `db_backend` still names the target.
+
+Once every block is converted the old database is no longer needed. If a crash left a BerkeleyDB
+environment that recovery cannot replay (`DB_RUNRECOVERY`), the next start says `the berkeleydb
+database cannot be opened (...): every block is already in db/.convert-new, finishing without it`,
+checks the new database and deletes the old files. Before that point an old database that does not
+open stops the conversion with `blocks N..M are not converted yet` (exit 3), and `db/.convert` and
+`db/.convert-new` are kept.
+
+That last case comes from a crash during a BerkeleyDB compaction (or any other damage to the old
+files), and the node cannot repair it by itself: the blocks not converted yet are only in the old
+files. Before converting a berkeleydb database, stop the node and keep a copy of the whole `db/`
+folder, taken right before the conversion (take a new one if the node ran in between). The copy
+takes as much space as `db/`; another disk is fine. If the conversion then stops with `cannot be
+opened (...) blocks N..M are not converted yet`, replace `db/` with the copy (the whole folder, so
+that `db/.convert` and `db/.convert-new` go too) and convert again from the start. Without a copy,
+start over from an empty `db/`, `caches/` and `qs/` (in Docker `CREDITS_RESET=1`: a pruned node
+converting to lmdb then restores a snapshot, any other syncs from block 0).
 
 No conversion starts while another node process holds `db/.lock`: `another node process is using
 db: stop it first` (exit 3).

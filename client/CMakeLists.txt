@@ -53,6 +53,10 @@ add_executable(client
 
 target_link_libraries (client csnode lib config)
 
+if(CREDITS_TESTNET)
+  target_compile_definitions(client PRIVATE CREDITS_TESTNET)
+endif()
+
 target_include_directories(client PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include/client
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../lib/include
                                          ${CMAKE_CURRENT_SOURCE_DIR}/../net/include

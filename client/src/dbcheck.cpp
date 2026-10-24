@@ -4,6 +4,10 @@
 #include <csignal>
 #include <exception>
 #include <iostream>
+#ifdef CREDITS_TESTNET
+#include <cstdio>
+#include <fstream>
+#endif
 
 #include <csdb/storage_backend.hpp>
 #include <csdb/storage_convert.hpp>
@@ -114,7 +118,7 @@ uint64_t sizeOf(const std::string& name, const std::string& dbPath) {
 }
 
 int convertNow(const std::string& dbPath, const std::string& from, const std::string& to, bool convertOnly, uint32_t batch) {
-    const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, batch);
+    const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, to, batch);
     const uint64_t have = freeSpace(dbPath);
     if (have < need) {
         say() << "not enough free space: the conversion needs about " << mb(need) << ", " << mb(have) << " available" << std::endl;
@@ -128,6 +132,28 @@ int convertNow(const std::string& dbPath, const std::string& from, const std::st
     opt.batch = batch;
     opt.log = [](const std::string& line) { say() << line << std::endl; };
     opt.stopRequested = [] { return stopFlag.load(); };
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-convert-kill holds a batch number (killed once that many
+    // batches are removed from the old database) or "checked" (killed with every block converted and
+    // verified, before the old database is compared and deleted). Read once and removed, so that the
+    // next start resumes (ci/testnet/run.sh CONVERT_AT)
+    if (std::ifstream marker("testnet-convert-kill"); marker) {
+        std::string at;
+        marker >> at;
+        marker.close();
+        std::remove("testnet-convert-kill");
+        if (at == "checked") {
+            opt.hook = [](csdb::convert::Step s, uint32_t, uint32_t) {
+                if (s == csdb::convert::Step::Checked) std::raise(SIGKILL);
+            };
+        }
+        else if (!at.empty() && at.find_first_not_of("0123456789") == std::string::npos && std::stoul(at) > 0) {
+            opt.hook = [left = std::stoul(at)](csdb::convert::Step s, uint32_t, uint32_t) mutable {
+                if (s == csdb::convert::Step::Removed && --left == 0) std::raise(SIGKILL);
+            };
+        }
+    }
+#endif
 
     stopFlag = false;
     auto prevInt = std::signal(SIGINT, onStopSignal);
@@ -204,7 +230,9 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
     }
     else {
         try {
-            f.found = csdb::backend::detect(dbPath);
+            // with another process on the folder no engine is opened (BerkeleyDB would run recovery
+            // on its live environment)
+            f.found = csdb::backend::detect(dbPath, lock != Lock::Busy);
         }
         catch (const std::exception& e) {
             say() << "cannot inspect " << dbPath << ": " << e.what() << std::endl;
@@ -236,7 +264,7 @@ int checkImpl(const std::string& dbPath, const std::string& configured, bool con
             if (inUse(lock, dbPath)) {
                 return 3;
             }
-            const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, batch);
+            const uint64_t need = csdb::convert::estimatePeakBytes(dbPath, from, configured, batch);
             say() << "found " << from << ", configured " << configured << std::endl;
             say() << "database size " << mb(sizeOf(from, dbPath)) << ", estimated peak disk use " << mb(need)
                   << ", free space " << mb(freeSpace(dbPath)) << std::endl;

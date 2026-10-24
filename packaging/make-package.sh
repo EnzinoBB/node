@@ -65,6 +65,9 @@ Differences from the official package:
   community executor (build $commits instead of 1518).$( [ "$variant" = pruned ] && printf '\n- config.ini: [storage] runs the node with pruned storage on LMDB.' )
 - The executor listens on 127.0.0.1 only (contract.executor.host in settings.properties
   changes it). Keep port 9080 closed to other hosts anyway.
+- The node itself: same protocol and database format by default, new opt-in storage options,
+  fixes and a state digest in the log. What changes from the official node:
+  https://github.com/EnzinoBB/node/blob/master/docs/differences.md
 
 Changing the block database (db_backend)
 - The node recognises the format of an existing db/ folder. If config.ini asks for another one, it
@@ -72,11 +75,12 @@ Changing the block database (db_backend)
   ./node --convert-only to convert and exit, or ./node --convert-db to convert and start.
   Stop the node before converting. The conversion goes batch by batch and needs about 1 GB
   free beyond the database when converting from berkeleydb; about the size of the database
-  again when converting from lmdb or rocksdb (their files do not shrink until the conversion
-  ends). If interrupted it resumes at the next start. Checkpoints and the transaction index are kept, so the node quick-starts
-  afterwards. The official node only reads berkeleydb: convert back before running it on this
-  folder. In Docker, use CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in
-  detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
+  again when converting from lmdb (its files do not shrink until the conversion ends); up to 4
+  times the size of the database when converting from rocksdb, which compresses its blocks. The
+  node checks the free space first. If interrupted it resumes at the next start. Checkpoints
+  and the transaction index are kept, so the node quick-starts afterwards. The official node
+  only reads berkeleydb: convert back before running it on this folder. In Docker, use
+  CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
 
 Start: cd csnode && ./node
 EOF

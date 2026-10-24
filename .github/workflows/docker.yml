@@ -29,7 +29,7 @@ jobs:
       - name: LMDB tools
         run: |
           git submodule update --init -- third-party/lmdb
-          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_load mdb_dump
+          make -s -C third-party/lmdb/libraries/liblmdb mdb_copy mdb_load mdb_dump mdb_stat
           sudo apt-get install -y -qq zstd python3-nacl python3-base58
 
       - name: Snapshot scripts

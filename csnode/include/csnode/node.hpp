@@ -9,6 +9,9 @@
 
 #include <csconnector/csconnector.hpp>
 
+#include <csnode/bootstrapgate.hpp>
+#include <csnode/bootstrapweight.hpp>
+#include <csnode/blocktakeover.hpp>
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/compressor.hpp>
@@ -71,9 +74,15 @@ public:
 
     void run();
     void stop();
+    // after a failed init: set aside a quick-start checkpoint that is ahead of the blocks on disk,
+    // otherwise remove qs/0 as before
+    void removeFailedQuickStartData();
     void destroy();
 
     static void requestStop();
+    // stops the node from inside, as a signal does: requestStop() alone does nothing unless a
+    // signal handler has set gSignalStatus first
+    static void stopOnError();
 
     bool isStopRequested() const {
         return stopRequested_;
@@ -186,7 +195,7 @@ public:
 
     void accountInitiationRequest(uint64_t& aTime, cs::PublicKey key);
     void cleanConfirmationList(cs::RoundNumber rNum);
-    uint8_t calculateBootStrapWeight(cs::PublicKeys& confidants);
+    cs::BootstrapWeight calculateBootStrapWeight(const cs::PublicKeys& confidants) const;
     // state syncro functions
     
     void sendStateRequest(const csdb::Address& contract_abs_addr, const cs::PublicKeys& confidants);
@@ -547,7 +556,7 @@ private:
     std::map<uint16_t, cs::Command> changeableParams_;
     cs::PublicKey globalPublicKey_;
     cs::NodeVersionChange nVersionChange_;
-    uint8_t bootStrapWeight_ = 0U;
+    cs::BootstrapWeight bootStrapWeight_ = 0U;
 
     std::set<cs::PublicKey> initialConfidants_;
     bool isBootstrapRound_ = false;

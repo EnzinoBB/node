@@ -2,27 +2,47 @@
 # Run a private Credits network of N nodes on this machine and check that it works.
 #
 # Usage: run.sh <path-to-node-binary>
-# Env:   NODES (default 7, keep it odd: an even set of ready nodes drops one at bootstrap)
+# Env:   NODES (default 7; keep the initial confidants, TRUSTED_NODES, odd: an even set of ready ones
+#        drops one at bootstrap)
 #        TARGET_SEQ (default 1100: past the first STATE DIGEST at block 1000)
 #        TIMEOUT_MIN (default 45)  RESTART_AT (default 300, 0 disables the restart test)
 #        WORK (default ./testnet-run)
+#        TRUSTED_NODES (default NODES): only the first TRUSTED_NODES nodes are initial confidants
+#        (odd, 5 to 25); the others, up to 61 nodes in all, are ordinary nodes
+#        ROUND_ELAPSE_MS (default 20000): round_elapse_time of every node
+#        SAMPLE_SECONDS (default 60, 0 = off): sampler.py records host and per-process memory and CPU
+#        of the nodes and executors in resources.tsv, and prints a summary at the end
 #        FUND (default 0; needs a -DCREDITS_TESTNET=ON binary): genesis funds go to a generated master
 #        key, which funds every node through node 1's API (port 9090) once the chain reaches FUND_AT
 #        (default 30) and then keeps random transfers flowing for LOAD_SECONDS (default 300)
 #        DPOS_AT / REWARD_ROUND (default 0 = off, needs FUND=1): the master key, which is also the
 #        starter key, moves StartingDPOS and turns block rewards on (special orders 9 and 37)
+#        SYNCRO_ROUND (default 0 = off, needs FUND=1): special order 35 makes the sync answers count
+#        from that round (Consensus::syncroChangeRound), as on a network that issued it
+#        JOIN_FULL=1: the node of JOIN_PRUNED_AT syncs from block 0 as a full node instead
+#        LOW_STAKE_NODES (default 0, needs FUND=1): the last that many nodes get 1'000 CS, below the
+#        minimum stake; after StartingDPOS (DPOS_AT) none of them may be trusted
 #        MIN_STAKE (default 0 = off, needs FUND=1): special order 22 sets the minimum stake; with the
 #        restart test, the restarted node must apply it again after its quick start
 #        DELEGATE (default 0, needs FUND=1): nodes delegate to each other, with and without a time
 #        limit (DELEGATION_SECONDS, default 240), and some delegations are withdrawn later
 #        CONTRACTS (default 0, needs FUND=1 and EXECUTOR_JAR, the contract-executor jar): every node
 #        runs its own executor; contracts.py deploys a counter contract and calls it before and after
-#        the restart test, which waits for the first calls; all nodes must end with the same state
+#        the restart test, which waits for the first calls; all nodes must end with the same state.
+#        A power cut (CRASH_ALL_AT) also waits for the first calls. The calls after go once the
+#        restarted nodes, and the network after a power cut, are 30 blocks past it, and the lowest
+#        node reached CONTRACTS_AFTER_AT (default 0); the states are compared once every node,
+#        a joining one too, reached TARGET_SEQ. contracts.py sends everything through n1: a
+#        contract scenario never kills, partitions or slows n1
+#        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
+#        seconds: CONTRACT_WRITE_RATE (default 1) Counter.next writes a second from every node's
+#        account through its own API, and CONTRACT_READ_RATE (default 5) Counter.get reads (getters,
+#        no transaction) a second over every node; latencies in contracts-stats.json
 #        EXECUTOR_JAR_ALT (optional, with CONTRACTS): the even nodes run this executor jar instead, on the
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
-#        RESTART_NODES (default: the last node): the nodes the restart test stops and restarts together
+#        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
@@ -46,11 +66,17 @@
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
-#        in the middle of the conversion and started again: it must resume and finish
+#        after its second batch and again with every block converted (testnet-convert-kill), its
+#        BerkeleyDB files damaged, and started again: it must resume midway, then finish without them
 #        INDEX_LOSS_AT (default 0 = off): at that sequence node INDEX_LOSS_NODE (default PRUNE_NODE) is
 #        stopped, its transaction index (caches/indexdb) is removed and it is started again; a pruned
 #        node waits until it has pruned. It must quick-start and rebuild the index from the blocks it
 #        stores (a pruned node cannot slow-start without its old blocks; a full one no longer has to)
+#        HASHDB_DAMAGE_AT (default 0 = off): at that sequence node HASHDB_DAMAGE_NODE (default 3) is
+#        stopped and its block hashes database caches/hashdb is damaged, HASHDB_DAMAGE=zero (default:
+#        pages in the middle of data.mdb overwritten with zeros, checked with mdb_dump) or remove (the
+#        folder removed); it is started again, and once more 150 blocks later if it has not rebuilt the
+#        databases yet. It must rebuild them from its blocks and log no database failure afterwards
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
 #        with pruned storage like PRUNE_NODE and must end with the same state digest
@@ -66,10 +92,24 @@
 #        again each time and end with the same state digests
 #        CRASH_ALL_AT (default 0 = off): every node is killed with SIGKILL at that sequence and the whole
 #        network restarted, as after a power cut; the nodes must agree again
+#        CHECKPOINT_AHEAD_AT (default 0 = off): at that sequence node CHECKPOINT_AHEAD_NODE (default 3,
+#        a checkpoint a minute, 3 kept) is killed, started once offline with --set-bc-top a few blocks
+#        before its second newest checkpoint, and killed again: its two newest checkpoints are then
+#        ahead of the blocks on disk. It is restarted on every exit, at most 5 times: it must set
+#        those checkpoints aside, quick-start from the older one and end with the same state digests
+#        APPLY_FAIL_AT (default 0 = off, a CREDITS_TESTNET build): at that sequence node
+#        APPLY_FAIL_NODE (default 3) is told to fail applying a block 20 blocks later to its caches
+#        (./testnet-fail-apply); it must stop within 120 s, saving no checkpoint, and after a restart
+#        catch up with the same state digests, never logging "Pool already present"
+#        API_LOAD_NODE (default 0 = off): that node opens its public API (port 9100 + node) and, from
+#        sequence API_LOAD_FROM (default 1500), api_load.py reads random blocks among the last 1,500
+#        through it with 4 threads until the end, so that API threads read blocks while the node
+#        prunes; the node must keep up, and the load must have made at least 1,000 calls
 #        DISK_FULL_NODE (default 0 = off): put that node's block DB on a DISK_TMPFS_MB (default 64) tmpfs,
 #        fill it when the chain reaches DISK_FULL_AT (default 400) and free it DISK_FULL_SECONDS
 #        (default 60) later, restarting the node if it stopped; it must catch up and end with the same
-#        state digest (needs sudo)
+#        state digest (needs sudo). With DISK_FULL_STOP=1 the node gets SIGTERM halfway through the
+#        full-disk period and must exit within 120 s, as an operator would stop it
 #
 # Checks: every node writes blocks up to TARGET_SEQ; a node stopped and restarted (quick start
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
@@ -82,20 +122,61 @@ BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
+# the initial confidants (trusted.txt): the first TRUSTED_NODES nodes, by default all of them; the
+# others are ordinary nodes, as most nodes on mainnet. MinTrustedNodes is 4, MaxTrustedNodes 25, and
+# an even set of ready confidants drops one at bootstrap
+TRUSTED_NODES=${TRUSTED_NODES:-$NODES}
+case "$TRUSTED_NODES" in
+    5|7|9|11|13|15|17|19|21|23|25) ;;
+    *) echo "TRUSTED_NODES must be odd, 5 to 25, got '$TRUSTED_NODES'"; exit 1 ;;
+esac
+# ports: p2p 6000 + i (offline copies 6500 + i), API 9100 + i, apiexec 9200 + i, executor 9300 + i
+[ "$NODES" -ge "$TRUSTED_NODES" ] && [ "$NODES" -le 61 ] \
+    || { echo "NODES must be TRUSTED_NODES ($TRUSTED_NODES) to 61, got '$NODES'"; exit 1; }
+# 25 is Consensus::MaxTrustedNodes: no larger set of initial confidants can bootstrap. Above 15 the neighbour map (16) is not a full mesh, but initial confidants are permanent
+# neighbours of each other and consensus messages are routed, so that does not stop the network
+CONTRACT_LOAD_SECONDS=${CONTRACT_LOAD_SECONDS:-0}
+CONTRACT_WRITE_RATE=${CONTRACT_WRITE_RATE:-1}
+CONTRACT_READ_RATE=${CONTRACT_READ_RATE:-5}
+SAMPLE_SECONDS=${SAMPLE_SECONDS:-60}
+# a node starts a bootstrap when its round lasts this long. The consensus's own fallback for a
+# silent trusted node takes about 12.5 s, so below that a slow round is pre-empted by a bootstrap,
+# and a bootstrap of a full table re-sent every 10 s never completes (official stage-1 hash race):
+# 20 s by default (mainnet default 60 s); bootstrap-livelock keeps 10 s to reproduce the race
+ROUND_ELAPSE_MS=${ROUND_ELAPSE_MS:-20000}
 TARGET_SEQ=${TARGET_SEQ:-1100}
 TIMEOUT_MIN=${TIMEOUT_MIN:-45}
 RESTART_AT=${RESTART_AT:-300}
-RESTART_NODES=${RESTART_NODES:-$NODES}
+# by default the last initial confidant (the last node when every node is one)
+RESTART_NODES=${RESTART_NODES:-$TRUSTED_NODES}
 echo "$RESTART_NODES" | grep -qE '^[0-9]+( [0-9]+)*$' || { echo "bad RESTART_NODES '$RESTART_NODES'"; exit 1; }
 FUND=${FUND:-0}
 FUND_AT=${FUND_AT:-30}
 LOAD_SECONDS=${LOAD_SECONDS:-300}
 DISK_FULL_NODE=${DISK_FULL_NODE:-0}
+CHECKPOINT_AHEAD_AT=${CHECKPOINT_AHEAD_AT:-0}
+CHECKPOINT_AHEAD_NODE=${CHECKPOINT_AHEAD_NODE:-3}
+APPLY_FAIL_AT=${APPLY_FAIL_AT:-0}
+APPLY_FAIL_NODE=${APPLY_FAIL_NODE:-3}
+API_LOAD_NODE=${API_LOAD_NODE:-0}
+API_LOAD_FROM=${API_LOAD_FROM:-1500}
 DPOS_AT=${DPOS_AT:-0}
 REWARD_ROUND=${REWARD_ROUND:-0}
 DELEGATE=${DELEGATE:-0}
 MIN_STAKE=${MIN_STAKE:-0}
+# the last LOW_STAKE_NODES nodes (never initial confidants) get 1'000 CS, below the minimum stake
+LOW_STAKE_NODES=${LOW_STAKE_NODES:-0}
+[ "$LOW_STAKE_NODES" -le $((NODES - TRUSTED_NODES)) ] \
+    || { echo "LOW_STAKE_NODES must be at most NODES - TRUSTED_NODES ($((NODES - TRUSTED_NODES)))"; exit 1; }
+# stake counts only from StartingDPOS: the check needs it well before the target
+[ "$LOW_STAKE_NODES" -eq 0 ] || { [ "$DPOS_AT" -gt 0 ] && [ $((DPOS_AT + 300)) -le "$TARGET_SEQ" ]; } \
+    || { echo "LOW_STAKE_NODES needs DPOS_AT, at most TARGET_SEQ - 300"; exit 1; }
+SYNCRO_ROUND=${SYNCRO_ROUND:-0}
+JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
+CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
+[ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
+    || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
 PRUNE_NODE=${PRUNE_NODE:-0}
 NODE_STORAGE=${NODE_STORAGE:-}
 DB_BACKEND=${DB_BACKEND:-}
@@ -114,7 +195,10 @@ STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
 INDEX_LOSS_NODE=${INDEX_LOSS_NODE:-$PRUNE_NODE}
-MDB_COPY=${MDB_COPY:-$(cd "$(dirname "$0")/../.." && pwd)/third-party/lmdb/libraries/liblmdb/mdb_copy}
+HASHDB_DAMAGE_AT=${HASHDB_DAMAGE_AT:-0}
+HASHDB_DAMAGE_NODE=${HASHDB_DAMAGE_NODE:-3}
+HASHDB_DAMAGE=${HASHDB_DAMAGE:-zero}
+MDB_COPY=${MDB_COPY:-$REPO/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
 declare -a STORE_BACKEND STORE_PRUNED
@@ -130,11 +214,12 @@ if [ -n "$NODE_STORAGE" ]; then
 fi
 # every node with pruned storage: the PRUNE_NODE, the joining node, and those of NODE_STORAGE
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
-    if [ "$i" -eq "$PRUNE_NODE" ] || [ "$i" -eq "$JOIN_NODE" ] || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
+    if [ "$i" -eq "$PRUNE_NODE" ] || { [ "$i" -eq "$JOIN_NODE" ] && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
+DISK_FULL_STOP=${DISK_FULL_STOP:-0}
 DISK_TMPFS_MB=${DISK_TMPFS_MB:-64}
 NET_FAULT=${NET_FAULT:-}
 NET_FAULT_NODES=${NET_FAULT_NODES:-}
@@ -199,6 +284,11 @@ fi
 api_settings() {
     local i=$1
     if [ "$CONTRACTS" != "1" ]; then
+        if [ "$i" -eq "$API_LOAD_NODE" ]; then
+            echo "port=$((9100 + i))"
+            echo "apiexec_port=0"
+            return
+        fi
         echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
         echo "apiexec_port=0"
         return
@@ -211,6 +301,10 @@ api_settings() {
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
+    # the node asks its new executor for its version every second for this long, and disables it for
+    # good if it never answers: dozens of JVMs starting at once on one machine (a power cut, a big
+    # network) can take longer than the 7 s default
+    echo "executor_check_version_delay=60000"
     cat > "$WORK/n$i/settings.properties" <<PROPS
 node.api.host=127.0.0.1
 node.api.port=$([ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))
@@ -244,7 +338,7 @@ storage_section() {
         # pruning follows the periodic checkpoints only: it starts at #2000; a checkpoint a minute as
         # well, so that kills of a pruned node land right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=2\nprune_keep_blocks=300\n"
-    elif [ "$i" -eq "$CRASH_NODE" ]; then
+    elif [ "$i" -eq "$CRASH_NODE" ] || { [ "$CHECKPOINT_AHEAD_AT" -gt 0 ] && [ "$i" -eq "$CHECKPOINT_AHEAD_NODE" ]; }; then
         # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
@@ -259,7 +353,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
-        echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
+        [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
         [ "$j" -ne "$i" ] && echo "127.0.0.1:$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
@@ -270,7 +364,7 @@ ipv6=false
 traverse_nat=false
 min_neighbours=1
 max_neighbours=16
-round_elapse_time=10000
+round_elapse_time=$ROUND_ELAPSE_MS
 
 [host_input]
 ip=127.0.0.1
@@ -337,6 +431,14 @@ net_fault_stats() {
 }
 
 stop_all() {
+    # the sampler's last sample still sees the nodes running
+    if [ -n "${SAMPLER_PID:-}" ]; then
+        kill -TERM "$SAMPLER_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do kill -0 "$SAMPLER_PID" 2>/dev/null || break; sleep 1; done
+        kill -KILL "$SAMPLER_PID" 2>/dev/null || true
+        wait "$SAMPLER_PID" 2>/dev/null || true
+    fi
+    [ -z "${API_LOAD_PID:-}" ] || kill -TERM "$API_LOAD_PID" 2>/dev/null || true
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
     done
@@ -356,6 +458,7 @@ stop_all() {
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
+    [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
 trap stop_all EXIT
 
@@ -393,6 +496,19 @@ digest_offline() {
 }
 
 # the lowest sequence among the nodes of the restart test
+# a SIGKILLed node leaves its executor JVM running (it has no death signal), still bound to its port
+kill_executor() {
+    pkill -KILL -f "cs.testnet.node=n$1 " 2>/dev/null || true
+}
+
+# the calls after the restart (contracts.py --wait-file) go once the nodes stopped by the restart
+# test and by a power cut are back and 30 blocks past it, and the lowest node is at CONTRACTS_AFTER_AT
+contracts_go_ready() {
+    { [ "$RESTART_AT" -eq 0 ] || { [ "$restarted" -eq 1 ] && [ "$(restarted_seq)" -ge $((stopped_at + 30)) ]; }; } \
+        && { [ "$CRASH_ALL_AT" -eq 0 ] || { [ "$crashed_all" -eq 1 ] && [ "$min" -ge $((CRASH_ALL_AT + 30)) ]; }; } \
+        && [ "$min" -ge "$CONTRACTS_AFTER_AT" ]
+}
+
 restarted_seq() {
     local low="" s
     for i in $RESTART_NODES; do
@@ -411,6 +527,12 @@ fi
 
 for i in $(seq 1 "$NODES"); do start_node "$i"; done
 echo "started $NODES nodes in $WORK"
+SAMPLER_PID=
+if [ "$SAMPLE_SECONDS" -gt 0 ]; then
+    python3 "$HERE/sampler.py" "$WORK" "$SAMPLE_SECONDS" "$WORK/resources.tsv" --nodes "$NODES" \
+        --summary-file "$WORK/resources-summary.txt" > "$WORK/sampler.log" 2>&1 &
+    SAMPLER_PID=$!
+fi
 
 deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
 restarted=0
@@ -438,6 +560,7 @@ while :; do
     sleep 20
     line="t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) ))s"
     min=-1
+    max=0
     for i in $(seq 1 "$NODES"); do
         s=$(seq_of "$i"); s=${s:-0}
         line+=" n$i=$s"
@@ -457,6 +580,7 @@ while :; do
             fi
         fi
         if [ "$min" -lt 0 ] || [ "$s" -lt "$min" ]; then min=$s; fi
+        if [ "$s" -gt "$max" ]; then max=$s; fi
     done
     join_seq=-1
     if [ "$JOIN_NODE" -gt 0 ] && [ -n "${PIDS[$JOIN_NODE]:-}" ]; then
@@ -464,6 +588,7 @@ while :; do
         line+=" n$JOIN_NODE=$join_seq(joined)"
     fi
     echo "$line"
+    echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
 
     if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
         echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
@@ -483,6 +608,7 @@ while :; do
             echo "crash test: SIGKILL n$CRASH_NODE (kill $crashes of $CRASH_TIMES) at sequence $(seq_of "$CRASH_NODE"), newest checkpoint ${newest:-none}"
             kill -KILL "${PIDS[$CRASH_NODE]}" 2>/dev/null || true
             wait "${PIDS[$CRASH_NODE]}" 2>/dev/null || true
+            kill_executor "$CRASH_NODE"
             sleep 5
             start_node "$CRASH_NODE"
             crash_wait_qs=""
@@ -491,7 +617,9 @@ while :; do
     fi
 
     # the whole network killed at once, as after a power cut
-    if [ "$CRASH_ALL_AT" -gt 0 ] && [ "$crashed_all" -eq 0 ] && [ "$min" -ge "$CRASH_ALL_AT" ]; then
+    # with contracts, only once the first calls are done: a cut during the deploys would end contracts.py
+    if [ "$CRASH_ALL_AT" -gt 0 ] && [ "$crashed_all" -eq 0 ] && [ "$min" -ge "$CRASH_ALL_AT" ] \
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/contracts-ready" ]; }; then
         echo "crash test: SIGKILL every node at sequence $min"
         for i in $(seq 1 "$ALL_NODES"); do
             [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true
@@ -499,6 +627,7 @@ while :; do
         for i in $(seq 1 "$ALL_NODES"); do
             [ -n "${PIDS[$i]:-}" ] && wait "${PIDS[$i]}" 2>/dev/null || true
         done
+        pkill -KILL -f "cs.testnet.node=" 2>/dev/null || true
         sleep 10
         for i in $(seq 1 "$NODES"); do start_node "$i"; done
         crashed_all=1
@@ -585,25 +714,39 @@ while :; do
         # node.log is appended across restarts: remember where the start after the conversion begins
         convert_lines4=$(wc -l < "$WORK/n4/node.log")
         start_node 4
-        # a small batch for n6, so that many batches remain after the second one
-        (cd "$WORK/n6" && exec "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) &
-        cpid=$!
-        until_t=$(( $(date +%s) + 300 ))
-        until [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -ge 2 ] || ! kill -0 "$cpid" 2>/dev/null; do
-            [ "$(date +%s)" -lt "$until_t" ] || { kill -KILL "$cpid" 2>/dev/null || true; echo "FAIL: n6 did not log two converted batches within 300 s"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
-            sleep 0.2
+        # n6 is killed twice at fixed points (testnet-convert-kill, read once by test-network builds): after
+        # its second batch of 50, then, resumed, with every block converted and verified but before the
+        # old database is compared and deleted. Its BerkeleyDB files are then damaged, as a crash in a
+        # compaction can leave them (a log recovery cannot replay): the next start cannot open them
+        # and must finish without them, every block being in db/.convert-new.
+        convert6() {
+            echo "$1" > "$WORK/n6/testnet-convert-kill"
+            # a hang is killed after 300 s (exit 137, like the kill the node gives itself): the checks
+            # below then fail instead of the whole job
+            (cd "$WORK/n6" && exec timeout -s KILL 300 "$BIN" --db-path db --config-file config.ini --convert-db --convert-batch 50 </dev/null >> stdout.log 2>&1) \
+                && { echo "FAIL: n6 was not killed at its conversion point $1"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+            [ -f "$WORK/n6/db/.convert" ] || { echo "FAIL: n6 was killed at $1 but has no db/.convert to resume"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+            [ ! -e "$WORK/n6/testnet-convert-kill" ] || { echo "FAIL: n6 did not read testnet-convert-kill"; exit 1; }
+        }
+        convert6 2
+        # the kill comes as the second batch leaves the old database, before its "converted blocks" line:
+        # one line, and two batches of 50 recorded below the last block
+        n6first=$(sed -n 's/^first=//p' "$WORK/n6/db/.convert")
+        n6last=$(sed -n 's/^last=//p' "$WORK/n6/db/.convert")
+        [ -n "$n6first" ] && [ -n "$n6last" ] || { echo "FAIL: n6 db/.convert has no first/last"; cat "$WORK/n6/db/.convert"; exit 1; }
+        [ "$(grep -ac 'converted blocks' "$WORK/n6/stdout.log")" -eq 1 ] && grep -aq "^done_down_to=$(( n6last - 99 ))\$" "$WORK/n6/db/.convert" \
+            || { echo "FAIL: n6 was not killed after its second batch"; cat "$WORK/n6/db/.convert"; tail -20 "$WORK/n6/stdout.log"; exit 1; }
+        convert6 checked
+        grep -aq "^done_down_to=$n6first\$" "$WORK/n6/db/.convert" && grep -aq '^phase=blocks$' "$WORK/n6/db/.convert" \
+            || { echo "FAIL: n6 was not killed with every block converted"; cat "$WORK/n6/db/.convert"; exit 1; }
+        # the first page (the table's metadata) of both block tables overwritten with garbage (not zeros,
+        # which BerkeleyDB may take for a file being created): neither recovery nor open can use them
+        for f in blockchain.db sequence.db; do
+            [ -f "$WORK/n6/db/$f" ] || { echo "FAIL: n6 has no db/$f to damage"; ls -la "$WORK/n6/db"; exit 1; }
+            head -c 4096 /dev/zero | tr '\0' '\253' | dd of="$WORK/n6/db/$f" bs=4096 count=1 conv=notrunc status=none
         done
-        kill -KILL "$cpid" 2>/dev/null || true; wait "$cpid" 2>/dev/null || true
-        if [ ! -f "$WORK/n6/db/.convert" ]; then
-            if grep -aq 'conversion done' "$WORK/n6/stdout.log"; then
-                echo "FAIL: n6 finished its conversion before the kill, lower the batch"
-            else
-                echo "FAIL: n6 was killed but has no db/.convert to resume"
-            fi
-            exit 1
-        fi
         convert_lines6=$(wc -l < "$WORK/n6/node.log")
-        echo "convert test: n6 killed during its conversion to rocksdb, restarting it"
+        echo "convert test: n6 killed after a batch and after the last check of its conversion to rocksdb, berkeleydb files damaged, restarting it"
         # the extra arguments are a temporary of this call only: a later restart of n6 does not convert again
         EXTRA_ARGS_6="--convert-db --convert-batch 50" start_node 6
     fi
@@ -618,6 +761,37 @@ while :; do
         index_lines=$(wc -l < "$WORK/n$INDEX_LOSS_NODE/node.log")
         start_node "$INDEX_LOSS_NODE"
         echo "index loss test: n$INDEX_LOSS_NODE restarted without its transaction index at sequence $min"
+    fi
+
+    if [ "$HASHDB_DAMAGE_AT" -gt 0 ] && [ "${hashdb_damaged:-0}" -eq 0 ] && [ "$min" -ge "$HASHDB_DAMAGE_AT" ]; then
+        hashdb_damaged=1
+        hd=$HASHDB_DAMAGE_NODE
+        kill -TERM "${PIDS[$hd]}"; wait "${PIDS[$hd]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$hd " 2>/dev/null || true
+        if [ "$HASHDB_DAMAGE" = remove ]; then
+            rm -rf "$WORK/n$hd/caches/hashdb"
+        else
+            # zeros over the pages after the two meta pages, up to the last page in use
+            pages=$("$(dirname "$MDB_COPY")/mdb_stat" -e "$WORK/n$hd/caches/hashdb" | sed -nE 's/.*Number of pages used: ([0-9]+).*/\1/p')
+            [ "${pages:-0}" -gt 4 ] || { echo "FAIL: n$hd hashdb has only ${pages:-no} pages in use"; exit 1; }
+            dd if=/dev/zero of="$WORK/n$hd/caches/hashdb/data.mdb" bs=4096 seek=2 count=$(( pages - 2 )) conv=notrunc 2>/dev/null
+            if "$REPO/packaging/docker/lmdb-check.sh" "$(dirname "$MDB_COPY")" "$WORK/n$hd/caches/hashdb" 2>/dev/null; then
+                echo "FAIL: n$hd hashdb is still whole after the damage"; exit 1
+            fi
+        fi
+        hashdb_lines=$(wc -l < "$WORK/n$hd/node.log")
+        hashdb_restart_at=$((min + 150))
+        start_node "$hd"
+        echo "hashdb test: n$hd restarted with its block hashes database damaged ($HASHDB_DAMAGE) at sequence $min"
+    fi
+    if [ "${hashdb_damaged:-0}" -eq 1 ] && [ -n "${hashdb_restart_at:-}" ] && [ "$min" -ge "$hashdb_restart_at" ]; then
+        hashdb_restart_at=""
+        if ! tail -n +"$((hashdb_lines + 1))" "$WORK/n$HASHDB_DAMAGE_NODE/node.log" | grep -aq 'blockHashes rebuilt from the stored blocks'; then
+            kill -TERM "${PIDS[$HASHDB_DAMAGE_NODE]}"; wait "${PIDS[$HASHDB_DAMAGE_NODE]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$HASHDB_DAMAGE_NODE " 2>/dev/null || true
+            start_node "$HASHDB_DAMAGE_NODE"
+            echo "hashdb test: n$HASHDB_DAMAGE_NODE restarted once more at sequence $min, it had not rebuilt yet"
+        fi
     fi
 
     # SIGTERM, then SIGKILL in the middle of the shutdown, as docker stop after its timeout
@@ -662,6 +836,23 @@ while :; do
         disk_filled_at=$(date +%s)
         echo "disk-full test: n$DISK_FULL_NODE block DB filled at sequence $min ($(df -h "$WORK/n$DISK_FULL_NODE/db" | tail -1 | awk '{print $4}') left)"
     fi
+    if [ "$DISK_FULL_STOP" = 1 ] && [ "$disk_filled_at" -gt 0 ] && [ "${disk_stop_done:-0}" -eq 0 ] \
+        && [ "$(date +%s)" -ge $((disk_filled_at + DISK_FULL_SECONDS / 2)) ]; then
+        disk_stop_done=1
+        if kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+            kill -TERM "${PIDS[$DISK_FULL_NODE]}"
+            stop_t0=$(date +%s)
+            while kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null && [ $(( $(date +%s) - stop_t0 )) -lt 120 ]; do sleep 1; done
+            if kill -0 "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null; then
+                echo "FAIL: n$DISK_FULL_NODE did not stop on SIGTERM within 120 s while its disk was full"
+                kill -KILL "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null || true
+                exit 1
+            fi
+            wait "${PIDS[$DISK_FULL_NODE]}" 2>/dev/null || true
+            pkill -f "cs.testnet.node=n$DISK_FULL_NODE " 2>/dev/null || true
+            echo "disk-full test: n$DISK_FULL_NODE stopped on SIGTERM in $(( $(date +%s) - stop_t0 )) s with its disk full"
+        fi
+    fi
     if [ "$disk_filled_at" -gt 0 ] && [ "$disk_freed" -eq 0 ] && [ "$(date +%s)" -ge $((disk_filled_at + DISK_FULL_SECONDS)) ]; then
         rm -f "$WORK/n$DISK_FULL_NODE/db/filler"
         disk_freed=1
@@ -674,10 +865,81 @@ while :; do
         fi
     fi
 
+    if [ "$CHECKPOINT_AHEAD_AT" -gt 0 ] && [ "${ca_done:-0}" -eq 0 ] && [ "$min" -ge "$CHECKPOINT_AHEAD_AT" ]; then
+        ca=$CHECKPOINT_AHEAD_NODE; ca_dir="$WORK/n$ca"
+        ca_cps=$(ls "$ca_dir/qs" | grep -E '^[1-9][0-9]*$' | sort -n | tail -2)
+        if [ "$(wc -w <<<"$ca_cps")" -ge 2 ]; then
+            ca_done=1
+            ca_top=$(( $(head -1 <<<"$ca_cps") - 5 ))
+            kill -KILL "${PIDS[$ca]}" 2>/dev/null || true; wait "${PIDS[$ca]}" 2>/dev/null || true
+            pkill -KILL -f "cs.testnet.node=n$ca " 2>/dev/null || true
+            # offline (a host nobody listens on) with --set-bc-top, killed once the database is cut
+            echo "127.0.0.1:9 11111111111111111111111111111111" > "$ca_dir/hosts-none.txt"
+            awk -v port=$((BASE_PORT + 500 + ca)) '
+                /^\[/ { section = $0 }
+                /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
+                section == "[host_input]" && /^port=/ { print "port=" port; next }
+                { print }' "$ca_dir/config.ini" > "$ca_dir/config-offline.ini"
+            ca_before=$(grep -ac 'Changing consensus settings to' "$ca_dir/node.log" || true)
+            (cd "$ca_dir" && exec "$BIN" --db-path db --config-file config-offline.ini --set-bc-top "$ca_top" </dev/null >> stdout.log 2>&1) &
+            ca_pid=$!
+            ca_t0=$(date +%s)
+            until [ "$(grep -ac 'Changing consensus settings to' "$ca_dir/node.log" || true)" -gt "${ca_before:-0}" ] \
+                || ! kill -0 "$ca_pid" 2>/dev/null || [ $(( $(date +%s) - ca_t0 )) -ge 120 ]; do sleep 1; done
+            kill -KILL "$ca_pid" 2>/dev/null || true; wait "$ca_pid" 2>/dev/null || true
+            pkill -KILL -f "cs.testnet.node=n$ca " 2>/dev/null || true
+            echo "checkpoint-ahead test: n$ca cut to block $ca_top, its checkpoints $(tr '\n' ' ' <<<"$ca_cps")are ahead of it"
+            ca_lines=$(wc -l < "$ca_dir/node.log")
+            ca_restarts=0
+            start_node "$ca"
+        fi
+    fi
+    if [ "${ca_done:-0}" -eq 1 ] && ! kill -0 "${PIDS[$CHECKPOINT_AHEAD_NODE]}" 2>/dev/null; then
+        wait "${PIDS[$CHECKPOINT_AHEAD_NODE]}" 2>/dev/null || true
+        pkill -KILL -f "cs.testnet.node=n$CHECKPOINT_AHEAD_NODE " 2>/dev/null || true
+        ca_restarts=$((ca_restarts + 1))
+        if [ "$ca_restarts" -gt 5 ]; then
+            echo "FAIL: n$CHECKPOINT_AHEAD_NODE stopped at every start ($ca_restarts times) with checkpoints ahead of its blocks"
+            tail -n +"$((ca_lines + 1))" "$WORK/n$CHECKPOINT_AHEAD_NODE/node.log" | grep -aE 'startSequence|ahead of the blocks|Couldn.t open|QUICK START' | tail -6
+            exit 1
+        fi
+        echo "checkpoint-ahead test: n$CHECKPOINT_AHEAD_NODE exited, start $ca_restarts"
+        sleep 3
+        start_node "$CHECKPOINT_AHEAD_NODE"
+    fi
+
+    if [ "$APPLY_FAIL_AT" -gt 0 ] && [ "${apply_fail_set:-0}" -eq 0 ] && [ "$min" -ge "$APPLY_FAIL_AT" ]; then
+        apply_fail_set=1
+        af=$APPLY_FAIL_NODE
+        af_seq=$(( $(seq_of "$af") + 20 ))
+        echo "$af_seq" > "$WORK/n$af/testnet-fail-apply"
+        af_lines=$(wc -l < "$WORK/n$af/node.log")
+        af_t0=$(date +%s)
+        echo "apply-fail test: n$af fails to apply block $af_seq"
+        while kill -0 "${PIDS[$af]}" 2>/dev/null && [ $(( $(date +%s) - af_t0 )) -lt 240 ]; do sleep 1; done
+        if kill -0 "${PIDS[$af]}" 2>/dev/null; then
+            echo "FAIL: n$af did not stop after failing to apply block $af_seq"
+            tail -n +"$((af_lines + 1))" "$WORK/n$af/node.log" | grep -aE "failed to apply|Couldn't save block|Pool already present" | head -5
+            exit 1
+        fi
+        wait "${PIDS[$af]}" 2>/dev/null || true
+        pkill -f "cs.testnet.node=n$af " 2>/dev/null || true
+        echo "apply-fail test: n$af stopped $(( $(date +%s) - af_t0 )) s after the marker, restarting it"
+        sleep 5
+        start_node "$af"
+    fi
+
+    if [ "$API_LOAD_NODE" -gt 0 ] && [ -z "${API_LOAD_PID:-}" ] && [ "$min" -ge "$API_LOAD_FROM" ]; then
+        python3 "$HERE/api_load.py" "127.0.0.1:$((9100 + API_LOAD_NODE))" "$WORK/api_load.stats" > "$WORK/api_load.log" 2>&1 &
+        API_LOAD_PID=$!
+        echo "api load: reading random blocks through n$API_LOAD_NODE's API from sequence $min"
+    fi
+
     if [ "$FUND" = "1" ] && [ -z "$FUND_PID" ] && [ "$min" -ge "$FUND_AT" ]; then
         echo "funding nodes from the genesis key, then $LOAD_SECONDS s of transfers"
         python3 "$HERE/fund.py" "$WORK" "$NODES" "$MASTER_SEED" --load-seconds "$LOAD_SECONDS" \
-            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" \
+            --dpos-at "$DPOS_AT" --reward-round "$REWARD_ROUND" --delegation-seconds "$DELEGATION_SECONDS" --min-stake "$MIN_STAKE" --syncro-round "$SYNCRO_ROUND" \
+            --low-stake-nodes "$LOW_STAKE_NODES" \
             $([ "$DELEGATE" = "1" ] && echo --delegations) > "$WORK/fund.log" 2>&1 &
         FUND_PID=$!
     fi
@@ -685,16 +947,26 @@ while :; do
     if [ "$CONTRACTS" = "1" ] && [ -z "$CONTRACTS_PID" ] && grep -q "master transactions done" "$WORK/fund.log" 2>/dev/null; then
         echo "contracts: deploying and calling them through node 1"
         (cd "$HERE" && python3 contracts.py "$WORK" "$NODES" "$MASTER_SEED" \
-            --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done") > "$WORK/contracts.log" 2>&1 &
+            --ready-file "$WORK/contracts-ready" --wait-file "$WORK/restart-done" --wait-timeout $((TIMEOUT_MIN * 60)) \
+            --check-nodes "$ALL_NODES" --final-file "$WORK/contracts-final" \
+            --load-seconds "$CONTRACT_LOAD_SECONDS" --write-rate "$CONTRACT_WRITE_RATE" --read-rate "$CONTRACT_READ_RATE" \
+            --stats-file "$WORK/contracts-stats.json") > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
-    # the calls after the restart must run on the restarted node too, so let it catch up first
-    if [ "$restarted" -eq 1 ] && [ ! -e "$WORK/restart-done" ] && [ "$(restarted_seq)" -ge $((stopped_at + 30)) ] 2>/dev/null; then
+    # contracts.py ended before its first calls were done: nothing would release the restart test
+    if [ -n "$CONTRACTS_PID" ] && [ ! -e "$WORK/contracts-ready" ] && ! kill -0 "$CONTRACTS_PID" 2>/dev/null; then
+        cat "$WORK/contracts.log"
+        echo "FAIL: contracts.py ended before its first calls"
+        exit 1
+    fi
+    # the calls after the restart must run on the restarted nodes too, so let them catch up first
+    if [ "$CONTRACTS" = "1" ] && [ ! -e "$WORK/restart-done" ] && contracts_go_ready 2>/dev/null; then
         touch "$WORK/restart-done"
     fi
 
+    # with contracts, not before the calls after the restart were let go
     if [ "$min" -ge "$TARGET_SEQ" ] && { [ "$JOIN_NODE" -eq 0 ] || [ "$join_seq" -ge "$TARGET_SEQ" ]; } \
-        && { [ "$CONTRACTS" != "1" ] || ! kill -0 "${CONTRACTS_PID:-0}" 2>/dev/null; }; then break; fi
+        && { [ "$CONTRACTS" != "1" ] || [ -e "$WORK/restart-done" ]; }; then break; fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
         echo "FAIL: not every node reached sequence $TARGET_SEQ within $TIMEOUT_MIN min"
         exit 1
@@ -702,9 +974,26 @@ while :; do
 done
 
 if [ -n "$CONTRACTS_PID" ]; then
+    # every node, a joining one too, is at TARGET_SEQ: contracts.py may compare the states now
+    touch "$WORK/contracts-final"
+    # its own deadline: TIMEOUT_MIN is for reaching the target, and contracts.py still waits 60 s
+    # and reads every node after it
+    final_deadline=$(( $(date +%s) + 600 ))
+    while kill -0 "$CONTRACTS_PID" 2>/dev/null && [ "$(date +%s)" -lt "$final_deadline" ]; do sleep 5; done
+    if kill -0 "$CONTRACTS_PID" 2>/dev/null; then
+        kill "$CONTRACTS_PID" 2>/dev/null || true
+        cat "$WORK/contracts.log"
+        echo "FAIL: contracts.py did not finish its final checks within 10 min of the target"
+        exit 1
+    fi
     contracts_status=0
     wait "$CONTRACTS_PID" || contracts_status=$?
     cat "$WORK/contracts.log"
+    # an executor left running by a killed node keeps the port its successor needs
+    if grep -l 'Address already in use' "$WORK"/n*/executor.log 2>/dev/null; then
+        echo "FAIL: an executor could not bind its port (an orphan executor of a killed node)"
+        exit 1
+    fi
     for i in $(seq 1 "$NODES"); do
         echo "n$i executor: $(cat "$WORK/n$i"/log/*.txt 2>/dev/null | grep -ac . || true) log lines, $(grep -aci "SmartContractGet\|exception" "$WORK/n$i/node.log" 2>/dev/null || true) node log lines on SmartContractGet/exceptions"
     done
@@ -717,6 +1006,31 @@ if [ -n "$CONTRACTS_PID" ]; then
 elif [ "$CONTRACTS" = "1" ]; then
     echo "FAIL: contracts.py never started"
     exit 1
+fi
+
+if [ "$CHECKPOINT_AHEAD_AT" -gt 0 ]; then
+    [ "${ca_done:-0}" = 1 ] || { echo "FAIL: the checkpoint-ahead test did not run (fewer than 2 checkpoints)"; exit 1; }
+    after=$(tail -n +"$((ca_lines + 1))" "$WORK/n$CHECKPOINT_AHEAD_NODE/node.log")
+    grep -aq 'is ahead of the blocks on disk, moving it to' <<<"$after" \
+        || { echo "FAIL: n$CHECKPOINT_AHEAD_NODE set no checkpoint aside"; exit 1; }
+    echo "checkpoint-ahead test: n$CHECKPOINT_AHEAD_NODE set $(grep -ac 'is ahead of the blocks on disk, moving it to' <<<"$after") checkpoint(s) aside in $ca_restarts failed start(s), then caught up"
+fi
+if [ "$APPLY_FAIL_AT" -gt 0 ]; then
+    after=$(tail -n +"$((af_lines + 1))" "$WORK/n$APPLY_FAIL_NODE/node.log")
+    grep -aq "failed to apply to the caches" <<<"$after" || { echo "FAIL: n$APPLY_FAIL_NODE never hit the injected failure"; exit 1; }
+    ! grep -aq "Pool already present" <<<"$after" || { echo "FAIL: n$APPLY_FAIL_NODE offered a stored block again"; exit 1; }
+    ! grep -aq "caches for QUICK START saved" <<<"$(awk '/failed to apply to the caches/{f=1} f' <<<"$after" | awk '/QUICK START!/{exit} {print}')" \
+        || { echo "FAIL: n$APPLY_FAIL_NODE saved its caches after the failure"; exit 1; }
+    echo "apply-fail test: n$APPLY_FAIL_NODE stopped without a checkpoint and caught up after a restart"
+fi
+if [ -n "${API_LOAD_PID:-}" ]; then
+    kill -TERM "$API_LOAD_PID" 2>/dev/null || true
+    wait "$API_LOAD_PID" 2>/dev/null || true
+    API_LOAD_PID=
+    stats=$(cat "$WORK/api_load.stats" 2>/dev/null || echo "calls=0 errors=0")
+    echo "api load: $stats"
+    load_calls=$(sed -nE 's/.*calls=([0-9]+).*/\1/p' <<<"$stats")
+    [ "${load_calls:-0}" -ge 1000 ] || { echo "FAIL: the API load made only ${load_calls:-0} calls"; tail -20 "$WORK/api_load.log"; exit 1; }
 fi
 
 if [ -n "$FUND_PID" ]; then
@@ -824,7 +1138,9 @@ if [ "$CONVERT_AT" -gt 0 ]; then
         [ ! -e "$WORK/n$i/db/blockchain.db" ] || { echo "FAIL: n$i still has its BerkeleyDB files"; exit 1; }
         grep -aq 'conversion done' "$WORK/n$i/stdout.log" || { echo "FAIL: n$i did not finish its conversion"; exit 1; }
     done
-    grep -aq 'resuming the conversion' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion"; exit 1; }
+    grep -aq "resuming the conversion .* below block $(( n6last - 99 ))\$" "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not resume its conversion midway"; exit 1; }
+    [ "$(grep -ac "resuming the conversion .* below block $n6first\$" "$WORK/n6/stdout.log")" -ge 1 ] || { echo "FAIL: n6 did not resume a fully converted database"; exit 1; }
+    grep -aq 'finishing without it' "$WORK/n6/stdout.log" || { echo "FAIL: n6 did not finish without its damaged berkeleydb database"; exit 1; }
     for i in 4 6; do
         # QUICK START! goes to node.log (the file sink), not stdout.log; only the part since the restart
         lines_var="convert_lines$i"
@@ -837,6 +1153,16 @@ if [ "$TERM_KILL_NODE" -gt 0 ]; then
     [ "$term_kills" -eq "$TERM_KILL_TIMES" ] || { echo "FAIL: only $term_kills of $TERM_KILL_TIMES term-kills ran"; exit 1; }
     [ "$term_kill_during_save" -gt 0 ] || { echo "FAIL: no SIGKILL landed before n$TERM_KILL_NODE saved its caches"; exit 1; }
     echo "term-kill test: n$TERM_KILL_NODE was killed $term_kills time(s) while stopping, $term_kill_during_save before its caches were saved"
+fi
+if [ "$HASHDB_DAMAGE_AT" -gt 0 ]; then
+    [ "${hashdb_damaged:-0}" = 1 ] || { echo "FAIL: the hashdb test did not run"; exit 1; }
+    after=$(tail -n +"$((hashdb_lines + 1))" "$WORK/n$HASHDB_DAMAGE_NODE/node.log")
+    grep -aq 'blockHashes rebuilt from the stored blocks' <<<"$after" \
+        || { echo "FAIL: n$HASHDB_DAMAGE_NODE did not rebuild its block hashes databases"; exit 1; }
+    since=$(awk '/blockHashes rebuilt from the stored blocks/{found=NR} END{print found}' <<<"$after")
+    failures=$(tail -n +"$((since + 1))" <<<"$after" | grep -ac 'block hashes database exception' || true)
+    [ "${failures:-0}" -eq 0 ] || { echo "FAIL: n$HASHDB_DAMAGE_NODE logged $failures block hashes failures after the rebuild"; exit 1; }
+    echo "hashdb test: n$HASHDB_DAMAGE_NODE $(grep -a 'blockHashes rebuilt from the stored blocks' <<<"$after" | tail -1 | sed 's/.*blockHashes/blockHashes/'), no failure since"
 fi
 if [ "$INDEX_LOSS_AT" -gt 0 ]; then
     [ "${index_lost:-0}" = 1 ] || { echo "FAIL: the index loss test did not run on n$INDEX_LOSS_NODE"; exit 1; }
@@ -889,4 +1215,45 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# two blocks of one sequence: a node kept its own block while the round went on on the writer's
+# (csnode/src/blockchain.cpp updateLastBlock logs it), a fork that nothing reconciles
+forks=$(grep -al 'this node keeps its own (fork)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
+if [ -n "$forks" ]; then
+    grep -ah 'this node keeps its own (fork)' "$WORK"/n*/node.log | head -5
+    echo "FAIL: fork, nodes on another block of the same sequence: $forks"
+    exit 1
+fi
+
+# a network still restarting at the end is stuck, even if it reached the target before (a bootstrap
+# round, R-x.1 and up, that never gives way to R-(x+1).0): the last three round headers of n1
+stuck=$(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -3 | grep -vc '\.0 ' || true)
+[ "$stuck" -lt 3 ] || { echo "FAIL: the network ended stuck in a bootstrap round ($(grep -a ' R-[0-9'"'"']*\.[0-9]* ' "$WORK/n1/node.log" | tail -1 | sed -E 's/.*(R-[^ ]*).*/\1/'))"; exit 1; }
+
+# who signs the blocks, per node and, with mixed binaries, per binary (node 1's API, needs FUND=1)
+if [ "$FUND" = "1" ]; then
+    (cd "$HERE" && python3 signers.py "$WORK" "$NODES" "$(( $(seq_of 1) - 1 ))" $([ -n "$BIN_ALT" ] && echo --alt-even)) || true
+fi
+
+# who took part in consensus: trusted per round (from n1's round headers) and how many nodes were
+# trusted at least once (a node logs TRUSTED [index] in the rounds it is trusted in)
+per_round=$(grep -ah 'Trusted count:' "$WORK/n1/node.log" | sed -E 's/.*Trusted count: ([0-9]+).*/\1/' | sort -n | uniq -c \
+    | awk '{printf "%s%s trusted in %s rounds", sep, $2, $1; sep=", "}' || true)
+ever=0
+for i in $(seq 1 "$ALL_NODES"); do
+    grep -aq 'TRUSTED \[' "$WORK/n$i/node.log" && ever=$((ever + 1))
+done
+echo "consensus: $per_round; $ever of $ALL_NODES nodes were trusted at least once (initial confidants: $TRUSTED_NODES)"
+if [ "$LOW_STAKE_NODES" -gt 0 ]; then
+    # once stake counts (StartingDPOS, moved by DPOS_AT; 100 rounds of margin for the order to land),
+    # a node below the minimum stake must never be trusted
+    from=$((DPOS_AT + 100))
+    low_trusted=0
+    for i in $(seq $((NODES - LOW_STAKE_NODES + 1)) "$NODES"); do
+        # rounds print with digit groups (R-1'234.0)
+        n=$(grep -a 'TRUSTED \[' "$WORK/n$i/node.log" | sed -E "s/.*R-([0-9']+)\..*/\1/" | tr -d "'" | awk -v f="$from" '$1 > f' | wc -l || true)
+        [ "$n" -eq 0 ] || { echo "n$i (low stake) was trusted in $n rounds after round $from"; low_trusted=$((low_trusted + 1)); }
+    done
+    [ "$low_trusted" -eq 0 ] || { echo "FAIL: nodes below the minimum stake were elected trusted"; exit 1; }
+    echo "stake: none of the $LOW_STAKE_NODES nodes below the minimum stake was trusted after round $from"
+fi
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

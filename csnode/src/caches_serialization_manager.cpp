@@ -92,6 +92,7 @@ struct CachesSerializationManager::Impl {
     const std::vector <std::string> hashesDivisions = {"blockchain", "smartcontracts","walletscache","walletsIds","roundstat","tokensmaster","apihandler"};
 
     std::optional<CheckpointHead> loadedHead_{};
+    std::optional<size_t> loadedVersion_{};
     bool completedFromGenesis_ = false;
     bool loadedFromCompleted_ = false;
 
@@ -650,6 +651,7 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
     }
 
     pImpl_->loadedHead_.reset();
+    pImpl_->loadedVersion_.reset();
     pImpl_->loadedFromCompleted_ = false;
 
     // Rank by max(head.seq, dir_name); mtime tiebreaker. Legacy accepted.
@@ -704,6 +706,7 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
 
     for (const auto& c : candidates) {
         if (pImpl_->loadVersion(c.version, verify)) {
+            pImpl_->loadedVersion_ = c.version;
             csinfo() << "CachesSerializationManager: successfully loaded qs/" << c.version
                      << " (effective seq=" << c.effectiveSeq << ")";
             return true;
@@ -716,6 +719,14 @@ bool CachesSerializationManager::load(const ChainVerifier& verify) {
 
 std::optional<CheckpointHead> CachesSerializationManager::getLoadedHead() const {
     return pImpl_->loadedHead_;
+}
+
+std::optional<size_t> CachesSerializationManager::getLoadedVersion() const {
+    return pImpl_->loadedVersion_;
+}
+
+void CachesSerializationManager::quarantine(size_t version) {
+    pImpl_->quarantineVersion(version);
 }
 
 void CachesSerializationManager::setCompletedFromGenesis() {

@@ -218,6 +218,9 @@ jobs:
           Two builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
           \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
           each package. Verify with SHA256SUMS.
+
+          What changes from the official node: https://github.com/${GITHUB_REPOSITORY}/blob/master/docs/differences.md
+          Every change by release: https://github.com/${GITHUB_REPOSITORY}/blob/master/docs/CHANGES.md
           EOF
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber --repo "$GITHUB_REPOSITORY"

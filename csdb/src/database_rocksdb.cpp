@@ -294,7 +294,14 @@ bool DatabaseRocksDB::seq_no(const cs::Bytes& key, uint32_t* value) {
         set_last_error(Corruption, "seq_no entry has unexpected size");
         return false;
     }
-    std::memcpy(value, buf.data(), sizeof(uint32_t));
+    // stored as sequence + 1, BerkeleyDB's bytes; the interface is 0-based, as LMDB's
+    uint32_t stored = 0;
+    std::memcpy(&stored, buf.data(), sizeof(uint32_t));
+    if (stored == 0) {
+        set_last_error(Corruption, "seq_no entry 0");
+        return false;
+    }
+    *value = stored - 1;
     return true;
 }
 

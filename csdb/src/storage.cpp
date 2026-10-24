@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdarg>
 #include <deque>
+#include <iterator>
 #include <limits>
 #include <mutex>
 #include <sstream>
@@ -168,9 +169,31 @@ private:
     size_t asyncWriteQueueMax_ = 5000;
     size_t writeBatchSize_ = 100;        // pools coalesced into one db->put_batch
     std::deque<Pool> write_queue;
+    // The batch the writer has taken from write_queue and is writing now. It stays searchable here,
+    // and a removal of the last block waits until it is empty, so that a block is always either in
+    // write_queue, here, or in the database, never in two of them.
+    std::vector<Pool> in_flight;
+    // the last write failed: its blocks are back at the front of write_queue and the writer retries;
+    // meanwhile flush() and pool_save() fail at once instead of waiting
+    bool write_failing = false;
+    // removals of the last block waiting for in_flight to empty: the writer takes no new batch
+    // meanwhile, so that they are not starved by a long queue
+    size_t removals_waiting = 0;
     std::mutex write_lock;
-    std::condition_variable write_cond_var;     // queue non-empty
-    std::condition_variable queue_space_cond;   // queue has space
+    std::condition_variable write_cond_var;     // queue non-empty, or quit
+    std::condition_variable queue_space_cond;   // queue has space, in_flight emptied, or write_failing changed
+
+    // a queued or in-flight pool matching `match`; the caller holds write_lock
+    template <typename Match>
+    bool find_queued(Match match, Pool& out) const {
+        for (const auto& pool : in_flight) {
+            if (match(pool)) { out = pool; return true; }
+        }
+        for (const auto& pool : write_queue) {
+            if (match(pool)) { out = pool; return true; }
+        }
+        return false;
+    }
 
     struct PoolElement {
         cs::Sequence seq; struct bySequence {};
@@ -272,6 +295,9 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
     }
 
     if (startSequence > last_seq_in_db + 1) {
+        set_last_error(Storage::StartAfterLastBlock,
+                       "the quick-start checkpoint continues at block %llu, the last block stored is %llu",
+                       static_cast<unsigned long long>(startSequence), static_cast<unsigned long long>(last_seq_in_db));
         cserror() << "startSequence > last_seq_in_db + 1";
         return false;
     }
@@ -363,29 +389,28 @@ bool Storage::priv::rescan(Storage::OpenCallback callback) {
 }
 
 void Storage::priv::write_routine() {
+    std::unique_lock<std::mutex> lock(write_lock);
     while (true) {
-        std::unique_lock<std::mutex> lock(write_lock);
-        write_cond_var.wait(lock, [this] { return quit || !write_queue.empty(); });
+        // a removal waiting for the batch in flight goes first, even when stopping
+        write_cond_var.wait(lock, [this] { return removals_waiting == 0 && (quit || !write_queue.empty()); });
 
         if (write_queue.empty() && quit) {
             return;
         }
 
-        // Peek (don't pop) up to writeBatchSize_ pools; write_queue_search needs them until I/O completes.
-        std::vector<Pool> pools;
+        // take up to writeBatchSize_ pools out of the queue; they stay findable in in_flight
         const size_t take = std::min(writeBatchSize_, write_queue.size());
-        pools.reserve(take);
-        auto it = write_queue.begin();
-        for (size_t i = 0; i < take; ++i, ++it) {
-            pools.push_back(*it);
-        }
+        in_flight.assign(std::make_move_iterator(write_queue.begin()),
+                         std::make_move_iterator(write_queue.begin() + static_cast<std::ptrdiff_t>(take)));
+        write_queue.erase(write_queue.begin(), write_queue.begin() + static_cast<std::ptrdiff_t>(take));
 
-        // Build payloads outside the lock; one put_batch coalesces 2*N puts into a single WriteBatch.
+        // Build payloads outside the lock (a pool shares its data, the copy is cheap); one put_batch
+        // coalesces 2*N puts into a single WriteBatch.
+        const std::vector<Pool> batch = in_flight;
         lock.unlock();
-
         std::vector<Database::PendingWrite> requests;
-        requests.reserve(pools.size());
-        for (auto& pool : pools) {
+        requests.reserve(batch.size());
+        for (const auto& pool : batch) {
             requests.push_back(Database::PendingWrite{
                 pool.hash().to_binary(),
                 static_cast<uint32_t>(pool.sequence()),
@@ -396,17 +421,29 @@ void Storage::priv::write_routine() {
         const bool written = db->put_batch(requests);
 
         lock.lock();
-        if (!written) {
-            // keep the blocks queued and try again: dropping them would leave a hole behind the caches,
-            // and a queue that stays full stops the node instead
-            lock.unlock();
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (written) {
+            in_flight.clear();
+            write_failing = false;
+            queue_space_cond.notify_all();
             continue;
         }
-        for (size_t i = 0; i < pools.size(); ++i) {
-            write_queue.pop_front();
-        }
+
+        // not written: put the blocks back in front, in order, so that they are retried, found, and
+        // removable; dropping them would leave a hole behind the caches
+        write_queue.insert(write_queue.begin(), std::make_move_iterator(in_flight.begin()),
+                           std::make_move_iterator(in_flight.end()));
+        in_flight.clear();
+        write_failing = true;
         queue_space_cond.notify_all();
+        if (quit) {
+            // stopping: give up, so that the node can stop. These blocks were counted but are not in
+            // the database; no checkpoint covers them, since flush() failed while they waited.
+            cserror() << "Storage: stopping with " << write_queue.size() << " block(s) not written, from "
+                      << write_queue.front().sequence() << " to " << write_queue.back().sequence()
+                      << ": " << db->last_error_message();
+            return;
+        }
+        write_cond_var.wait_for(lock, std::chrono::seconds(1), [this] { return quit; });
     }
 }
 
@@ -489,6 +526,9 @@ bool Storage::open(const OpenOptions& opt, OpenCallback callback) {
     }
     if (opt.writeBatchSize > 0) {
         d->writeBatchSize_ = opt.writeBatchSize;
+    }
+    if (opt.asyncWrites) {
+        d->async_writes = true;
     }
 
     // Start async writer (idempotent: re-opens won't spawn a second thread).
@@ -592,7 +632,10 @@ bool Storage::open(
     if (dbBackend == "lmdb") {
         // LMDB reuses the space of removed blocks, which suits pruned storage
         auto lmdb = std::make_shared<DatabaseLmdb>();
-        lmdb->open(path + "/lmdb");
+        if (!lmdb->open(path + "/lmdb")) {
+            d->set_last_error(DatabaseError, "Error open database: %s", lmdb->last_error_message().c_str());
+            return false;
+        }
         OpenOptions opt{lmdb, newBlockchainTop, startReadFrom};
         const bool ok = open(opt, callback);
         if (ok) {
@@ -644,7 +687,14 @@ bool Storage::flush() {
     if (d->async_writes) {
         // every block handed to the writer must be in the database before the caller relies on it
         std::unique_lock<std::mutex> lock(d->write_lock);
-        d->queue_space_cond.wait(lock, [this] { return d->write_queue.empty() || !d->write_thread.joinable(); });
+        d->queue_space_cond.wait(lock, [this] {
+            return (d->write_queue.empty() && d->in_flight.empty()) || d->write_failing || !d->write_thread.joinable();
+        });
+        if (!d->write_queue.empty() || !d->in_flight.empty()) {
+            d->set_last_error(DatabaseError, "%s: %zu block(s) wait in the write queue, the database does not accept writes",
+                              funcName(), d->write_queue.size() + d->in_flight.size());
+            return false;
+        }
     }
     return d->db->flush();
 }
@@ -712,8 +762,16 @@ bool Storage::pool_save(Pool pool) {
         // Hand off to write_routine; backpressure if queue full.
         std::unique_lock<std::mutex> lock(d->write_lock);
         d->queue_space_cond.wait(lock, [this] {
-            return d->write_queue.size() < d->asyncWriteQueueMax_;
+            return d->write_queue.size() < d->asyncWriteQueueMax_ || d->write_failing;
         });
+        // refuse only while blocks still wait for the failing database: once removals emptied the
+        // queue nothing is failing any more, and the next block is written (or fails) on its own
+        if (d->write_failing && (!d->write_queue.empty() || !d->in_flight.empty())) {
+            // as in the synchronous path: not stored, so not counted, and the caches do not run ahead
+            d->set_last_error(DatabaseError, "%s: cannot queue pool %llu, the database does not accept writes", funcName(),
+                              static_cast<unsigned long long>(pool.sequence()));
+            return false;
+        }
         d->write_queue.push_back(pool);
         d->write_cond_var.notify_one();
     }
@@ -765,13 +823,9 @@ Pool Storage::pool_load_internal(const PoolHash& hash, const bool metaOnly, size
     if (!d->db->get(hash.to_binary(), &data)) {
         {
             std::unique_lock<std::mutex> lock2(d->write_lock);
-            for (auto& poolToWrite : d->write_queue) {
-                if (poolToWrite.hash() == hash) {
-                    res = poolToWrite;
-                    needParseData = false;
-                    trxCnt = res.transactions().size();
-                    break;
-                }
+            if (d->find_queued([&](const Pool& p) { return p.hash() == hash; }, res)) {
+                needParseData = false;
+                trxCnt = res.transactions().size();
             }
         }
 
@@ -804,28 +858,59 @@ Pool Storage::pool_load_internal(const PoolHash& hash, const bool metaOnly, size
 }
 
 bool Storage::write_queue_search(const PoolHash& hash, Pool& res_pool) const {
-    std::unique_lock<std::mutex> lock(d->write_lock, std::defer_lock);
+    std::unique_lock<std::mutex> lock(d->write_lock);
+    return d->find_queued([&](const Pool& pool) { return hash == pool.hash(); }, res_pool);
+}
 
-    if (!d->write_queue.empty() && lock.try_lock()) {
-        auto pos = std::find_if(d->write_queue.begin(), d->write_queue.end(), [&](Pool& pool) { return hash == pool.hash(); });
-
-        if (pos != d->write_queue.cend()) {
-            res_pool = *pos;
-            return true;
-        }
-    }
-    return false;
+void Storage::wait_for_in_flight(std::unique_lock<std::mutex>& lock) {
+    // a batch being written may hold the last block: wait until it is in the database, so that the
+    // last block is then either the back of the queue or the last block of the database
+    ++d->removals_waiting;
+    d->queue_space_cond.wait(lock, [this] { return d->in_flight.empty(); });
+    --d->removals_waiting;
+    d->write_cond_var.notify_all();
 }
 
 bool Storage::write_queue_pop(Pool& res_pool) {
     std::unique_lock<std::mutex> lock(d->write_lock);
+    wait_for_in_flight(lock);
 
     if (!d->write_queue.empty()) {
         res_pool = d->write_queue.back();
         d->write_queue.pop_back();
+        if (d->write_queue.empty()) {
+            d->write_failing = false;    // nothing waits for the database any more
+        }
+        d->queue_space_cond.notify_all();
         return true;
     }
     return false;
+}
+
+bool Storage::write_queue_pop_last(const PoolHash& hash, bool& queued) {
+    queued = false;
+    std::unique_lock<std::mutex> lock(d->write_lock);
+    wait_for_in_flight(lock);
+    if (d->write_queue.empty()) {
+        return true;    // the last block is in the database
+    }
+    queued = true;
+    if (d->write_queue.back().hash() != hash) {
+        d->set_last_error(InvalidParameter, "%s: the last block in the write queue is not %s", funcName(), hash.to_string().c_str());
+        return false;
+    }
+    const Pool last = d->write_queue.back();
+    d->write_queue.pop_back();
+    if (d->write_queue.empty()) {
+        d->write_failing = false;    // nothing waits for the database any more
+    }
+    d->queue_space_cond.notify_all();
+    lock.unlock();
+
+    std::unique_lock<std::mutex> data(d->data_lock);
+    --d->count_pool;
+    d->last_hash = last.previous_hash();
+    return true;
 }
 
 Pool Storage::pool_load(const PoolHash& hash) const {
@@ -860,12 +945,8 @@ Pool Storage::pool_load(const cs::Sequence sequence) const {
     if (!d->db->get(static_cast<uint32_t>(sequence), &data)) {
         {
             std::unique_lock<std::mutex> lock2(d->write_lock);
-            for (auto& poolToWrite : d->write_queue) {
-                if (poolToWrite.sequence() == sequence) {
-                    res = poolToWrite;
-                    needParseData = false;
-                    break;
-                }
+            if (d->find_queued([&](const Pool& p) { return p.sequence() == sequence; }, res)) {
+                needParseData = false;
             }
         }
 
@@ -937,6 +1018,8 @@ Pool Storage::pool_remove_last() {
     bool found = write_queue_pop(res);
 
     if (found) {
+        std::unique_lock<std::mutex> lock(d->data_lock);
+        --d->count_pool;
         d->last_hash = res.previous_hash();
         return res;
     }
@@ -995,10 +1078,14 @@ bool Storage::pool_remove_last_repair(cs::Sequence test_sequence, const csdb::Po
 		return false;
 	}
 
-	// clear write_queue if it is not empty
-	{
-		std::unique_lock<std::mutex> lock(d->write_lock);
-		d->write_queue.clear();
+	// the last block may still wait in the write queue: then it is removed from there, and the blocks
+	// before it, counted and on their way to the database, are kept
+	bool queued = false;
+	if (!write_queue_pop_last(test_hash, queued)) {
+		return false;
+	}
+	if (queued) {
+		return true;
 	}
 
 	// test hash to conform last sequence or absent at all
@@ -1056,10 +1143,13 @@ bool Storage::pool_remove_(cs::Sequence testSequence) {
         return false;
     }
 
-    // clear write_queue if it is not empty
-    {
-        std::unique_lock<std::mutex> lock(d->write_lock);
-        d->write_queue.clear();
+    // the last block may still wait in the write queue: then it is removed from there
+    bool queued = false;
+    if (!write_queue_pop_last(testHash, queued)) {
+        return false;
+    }
+    if (queued) {
+        return true;
     }
 
     // test hash to conform last sequence or absent at all
@@ -1314,11 +1404,9 @@ csdb::PoolHash Storage::pool_hash(cs::Sequence sequence) const {
     if (!d->db->get(static_cast<uint32_t>(sequence), &data)) {
         {
             std::unique_lock<std::mutex> lock2(d->write_lock);
-            for (auto& poolToWrite : d->write_queue) {
-                if (poolToWrite.sequence() == sequence) {
-                    res = poolToWrite;
-                    break;
-                }
+            if (d->find_queued([&](const Pool& p) { return p.sequence() == sequence; }, res)) {
+                d->set_last_error();
+                return res.hash();
             }
         }
 

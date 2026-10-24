@@ -14,6 +14,7 @@
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
 #include <csnode/node.hpp>
+#include <csnode/blockrequest.hpp>
 #include <csnode/nodecore.hpp>
 #include <csnode/nodeutils.hpp>
 #include <csnode/poolsynchronizer.hpp>
@@ -108,6 +109,8 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&blockChain_.stopNode, this, &Node::stop);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, &Node::processSpecialInfo);
     cs::Connector::connect(&blockChain_.storeBlockEvent, this, static_cast<void (Node::*)(const csdb::Pool&)>(&Node::logStateDigest));
+    // a deferred block replaced by the writer's: fees and reward moved, so the digest of that sequence too
+    cs::Connector::connect(&blockChain_.lastBlockReplacedEvent, this, static_cast<void (Node::*)(const csdb::Pool&)>(&Node::logStateDigest));
     cs::Connector::connect(&blockChain_.uncertainBlock, this, &Node::sendBlockRequestToConfidants);
     cs::Connector::connect(&blockChain_.orderNecessaryBlock, this, &Node::sendNecessaryBlockRequest);
     cs::Connector::connect(&stat_.accountInitiationRequest, this, &Node::accountInitiationRequest);
@@ -187,8 +190,7 @@ bool Node::init() {
                     cslog() << "Saved interim QUICK START state to qs/0.";
                 }
             } else {
-                csinfo() << "Remove data for QUICK START";
-                cachesSerializationManager_.clear();
+                removeFailedQuickStartData();
             }
             return false;
         }
@@ -234,8 +236,7 @@ bool Node::init() {
                 cslog() << "Saved interim QUICK START state to qs/0.";
             }
         } else {
-            csinfo() << "Remove data for QUICK START";
-            cachesSerializationManager_.clear();
+            removeFailedQuickStartData();
         }
         return false;
     }
@@ -320,6 +321,20 @@ void Node::setupPoolSynchronizerBehaviour() {
 void Node::run() {
     std::cout << "Running transport\n";
     transport_->run();
+}
+
+void Node::removeFailedQuickStartData() {
+    const auto loaded = cachesSerializationManager_.getLoadedVersion();
+    if (blockChain_.checkpointAheadOfBlocks() && loaded.has_value()) {
+        // that checkpoint can never start with this database: set it aside, so that the next start
+        // tries the next one instead of failing in the same way for ever
+        cserror() << "QUICK START: checkpoint qs/" << *loaded << " is ahead of the blocks on disk, moving it to qs/"
+                  << *loaded << ".bad; the next start uses an older checkpoint";
+        cachesSerializationManager_.quarantine(*loaded);
+        return;
+    }
+    csinfo() << "Remove data for QUICK START";
+    cachesSerializationManager_.clear();
 }
 
 void Node::stop() {
@@ -494,28 +509,25 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
     }
 }
 
-uint8_t Node::calculateBootStrapWeight(cs::PublicKeys& confidants) {
-    size_t confSize = confidants.size();
-    uint8_t currentWeight = 0U;
-    if (confSize > 8) {
-        return currentWeight;
-    }
-    //auto it = initialConfidants_.cbegin();
-    auto itConfidants = confidants.cbegin();
-    --confSize;
-    for (auto it : initialConfidants_) {
-        if (std::equal(it.cbegin(), it.cend(), itConfidants->cbegin())) {
-            currentWeight += 1 << confSize;
-            ++itConfidants;
-        }
-        --confSize;
-    }
-    return currentWeight;
+static_assert(cs::kMaxBootstrapTable == Consensus::MaxTrustedNodes, "a bootstrap table holds at most MaxTrustedNodes keys");
+
+// the official node weighs tables of up to 8 keys only and silently drops larger ones, so a network
+// of 9 or more initial confidants never bootstraps: see cs::bootstrapWeight
+cs::BootstrapWeight Node::calculateBootStrapWeight(const cs::PublicKeys& confidants) const {
+    return cs::bootstrapWeight(initialConfidants_, confidants);
 }
 
 
 void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::RoundNumber rNum) {
     cslog() << "NODE> get Boot strap Round Table #" << rNum;
+    // a table for a round no honest starter would send to this node changes nothing here
+    const cs::Sequence lastSequence = blockChain_.getLastSeq();
+    const cs::RoundNumber currentRound = cs::Conveyer::instance().currentRoundNumber();
+    if (!cs::isBootstrapRoundInWindow(rNum, lastSequence, currentRound)) {
+        cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " does not fit this node (last block " << lastSequence
+                << ", round " << currentRound << "), drop";
+        return;
+    }
     solver_->resetGrayList();
     cs::IDataStream in(data, size);
     cs::RoundTable roundTable;
@@ -545,15 +557,17 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
         }
     }
 
-    uint8_t currentWeight = calculateBootStrapWeight(confidants);
+    cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confidants);
+    bool signedTable = false;
+    const size_t signed_subdata_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
 
     if (unknown) {
         cs::Signature sig;
         stream >> sig;
         if (!stream.isValid()) {
             cswarning() << "malformed bootstrap round table, ignore";
+            return;
         }
-        const size_t signed_subdata_len = 1 + size_t(confSize) * cscrypto::kPublicKeySize;
         const size_t signed_buf_len = sizeof(cs::RoundNumber) + signed_subdata_len;
         cs::Bytes buf;
         buf.reserve(signed_buf_len);
@@ -565,9 +579,42 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
             cswarning() << kLogPrefix_ << "failed to test bootstrap signature, drop";
             return;
         }
-        currentWeight = 255U;
+        currentWeight = cs::kSignedBootstrapWeight;
+        signedTable = true;
     }
+    else if (payload.size() == signed_subdata_len + cscrypto::kSignatureSize) {
+        // a table of initial confidants signed through the diag API (Node::bootstrap): the official
+        // node does not read its signature; here it exempts the table from the stall check below.
+        // An unsigned table ends with 4 random bytes, never with a signature's 64
+        cs::Signature sig;
+        stream >> sig;
+        cs::Bytes buf;
+        buf.reserve(sizeof(cs::RoundNumber) + signed_subdata_len);
+        auto* ptr = reinterpret_cast<const uint8_t*>(&rNum);
+        std::copy(ptr, ptr + sizeof(cs::RoundNumber), std::back_inserter(buf));
+        ptr = payload.data();
+        std::copy(ptr, ptr + signed_subdata_len, std::back_inserter(buf));
+        signedTable = stream.isValid() && cscrypto::verifySignature(sig, cs::PacketValidator::getBlockChainKey(), buf.data(), buf.size());
+        if (!signedTable) {
+            // e.g. a diag API bootstrap whose round the sender raised to its last block + 1
+            csdebug() << kLogPrefix_ << "bootstrap table #" << rNum << " has a signature that does not verify for this round";
+        }
+    }
+
+    // an unsigned table only while this node's own round has stalled, as it has for the starter
+    if (!signedTable) {
+        const uint64_t elapse = cs::ConfigHolder::instance().config()->roundElapseTime();
+        const uint64_t sinceRound = stat_.msSinceRoundChange();
+        if (!cs::isBootstrapStallAccepted(sinceRound, stat_.msSinceStart(), elapse, isBootstrapRound_)) {
+            cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " while round " << currentRound << " is " << sinceRound
+                    << " ms old (round_elapse_time " << elapse << "), drop";
+            return;
+        }
+    }
+
     if (currentWeight <= bootStrapWeight_) {
+        cslog() << kLogPrefix_ << "bootstrap table #" << rNum << " with " << confidants.size() << " confidants weighs "
+                << currentWeight << ", not above " << bootStrapWeight_ << ", drop";
         return;
     }
 
@@ -579,18 +626,15 @@ void Node::getBootstrapTable(const uint8_t* data, const size_t size, const cs::R
 
     if (!isBootstrapRound_) {
         isBootstrapRound_ = true;
-        cslog() << "NODE> Bootstrap on";
+        cslog() << "NODE> Bootstrap on, table of " << confidants.size() << " confidants, weight " << currentWeight;
     }
 
     roundTable.confidants = std::move(confidants);
     roundTable.hashes.clear();
 
-    cs::Sequence lastSequence = blockChain_.getLastSeq();
-
-    if (lastSequence >= rNum) {
-        csdebug() << "NODE> remove " << lastSequence - rNum + 1 << " block(s) required (rNum = " << rNum << ", last_seq = " << lastSequence << ")";
-        blockChain_.setBlocksToBeRemoved(lastSequence - rNum + 1);
-    }
+    // No block-removal request: the official one (lastSequence - rNum + 1) is refused whenever a
+    // block was loaded or recorded, the permission being set already; the one honest case,
+    // rNum == lastSequence (one uncertain last block), is resolved by storeBlock.
 
     roundTable.round = rNum;
     confirmationList_.remove(rNum);
@@ -1040,7 +1084,14 @@ void Node::getCharacteristic(cs::RoundPackage& rPackage) {
     const auto table = conveyer.roundTable(round);
 
     if (table == nullptr) {
-        cserror() << "NODE> cannot access proper round table to add trusted to pool #" << rPackage.poolMetaInfo().sequenceNumber;
+        // a node still syncing gets the packages of the network's rounds without their round tables;
+        // the block comes with the sync, so only a node that is not behind logs an error
+        if (blockChain_.getLastSeq() + 1 < round) {
+            cswarning() << "NODE> no round table to add trusted to pool #" << round << " while syncing (last block #" << blockChain_.getLastSeq() << "), the block comes with the sync";
+        }
+        else {
+            cserror() << "NODE> cannot access proper round table to add trusted to pool #" << round;
+        }
         return;
     }
 
@@ -1796,8 +1847,10 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
     csdebug() << "NODE> got request for " << sequences.size() << " block(s) from " << cs::Utils::byteStreamToHex(sender.data(), sender.size());
 
 
-    if (sequences.front() > blockChain_.getLastSeq()) {
-        csdebug() << "NODE> Get block request> The requested block: " << sequences.front() << " is beyond my last block";
+    if (cs::answerBlockRequest(sequences.front(), blockChain_.getFirstStoredSequence(), blockChain_.getLastSeq())
+            != cs::BlockRequestAnswer::Serve) {
+        csdebug() << "NODE> Get block request> The requested block: " << sequences.front() << " is not stored here (blocks "
+                  << blockChain_.getFirstStoredSequence() << ".." << blockChain_.getLastSeq() << ")";
         sendSyncroMessage(cs::SyncroMessage::NoSuchBlocks, sender);
         return;
     }
@@ -1825,6 +1878,12 @@ void Node::getBlockRequest(const uint8_t* data, const size_t size, const cs::Pub
         }
     }
 
+    if (poolsBlock.empty()) {
+        // AwaitAnswer was sent: say there is nothing, so that the requester frees this neighbour
+        // (an empty reply is not sent at all)
+        sendSyncroMessage(cs::SyncroMessage::NoSuchBlocks, sender);
+        return;
+    }
     sendReply();
 }
 
@@ -3293,12 +3352,40 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
     else {//if trusted node has probably received a new RP with not full stake, but has an RP with full one
         if (rPackage.roundTable().round == currentRoundPackage_.roundTable().round) {
             auto mask = currentRoundPackage_.poolMetaInfo().realTrustedMask;
-            if (cs::TrustedMask::trustedSize(rPackage.poolMetaInfo().realTrustedMask) > cs::TrustedMask::trustedSize(mask)) {
+            const auto& own = currentRoundPackage_.poolMetaInfo();
+            const auto& got = rPackage.poolMetaInfo();
+            const auto verdict = cs::lastBlockVerdict(mask, got.realTrustedMask, Consensus::MinTrustedNodes);
+            const bool samePosition = got.sequenceNumber == own.sequenceNumber && got.previousHash == own.previousHash;
+            const bool moreTrusted = cs::TrustedMask::trustedSize(got.realTrustedMask) > cs::TrustedMask::trustedSize(mask);
+            const bool deferred = !moreTrusted && verdict == cs::LastBlockVerdict::Take && samePosition
+                                  && getBlockChain().hasDeferredBlock(own.sequenceNumber);
+            const bool verifies = deferred && getBlockChain().packageBlockVerifies(rPackage);
+            if (moreTrusted) {  // official rule
                 csdebug() << "Current Roundpackage of " << rNum << " will be replaced by new one";
+                roundPackageCache_.push_back(rPackage);
+            }
+            else if (verifies) {
+                // the writer's package carries another block of the same sequence (a stage-3 retry race):
+                // a majority of the round's trusted signed it and the others cannot form a round on their
+                // own, and its signatures verify: continue with the writer's round; updateLastBlock takes its block
+                cslog() << "NODE> round package " << rNum << " carries block #" << own.sequenceNumber << " with real trusted "
+                        << cs::TrustedMask::toString(got.realTrustedMask) << " against own " << cs::TrustedMask::toString(mask)
+                        << ": taking the writer's package";
+                getBlockChain().allowTakeover(own.sequenceNumber);
                 roundPackageCache_.push_back(rPackage);
             }
             else {
                 csdebug() << "Throw received RP " << rNum << " using the own one";
+                // the same block with another set of real trusted is another block: the writer's round
+                // goes on with it, this node keeps its own and will not match the next hashes
+                if (samePosition && verdict != cs::LastBlockVerdict::Same) {
+                    const char* reason = verdict != cs::LastBlockVerdict::Take ? cs::toString(verdict)
+                                         : !deferred ? "the own block is no longer deferred"
+                                                     : "the package's signatures do not sign the writer's block";
+                    cswarning() << "NODE> block #" << own.sequenceNumber << " differs from the round package's: real trusted "
+                                << cs::TrustedMask::toString(got.realTrustedMask) << " there, " << cs::TrustedMask::toString(mask)
+                                << " here (" << reason << "), this node keeps its own (fork)";
+                }
                 roundPackageCache_.push_back(currentRoundPackage_);
                 rPackage = currentRoundPackage_;
             }
@@ -4083,6 +4170,11 @@ void Node::requestStop() {
     emit stopRequested();
 }
 
+void Node::stopOnError() {
+    gSignalStatus = 1;
+    requestStop();
+}
+
 void Node::onStopRequested() {
     blockChain_.requestStop();
 
@@ -4616,7 +4708,7 @@ void Node::onRoundTimeElapsed() {
         for (auto it : actualConfidants) {
             confs.push_back(it);
         }
-        uint8_t currentWeight = calculateBootStrapWeight(confs);
+        cs::BootstrapWeight currentWeight = calculateBootStrapWeight(confs);
         if (currentWeight > bootStrapWeight_) {
             bootStrapWeight_ = currentWeight;
         }
@@ -4682,7 +4774,7 @@ bool Node::bootstrap(const cs::Bytes& bytes, cs::RoundNumber round) {
     auto& conveyer = cs::Conveyer::instance();
     conveyer.updateRoundTable(roundPackageCache_.back().roundTable().round, roundPackageCache_.back().roundTable());
 
-    uint8_t currentWeight = calculateBootStrapWeight(rt.confidants);
+    cs::BootstrapWeight currentWeight = calculateBootStrapWeight(rt.confidants);
     if (currentWeight > bootStrapWeight_) {
         bootStrapWeight_ = currentWeight;
     }

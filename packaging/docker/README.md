@@ -18,6 +18,7 @@ A pruned node (the default) first downloads the latest snapshot, published every
 | `db/`, `caches/`, `qs/`, `*.dat` | Blocks, caches and checkpoints. |
 | `log/` | Node logs (10 × 50 MB) and executor logs (kept 7 days). |
 | `snapshot.json` | The snapshot this node started from. |
+| `.restore-incomplete` | Present only while a snapshot restore moves its files into place. If the container stops then, the next start removes what was moved and restores again (a restore runs only without a database). |
 
 The container runs as uid 1000: the directory must be writable by it (`sudo chown -R 1000 ~/.credits`), or set `user:` in the compose file to your own uid.
 
@@ -33,7 +34,7 @@ To start over, set `CREDITS_RESET=1` once. The old data is moved to `~/.credits/
 
 ### Changing the block database
 
-To move an existing database to another backend, set `db_backend` in `config.ini` to the new one and set `CREDITS_CONVERT_DB=yes` in `.env`. Stop the node before converting. The node converts the database in place at the next start; it needs about 1 GB free beyond the database when converting from berkeleydb; about the size of the database again when converting from lmdb or rocksdb (their files do not shrink until the conversion ends). It resumes if interrupted. Remove `CREDITS_CONVERT_DB` afterwards.
+To move an existing database to another backend, set `db_backend` in `config.ini` to the new one and set `CREDITS_CONVERT_DB=yes` in `.env`. Stop the node before converting. The node converts the database in place at the next start; it needs about 1 GB free beyond the database when converting from berkeleydb; about the size of the database again when converting from lmdb (its files do not shrink until the conversion ends); up to 4 times the size of the database when converting from rocksdb, which compresses its blocks. The node checks the free space first and names what it needs. It resumes if interrupted. Before converting from berkeleydb, keep a copy of `~/.credits/db`, taken with the node stopped right before the conversion (it takes as much space as `db/`; another disk is fine): a crash during a BerkeleyDB compaction can leave the old database unopenable while blocks are still to convert, and the copy is then the way back (see `docs/storage.md`, Interruptions). Remove `CREDITS_CONVERT_DB` afterwards.
 
 ## Upgrades
 

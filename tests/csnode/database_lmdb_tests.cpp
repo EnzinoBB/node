@@ -4,6 +4,7 @@
 #include <memory>
 
 #include <csdb/database_lmdb.hpp>
+#include <lmdb.h>
 
 namespace {
 cs::Bytes hashOf(uint32_t seq) {
@@ -124,5 +125,33 @@ TEST(DatabaseLmdb, RemovesABatchSkippingMissingBlocks) {
     auto it = db->new_iterator();
     it->seek_to_first();
     ASSERT_EQ(it->key(), 64u);
+    std::filesystem::remove_all(dir);
+}
+
+// an environment whose tables cannot be opened (here "blocks" is a plain record, not a table) is of
+// no use: open() fails and the database does not report itself open, so the storage refuses to start
+TEST(DatabaseLmdb, FailedTableOpenLeavesItClosed) {
+    auto dir = std::filesystem::temp_directory_path() / "cs_lmdb_bad_tables";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    {
+        MDB_env* env = nullptr;
+        ASSERT_EQ(mdb_env_create(&env), 0);
+        ASSERT_EQ(mdb_env_set_maxdbs(env, 3), 0);
+        ASSERT_EQ(mdb_env_open(env, dir.string().c_str(), 0, 0644), 0);
+        MDB_txn* txn = nullptr;
+        ASSERT_EQ(mdb_txn_begin(env, nullptr, 0, &txn), 0);
+        MDB_dbi main = 0;
+        ASSERT_EQ(mdb_dbi_open(txn, nullptr, 0, &main), 0);
+        MDB_val key{6, const_cast<char*>("blocks")};
+        MDB_val value{1, const_cast<char*>("x")};
+        ASSERT_EQ(mdb_put(txn, main, &key, &value, 0), 0);
+        ASSERT_EQ(mdb_txn_commit(txn), 0);
+        mdb_env_close(env);
+    }
+    auto lmdb = std::make_shared<csdb::DatabaseLmdb>();
+    EXPECT_FALSE(lmdb->open(dir.string()));
+    std::shared_ptr<csdb::Database> db = lmdb;    // the interface the storage checks
+    EXPECT_FALSE(db->is_open());
     std::filesystem::remove_all(dir);
 }

@@ -1,6 +1,8 @@
 #include "gtest/gtest.h"
 
+#include <cerrno>
 #include <exception>
+#include <stdexcept>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -33,4 +35,14 @@ TEST(DatabaseBerkeleyDB, DestroyAfterAFailedOpen) {
     }   // the destructor runs here
     EXPECT_FALSE(opened);
     fs::remove_all(dir);
+}
+
+// an environment that needs recovery stops the node (the error is rethrown); every other error, a full
+// disk included, is a failed call the node retries
+TEST(DatabaseBerkeleyDB, OnlyARecoveryErrorIsFatal) {
+    EXPECT_TRUE(csdb::needsRecovery(DbRunRecoveryException("panic")));
+    EXPECT_TRUE(csdb::needsRecovery(DbException("panic", DB_RUNRECOVERY)));
+    EXPECT_FALSE(csdb::needsRecovery(DbException("disk full", ENOSPC)));
+    EXPECT_FALSE(csdb::needsRecovery(DbException("not found", DB_NOTFOUND)));
+    EXPECT_FALSE(csdb::needsRecovery(std::runtime_error("other")));
 }

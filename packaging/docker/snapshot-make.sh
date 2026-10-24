@@ -6,15 +6,25 @@
 # <node dir> is the working directory of a pruned LMDB node that has been stopped cleanly and was
 # then started once more, so that its last log line "STATE DIGEST #<seq> <hex> wallets <n>" is the
 # digest of its head. Writes <out>/credits-pruned-<seq>.tar.zst and <out>/latest.json. The snapshot
-# holds db/lmdb, caches/, qs/, roundstat.dat and smartcontracts.dat; every LMDB environment is
-# copied with mdb_copy -c, which writes only the live pages. Keys, configuration and logs stay out.
+# holds db/lmdb, caches/ (but poolcachedb), qs/, roundstat.dat and smartcontracts.dat; every LMDB environment is
+# copied with mdb_copy -c, which writes only the live pages, and each copy must pass lmdb-check.sh
+# (with mdb_dump and mdb_stat next to mdb_copy): a corrupt environment stops the script, so that it
+# never reaches the nodes that restore the snapshot. Keys, configuration and logs stay out.
 set -euo pipefail
 
 node=$1 out=$2 mdb_copy=$3 run=${4:-}
+tools=$(dirname "$mdb_copy")
+here=$(cd "$(dirname "$0")" && pwd)
+[ -x "$tools/mdb_dump" ] && [ -x "$tools/mdb_stat" ] || { echo "no mdb_dump and mdb_stat next to $mdb_copy" >&2; exit 1; }
 [ -d "$node/db/lmdb" ] || { echo "no $node/db/lmdb: not a pruned LMDB node" >&2; exit 1; }
 [ -d "$node/qs" ] || { echo "no $node/qs: no checkpoint" >&2; exit 1; }
+# a running node holds db/.lock: its database, caches and checkpoints would not match each other.
+# The lock is held until the script ends, so that the node cannot start while it is copied
+exec 9>>"$node/db/.lock" || { echo "cannot open $node/db/.lock" >&2; exit 1; }
+flock -n 9 || { echo "the node in $node is running: stop it first" >&2; exit 1; }
 
-digest=$(cat "$node"/log/log_*.txt "$node"/node.log 2>/dev/null | grep -a 'STATE DIGEST #' | tail -1 || true)
+# the logs oldest first by modification time: by name log_10 would come before log_9
+digest=$(cat $(ls -tr "$node"/log/log_*.txt 2>/dev/null) "$node"/node.log /dev/null 2>/dev/null | grep -a 'STATE DIGEST #' | tail -1 || true)
 [ -n "$digest" ] || { echo "no STATE DIGEST line in $node/log" >&2; exit 1; }
 seq=$(sed -E 's/.*STATE DIGEST #([0-9]+) .*/\1/' <<<"$digest")
 hex=$(sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+) .*/\1/' <<<"$digest")
@@ -28,10 +38,18 @@ stage=$(mktemp -d "$out/.stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 
 # LMDB environments: compact copies; everything else as it is
-copy_env() { mkdir -p "$stage/$1" && "$mdb_copy" -c "$node/$1" "$stage/$1"; }
+copy_env() {
+    mkdir -p "$stage/$1"
+    "$mdb_copy" -c "$node/$1" "$stage/$1" 2>/dev/null \
+        || { echo "cannot copy the LMDB environment $1: it is corrupt or in use" >&2; exit 1; }
+    "$here/lmdb-check.sh" "$tools" "$stage/$1" 2>/dev/null \
+        || { echo "the LMDB environment $1 is corrupt: $("$here/lmdb-check.sh" "$tools" "$stage/$1" 2>&1 | sed "s|$stage/||")" >&2; exit 1; }
+}
 copy_env db/lmdb
 for env in "$node"/caches/*/; do
     rel=caches/$(basename "$env")
+    # the node wipes poolcachedb at every start: nothing in it is worth shipping
+    [ "$rel" != caches/poolcachedb ] || continue
     if [ -e "$env/data.mdb" ]; then copy_env "$rel"; else mkdir -p "$stage/caches" && cp -a "$env" "$stage/$rel"; fi
 done
 cp -a "$node/qs" "$stage/qs"

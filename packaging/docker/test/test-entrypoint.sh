@@ -112,6 +112,38 @@ run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
 [ -e "$d/.restore-tmp" ] && fail ".restore-tmp left"
 pass "leftover restore directory wiped"
 
+# 6b. a restore that stops while it moves its files: the node is not started on part of a snapshot,
+# and the next start removes that part and restores again
+if [ "$(id -u)" = 0 ]; then
+    echo "skipped: interrupted restore (as root chmod cannot block the move)"
+else
+d=$(newdata 6b)
+mkdir -p "$d/caches/blocker"
+touch "$d/caches/blocker/f"
+chmod 555 "$d/caches/blocker"     # db is moved first, then caches cannot be replaced
+set +e; out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json); rc=$?; set -e
+chmod 755 "$d/caches/blocker"
+[ "$rc" = 5 ] || { echo "$out"; fail "interrupted restore: exit $rc, expected 5"; }
+grep -q 'stopped while it moved its files' <<<"$out" || { echo "$out"; fail "interrupted restore not reported"; }
+grep -q 'CREDITS_RESET' <<<"$out" && { echo "$out"; fail "an interrupted restore suggests a reset"; }
+[ -f "$d/stub-args" ] && fail "the node was started on part of a snapshot"
+out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
+grep -q 'removing it to restore again' <<<"$out" || { echo "$out"; fail "the partial restore was not removed"; }
+grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "no second restore"; }
+[ -f "$d/snapshot.verified" ] || { echo "$out"; fail "second restore not verified"; }
+[ -e "$d/.restore-incomplete" ] && fail "restore marker left"
+pass "interrupted restore redone at the next start"
+fi
+
+# 6c. an older run's log naming the same block with another digest does not count
+d=$(newdata 6c)
+mkdir -p "$d/log"
+echo "[2026-01-01 00:00:00.000000] [info] STATE DIGEST #1000 $(printf 'e%.0s' $(seq 1 64)) wallets 3" > "$d/log/log_1.txt"
+out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
+grep -q 'SNAPSHOT DIGEST MISMATCH' <<<"$out" && { echo "$out"; fail "a stale log line was taken for the start-up digest"; }
+[ -f "$d/snapshot.verified" ] || { echo "$out"; fail "digest not verified with a stale log around"; }
+pass "stale digest lines in old logs are ignored"
+
 # storage changes, on a node with data
 withdata() { local d; d=$(newdata "$1"); run "$d" -e CREDITS_SNAPSHOT=off "${@:2}" >/dev/null; mkdir -p "$d/db/x"; touch "$d/db/x/data"; echo "$d"; }
 
