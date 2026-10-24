@@ -74,7 +74,9 @@ int run(const Config& config, const std::string& outDir) {
         say() << "a node is running on " << dbPath << ": stop it first" << std::endl;
         return 1;
     }
-    const auto found = csdb::backend::detect(dbPath, true);
+    // from the files alone: the start-up check has already decided the folder holds the configured
+    // backend, and opening an engine twice in one process can fail on its own lock
+    const auto found = csdb::backend::detect(dbPath, false);
     if (std::find(found.begin(), found.end(), storage.dbBackend) == found.end()) {
         say() << dbPath << " holds no " << storage.dbBackend << " database (the configured db_backend)" << std::endl;
         return 1;
