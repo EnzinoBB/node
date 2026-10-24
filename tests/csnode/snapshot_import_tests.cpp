@@ -294,10 +294,9 @@ TEST(SnapshotImport, ExistingDatabaseRefused) {
     EXPECT_TRUE(db && db->get(150u, &bytes));
 }
 
-TEST(SnapshotImport, BlockWithoutTheRoundsConfirmationsRejected) {
+TEST(SnapshotImport, RebuiltBlockWithoutSignaturesOrConfirmationsRejected) {
     Fixture fx("snapshot_import_confirmations");
-    // block 100 rebuilt without confirmations: still signed by its confidants, still in the chain
-    // for the builder, but no longer confirmed by the round before it
+    // block 100 rebuilt by someone without the confidants' keys: no signatures, no confirmations
     const auto original = csdb::Pool::from_binary(cs::Bytes(fx.chain.blocks[100]));
     csdb::Pool p(original.previous_hash(), 100);
     p.add_user_field(1, original.user_field(1).value<std::string>());
@@ -305,7 +304,7 @@ TEST(SnapshotImport, BlockWithoutTheRoundsConfirmationsRejected) {
     p.add_number_trusted(3);
     p.add_real_trusted(0b111);
     ASSERT_TRUE(p.compose());
-    fx.chain.blocks[100] = p.to_binary();   // the chain is broken at 101 now: the import must stop at 100 or 101
+    fx.chain.blocks[100] = p.to_binary();   // its hash changes too: block 101 no longer follows it
     const auto built = fx.build();
     if (built.ok) {
         EXPECT_FALSE(fx.import(built).ok);
