@@ -678,6 +678,9 @@ while :; do
         fi
         # format 2: the node builds the snapshot of its latest periodic checkpoint itself; the
         # manifest must declare the digest the checkpoint logged when it was saved
+        # who still holds the database files (RocksDB's LOCK allows one process)
+        { fuser -v "$WORK/n$PRUNE_NODE"/db/LOCK "$WORK/n$PRUNE_NODE"/db/lmdb/lock.mdb 2>&1 || true; } | sed 's/^/snapshot test: holder: /'
+        ps -eo pid,ppid,etimes,args | grep -a "n$PRUNE_NODE\b\|contract-executor" | grep -v grep | sed 's/^/snapshot test: process: /' || true
         rc=0
         (cd "$WORK/n$PRUNE_NODE" && exec "$BIN" --db-path db --config-file config.ini --export-snapshot "$WORK/snapshot2") \
             > "$WORK/export.log" 2>&1 || rc=$?
