@@ -140,6 +140,13 @@ TEST(SmartContract, DeclaredStateSurvivesCheckpointAndOldItemsLoad) {
     EXPECT_EQ(back.declared_hash, item.declared_hash);
     EXPECT_EQ(back.state, item.state);
 
+    // an item without a declaration keeps the bytes of earlier builds (their checkpoints are
+    // verified against hashes of these bytes)
+    cs::SmartContracts::StateItem plainItem = item;
+    plainItem.declared_ref = cs::SmartContractRef{};
+    plainItem.declared_hash = cs::Hash{};
+    EXPECT_EQ(plainItem.to_bytes().size(), item.to_bytes().size() - (sizeof(item.declared_ref.sequence) + sizeof(item.declared_ref.transaction) + item.declared_hash.size()));
+
     // an earlier build wrote no declaration: the same bytes without the tail
     auto old = item.to_bytes();
     old.resize(old.size() - (sizeof(item.declared_ref.sequence) + sizeof(item.declared_ref.transaction) + item.declared_hash.size()));
