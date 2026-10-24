@@ -2,6 +2,7 @@
 
 #include <csdb/address.hpp>
 #include <csdb/pool.hpp>
+#include <solver/statefetcher.hpp>
 #include <csdb/transaction.hpp>
 #include <csdb/user_field.hpp>
 #include <lib/system/common.hpp>
@@ -359,6 +360,57 @@ public:
     static std::optional<SmartContractRef> emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
                                                               const std::function<csdb::Address(const csdb::Address&)>& absolute);
 
+    // public for the tests of the state bookkeeping (StateItem::to_bytes/from_bytes, is_stale)
+    enum class PayableStatus : int
+    {
+        Unknown = -1,
+        Absent = 0,
+        Implemented = 1,
+        ImplementedVer1 = 2
+    };
+
+    // defines current contract state, the contracts cache is a container of every contract state
+    struct StateItem {
+        std::string toString();
+        std::string transactionToString(const csdb::Transaction& tr);
+        Bytes to_bytes();
+        static StateItem from_bytes(Bytes& data);
+        // payable() method is implemented
+        PayableStatus payable{ PayableStatus::Unknown };
+        // reference to deploy transaction
+        SmartContractRef ref_deploy;
+        // reference to last successful execution which state is stored by item, may be equal to ref_deploy
+        SmartContractRef ref_execute;
+        // Reference to execution which state is cached in DB
+        SmartContractRef ref_cache;
+        // Reference to last state update transaction
+        SmartContractRef ref_state;
+        // deploy transaction referenced by ref_deploy
+        csdb::Transaction deploy{};
+        // the last execute transaction referenced by ref_execute
+        csdb::Transaction execute{};
+        // current state which is result of last successful execution / deploy
+        std::string state;
+        // using other contracts: [own_method] - [ [other_contract - its_method], ... ], ...
+        std::map<std::string, std::map<csdb::Address, std::string>> uses;
+        // what the chain declares the contract's state is: the call of the last new_state with a
+        // state (RefStart) and that state's hash, recorded whether or not this node obtained the
+        // state; zero hash: unknown (a checkpoint of an earlier build whose block is pruned)
+        SmartContractRef declared_ref;
+        cs::Hash declared_hash{};
+    };
+
+    // the state the item holds is not the one the chain declares (an unknown declaration is not stale)
+    static bool is_stale(const StateItem& item);
+
+    // a state a peer sent for the call reply_ref, against what the chain declares for the contract
+    enum class StateReplyCheck { Accepted, Newer, Older, HashMismatch, Undeclared };
+    static StateReplyCheck verify_state_reply(const SmartContractRef& reply_ref, const std::string& state, const StateItem& item);
+    size_t count_stale() const;
+    // records the call and hash a new_state declares into the contract's item, if it has one
+    void record_declared(const csdb::Address& abs_addr, const SmartContractRef& ref_start, const csdb::Transaction& new_state);
+
+
     // locked contracts that are neither executed now nor used by an executed contract
     static std::vector<csdb::Address> stale_locks(const std::unordered_set<csdb::Address>& locked, const std::vector<csdb::Address>& in_use);
 
@@ -602,49 +654,19 @@ private:
 
     CallsQueueScheduler::CallTag tag_cancel_running_contract;
 
-    enum class PayableStatus : int
-    {
-        Unknown = -1,
-        Absent = 0,
-        Implemented = 1,
-        ImplementedVer1 = 2
-    };
-
-    // defines current contract state, the contracts cache is a container of every contract state
-    struct StateItem {
-        std::string toString();
-        std::string transactionToString(const csdb::Transaction& tr);
-        Bytes to_bytes();
-        static StateItem from_bytes(Bytes& data);
-        // payable() method is implemented
-        PayableStatus payable{ PayableStatus::Unknown };
-        // reference to deploy transaction
-        SmartContractRef ref_deploy;
-        // reference to last successful execution which state is stored by item, may be equal to ref_deploy
-        SmartContractRef ref_execute;
-        // Reference to execution which state is cached in DB
-        SmartContractRef ref_cache;
-        // Reference to last state update transaction
-        SmartContractRef ref_state;
-        // deploy transaction referenced by ref_deploy
-        csdb::Transaction deploy{};
-        // the last execute transaction referenced by ref_execute
-        csdb::Transaction execute{};
-        // current state which is result of last successful execution / deploy
-        std::string state;
-        // using other contracts: [own_method] - [ [other_contract - its_method], ... ], ...
-        std::map<std::string, std::map<csdb::Address, std::string>> uses;
-    };
-
     // last contract's state storage
     std::unordered_map<csdb::Address, StateItem> known_contracts;
 
     std::unordered_set<csdb::Address> blacklistedContracts_;
 
     std::unordered_set<csdb::Address> locked_contracts;
-    // contracts whose state this node asked the confidants for, with the round of the last request;
-    // a StateReply for any other contract is not an answer to this node
-    std::unordered_map<csdb::Address, cs::RoundNumber> pending_state_requests;
+    // contracts whose state is not the one the chain declares: asked for at the head, paced; a
+    // StateReply for any other contract is not an answer to this node
+    StateFetcher state_fetcher_;
+    // the previous stored block was read (sync, start-up), not live: the next live one starts a fetch
+    bool was_reading_db_ = true;
+    cs::RoundNumber last_state_summary_ = 0;
+    void on_live_block(cs::RoundNumber round);
 
     //uint64_t testValue = 0;
 

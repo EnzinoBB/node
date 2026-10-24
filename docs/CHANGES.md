@@ -39,6 +39,9 @@ lines under the new release.
 | #90 | csnode: `BlockVerifier` for blocks that come from outside the consensus (hash, signatures against the block's confidants, round confirmations), for the snapshot import and backward sync |
 | #89 | csnode, client: snapshot format 2 built by the node from its own checkpoint and blocks on any backend (lz4, per-chunk SHA-256, manifest signed with the node key); `--export-snapshot <dir>` |
 | #92 | csnode, client: snapshot importer and `--import-snapshot`: a format-2 snapshot is checked file by file and block by block (signatures, round confirmations, hash chain to the declared head, checkpoint digest) and written into a new LMDB or RocksDB database; the CI snapshot test uses export and import; digest_offline waits for the node to stop |
+| #93 | ci(testnet): a Dice contract that reads its own balance, played by two players (also twice in one block); scenario `contracts-dice-join`, where a node syncing through the plays must end with the live nodes' balances and contract state |
+| #94 | solver: an emitted transaction's fee is charged to the contract's latest successful execution in its block, as the live nodes charge it; a syncing node whose re-execution of a contract failed charged it to an earlier caller. Consensus-relevant: balances of such callers change by a fee compared with an official node that syncs the same blocks |
+| #95 | solver: each contract records the call and hash of the state the chain declares; once live, a node asks the confidants for the states it holds stale (paced, with backoff) and takes only the declared one; a state whose block is not stored is no longer taken unverified |
 
 ## community.11 — 2026-10-24
 

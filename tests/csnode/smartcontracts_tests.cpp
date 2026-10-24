@@ -1,6 +1,7 @@
 #define TESTING
 
 #include <solver/smartcontracts.hpp>
+#include <solver/statefetcher.hpp>
 #include "clientconfigmock.hpp"
 #include "gtest/gtest.h"
 #include <csdb/transaction.hpp>
@@ -142,4 +143,97 @@ TEST(SmartContract, EmittedTransactionIsChargedToTheLatestExecutionInTheBlock) {
     other.add_transaction(failed);
     other.add_transaction(plain(A, player, 9));
     EXPECT_FALSE(cs::SmartContracts::emitting_new_state(other, 1, A, identity).has_value());
+}
+
+// step 2 of the contract state sync plan: the declared call and hash survive a checkpoint, an item of
+// an earlier build loads without them, and staleness compares the state with the declared hash
+TEST(SmartContract, DeclaredStateSurvivesCheckpointAndOldItemsLoad) {
+    cs::SmartContracts::StateItem item;
+    item.ref_execute.sequence = 7;
+    item.ref_execute.transaction = 1;
+    item.state = "state after 7.1";
+    item.declared_ref = item.ref_execute;
+    item.declared_hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(item.state.data()), item.state.size());
+
+    auto bytes = item.to_bytes();
+    const auto back = cs::SmartContracts::StateItem::from_bytes(bytes);
+    EXPECT_EQ(back.declared_ref.sequence, 7u);
+    EXPECT_EQ(back.declared_ref.transaction, 1u);
+    EXPECT_EQ(back.declared_hash, item.declared_hash);
+    EXPECT_EQ(back.state, item.state);
+
+    // an item without a declaration keeps the bytes of earlier builds (their checkpoints are
+    // verified against hashes of these bytes)
+    cs::SmartContracts::StateItem plainItem = item;
+    plainItem.declared_ref = cs::SmartContractRef{};
+    plainItem.declared_hash = cs::Hash{};
+    EXPECT_EQ(plainItem.to_bytes().size(), item.to_bytes().size() - (sizeof(item.declared_ref.sequence) + sizeof(item.declared_ref.transaction) + item.declared_hash.size()));
+
+    // an earlier build wrote no declaration: the same bytes without the tail
+    auto old = item.to_bytes();
+    old.resize(old.size() - (sizeof(item.declared_ref.sequence) + sizeof(item.declared_ref.transaction) + item.declared_hash.size()));
+    const auto earlier = cs::SmartContracts::StateItem::from_bytes(old);
+    EXPECT_EQ(earlier.state, item.state);
+    EXPECT_FALSE(earlier.declared_ref.is_valid());
+    EXPECT_EQ(earlier.declared_hash, cs::Hash{});
+}
+
+TEST(SmartContract, StaleMeansNotTheDeclaredState) {
+    cs::SmartContracts::StateItem item;
+    item.state = "current";
+    EXPECT_FALSE(cs::SmartContracts::is_stale(item));            // nothing declared: unknown, not stale
+    item.declared_hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(item.state.data()), item.state.size());
+    EXPECT_FALSE(cs::SmartContracts::is_stale(item));            // holds the declared state
+    item.state = "an earlier one";
+    EXPECT_TRUE(cs::SmartContracts::is_stale(item));             // another state
+    item.state.clear();
+    EXPECT_TRUE(cs::SmartContracts::is_stale(item));             // no state at all
+}
+
+// step 3 of the contract state sync plan: a peer's state is taken only for the declared call and hash
+TEST(SmartContract, StateReplyIsCheckedAgainstTheDeclaration) {
+    using Check = cs::SmartContracts::StateReplyCheck;
+    cs::SmartContracts::StateItem item;
+    const std::string good = "state after 9.2";
+    cs::SmartContractRef declared;
+    declared.sequence = 9;
+    declared.transaction = 2;
+    cs::SmartContractRef older = declared, newer = declared;
+    older.sequence = 8;
+    newer.sequence = 10;
+
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, good, item), Check::Undeclared);
+    item.declared_ref = declared;
+    item.declared_hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(good.data()), good.size());
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, good, item), Check::Accepted);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, "a forged state", item), Check::HashMismatch);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(declared, "", item), Check::HashMismatch);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(older, good, item), Check::Older);
+    EXPECT_EQ(cs::SmartContracts::verify_state_reply(newer, good, item), Check::Newer);
+}
+
+TEST(SmartContract, StateFetcherPacesAndBacksOff) {
+    cs::StateFetcher f;
+    std::vector<csdb::Address> contracts;
+    for (uint8_t i = 1; i <= 20; ++i) {
+        contracts.push_back(csdb::Address::from_public_key(cs::Bytes(32, i)));
+        f.markStale(contracts.back());
+    }
+    EXPECT_TRUE(f.isWanted(contracts[0]));
+    // at most 16 a round, the rest the next round
+    EXPECT_EQ(f.due(100).size(), cs::StateFetcher::kRequestsPerRound);
+    EXPECT_EQ(f.due(101).size(), 4u);
+    EXPECT_TRUE(f.due(102).empty());
+    // asked again after the backoff, which doubles with each attempt up to the cap
+    EXPECT_EQ(f.due(100 + cs::StateFetcher::kBaseBackoff).size(), cs::StateFetcher::kRequestsPerRound);
+    EXPECT_EQ(cs::StateFetcher::backoff(0), 50u);
+    EXPECT_EQ(cs::StateFetcher::backoff(1), 100u);
+    EXPECT_EQ(cs::StateFetcher::backoff(20), cs::StateFetcher::kMaxBackoff);
+    // a verified state ends the requests, and a reply for a contract not asked for is not an answer
+    f.done(contracts[0]);
+    EXPECT_FALSE(f.isWanted(contracts[0]));
+    EXPECT_FALSE(f.isWanted(csdb::Address::from_public_key(cs::Bytes(32, 99))));
+    EXPECT_EQ(f.size(), 19u);
+    f.reset();
+    EXPECT_EQ(f.size(), 0u);
 }
