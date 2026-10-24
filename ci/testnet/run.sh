@@ -681,7 +681,7 @@ while :; do
         rc=0
         (cd "$WORK/n$PRUNE_NODE" && exec "$BIN" --db-path db --config-file config.ini --export-snapshot "$WORK/snapshot2") \
             > "$WORK/export.log" 2>&1 || rc=$?
-        grep -a 'export-snapshot:' "$WORK/export.log" | sed 's/^/snapshot test: /'
+        grep -a 'export-snapshot:\|rocksdb: cannot' "$WORK/export.log" | sed 's/^/snapshot test: /'
         [ "$rc" = 0 ] || { tail -20 "$WORK/export.log"; echo "FAIL: --export-snapshot exited $rc"; exit 1; }
         python3 - "$WORK/snapshot2" "$WORK/n$PRUNE_NODE/node.log" <<'PY' || exit 1
 import json, os, re, sys
