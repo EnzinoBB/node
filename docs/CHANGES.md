@@ -32,10 +32,21 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.11 — 2026-10-24
+
 | PR | Change |
 |---|---|
 | #82 | csnode: a node still syncing logs a missing round table of the network's current round as a warning (the block comes with the sync); an error only when it is not behind |
 | #83 | packaging, solver: `compatible_version=true` in the mainnet `config.ini` (the binary's default; the official file's `false` stops a syncing node for good at a block whose transaction its replayed balances reject); a warning when a contract state declared by a block is not available while replaying |
+| #84 | ci(snapshot): `digest_offline.sh` reads the start-up digest from the run's console output (on a node with long-lived logs, log rotation made it wait for its whole timeout and fail) |
+
+A mainnet node syncing with the packaged `config.ini` could stop for good at a valid block: replaying
+some contracts is not reproducible (official behaviour), and its balances then reject the block's
+transaction. The packaged config now uses the binary's default (#83), and the node warns when a
+replayed contract state is lost. #82 and #84 are logging and snapshot-tooling fixes. No consensus
+change.
 
 ## community.10 — 2026-10-23
 
