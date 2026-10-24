@@ -15,6 +15,8 @@ struct Keys {
 };
 
 Keys makeKeys(size_t n) {
+    // keys live in sodium's guarded memory: the library must be initialised first
+    EXPECT_TRUE(cscrypto::cryptoInit());
     Keys k;
     for (size_t i = 0; i < n; ++i) {
         cs::PublicKey p;
