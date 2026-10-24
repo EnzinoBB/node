@@ -72,6 +72,8 @@ struct Fixture {
     explicit Fixture(const char* name) : root(fs::temp_directory_path() / name) {
         fs::remove_all(root);
         fs::create_directories(root);
+        // keys live in sodium's guarded memory: the library must be initialised first
+        EXPECT_TRUE(cscrypto::cryptoInit());
         key = cscrypto::generateKeyPair(pub);
     }
     ~Fixture() {
