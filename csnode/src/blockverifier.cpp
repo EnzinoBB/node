@@ -27,6 +27,11 @@ bool BlockVerifier::verify(const csdb::Pool& block, cs::Sequence expectedSequenc
 }
 
 bool BlockVerifier::verifySignatures(const csdb::Pool& block, std::string& reason) {
+    // a block that does not parse reads as sequence 0: never take it for the genesis block
+    if (!block.is_valid()) {
+        reason = "does not parse";
+        return false;
+    }
     if (block.sequence() == 0) {
         return true;
     }
@@ -51,6 +56,10 @@ bool BlockVerifier::verifySignatures(const csdb::Pool& block, std::string& reaso
 }
 
 bool BlockVerifier::verifyConfirmations(const csdb::Pool& block, const cs::PublicKeys& previousConfidants, std::string& reason) {
+    if (!block.is_valid()) {
+        reason = "does not parse";
+        return false;
+    }
     if (block.sequence() < 2) {
         return true;
     }

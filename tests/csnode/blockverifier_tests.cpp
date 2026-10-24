@@ -115,7 +115,12 @@ TEST(BlockVerifier, AlteredOrMissingSignatureFails) {
     std::vector<cs::Signature> one{block.signatures().front()};
     p.set_signatures(one);
     ASSERT_TRUE(p.compose());
-    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(csdb::Pool::from_binary(p.to_binary()), reason));
+    const auto fewer = csdb::Pool::from_binary(p.to_binary());
+    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(fewer, reason));
+
+    // a block that does not parse is never taken for the genesis block
+    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(csdb::Pool{}, reason));
+    EXPECT_FALSE(cs::BlockVerifier::verify(csdb::Pool{}, 0, csdb::PoolHash{}, reason));
 }
 
 TEST(BlockVerifier, GenesisNeedsNoSignature) {
