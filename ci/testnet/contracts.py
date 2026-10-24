@@ -114,6 +114,44 @@ public class Ledger extends SmartContract {
 }
 """
 
+# a game that reads its own balance, as the mainnet dice contracts do: executed live it sees the
+# balance before its payout; a node re-executing it while it syncs sees the balance after the payout
+# of the same block, throws, keeps a stale state, and charges the fee of a later payout to the
+# previous player (docs/specs/2026-10-24-contract-state-sync-design.md, 4.2)
+DICE = """import com.credits.scapi.v3.SmartContract;
+
+import java.math.BigDecimal;
+
+public class Dice extends SmartContract {
+    private int plays;
+    private String lastPlayer;
+
+    public Dice() {
+        super();
+    }
+
+    public int play() {
+        BigDecimal balance = getBalance(contractAddress);
+        if (balance.compareTo(new BigDecimal("20")) < 0) {
+            throw new RuntimeException("insufficient balance " + balance);
+        }
+        sendTransaction(contractAddress, initiator, 10.0, new byte[0]);
+        plays += 1;
+        lastPlayer = initiator;
+        return plays;
+    }
+
+    public int plays() {
+        return plays;
+    }
+
+    @Override
+    public String payable(BigDecimal amount, byte[] userData) {
+        return "ok";
+    }
+}
+"""
+
 # no @UsingContract: the node refuses any call to a method that declares one (Violations::SubsequentCall,
 # checked by the API and by IterValidator), so the call is a plain invokeExternalContract
 CALLER = """import com.credits.scapi.v0.SmartContract;
@@ -167,6 +205,8 @@ def write_sources(directory):
         f.write(CALLER_DECLARED % (placeholder, placeholder))
     with open(os.path.join(directory, "Ledger.java"), "w") as f:
         f.write(LEDGER)
+    with open(os.path.join(directory, "Dice.java"), "w") as f:
+        f.write(DICE)
 
 
 def invocation(method="", used=(), deploy=None):
@@ -268,6 +308,35 @@ def deploy(client, master, name, source):
             return address
         time.sleep(5)
     sys.exit(f"{name} not deployed after 300 s")
+
+
+def dice_plays(client_for, master, dice):
+    """25 CS into the contract, then three plays by two players in turn, each followed by a 10 CS
+    top-up from the master. Returns the number of failures."""
+    funder = Client(9090, 300)
+    players = [Account(hashlib.sha256(master.pk + b"dice player %d" % i).digest()) for i in (1, 2)]
+    master.next_inner_id = None
+    for p in players:
+        ok, message = send(funder, master, p.pk, 100)
+        print(f"Dice: fund player {base58.b58encode(p.pk).decode()[:8]}: {'ok' if ok else 'FAILED ' + str(message)}", flush=True)
+    ok, message = send(funder, master, dice, 25)
+    print(f"Dice: 25 CS to the contract: {'ok' if ok else 'FAILED ' + str(message)}", flush=True)
+    deadline = time.time() + 300
+    while time.time() < deadline and (balance(funder, dice) < 25 or any(balance(funder, p.pk) < 100 for p in players)):
+        time.sleep(5)
+    print(f"Dice: contract balance {balance(funder, dice)}", flush=True)
+    failures = 0
+    for n in range(3):
+        player = players[n % 2]
+        failures += 0 if call(client_for(1), player, dice, "play", f"Dice play {n + 1} by player {n % 2 + 1}", n + 1) else 1
+        master.next_inner_id = None
+        before = balance(funder, dice)
+        ok, message = send(funder, master, dice, 10)
+        deadline = time.time() + 120
+        while time.time() < deadline and balance(funder, dice) < before + 10:
+            time.sleep(3)
+        print(f"Dice: top-up after play {n + 1}: {'ok' if ok else 'FAILED ' + str(message)}, contract balance {balance(funder, dice)}", flush=True)
+    return failures
 
 
 def call(client, master, contract, method, label, expected=None):
@@ -426,6 +495,8 @@ def main():
     parser.add_argument("--stats-file", default="")
     # nodes left out of the reads (still compared at the end)
     parser.add_argument("--skip-read-nodes", default="")
+    parser.add_argument("--dice", action="store_true",
+                        help="deploy Dice and play it before the restart (a contract whose re-execution is not reproducible)")
     args = parser.parse_args()
     check_nodes = args.check_nodes or args.nodes
     skipped = {int(n) for n in args.skip_read_nodes.split() if n.strip()}
@@ -447,6 +518,7 @@ def main():
     # contract-to-contract calls fail on mainnet today; what matters is that every node fails them the
     # same way, also a node that restarted from a checkpoint taken after the callee was deployed
     callers = (("Caller", caller), ("CallerDeclared", declared))
+    dice = deploy(client_for(1), master, "Dice", DICE) if args.dice else None
 
     def call_callers(when, via):
         for name, contract in callers:
@@ -487,6 +559,9 @@ def main():
             print(f"  n{i}: {v!r} {msg!r}", flush=True)
         return len(bad)
 
+    if dice:
+        failures += dice_plays(client_for, master, dice)
+        failures += read_all(dice, "plays", 3, "Dice.plays")
     failures += read_all(counter, "get", calls, "Counter.get before restart")
     failures += read_all(ledger, "entries", calls, "Ledger.entries before restart")
 
@@ -551,7 +626,7 @@ def main():
             time.sleep(5)
         print(f"final file {'found' if os.path.exists(args.final_file) else 'MISSING'}", flush=True)
     time.sleep(60)  # let the last state reach every node
-    for name, contract in (("Counter", counter), ("Ledger", ledger)) + callers:
+    for name, contract in (("Counter", counter), ("Ledger", ledger)) + callers + ((("Dice", dice),) if dice else ()):
         states = {}
         for i in range(1, (args.check_nodes or args.nodes) + 1):
             try:
