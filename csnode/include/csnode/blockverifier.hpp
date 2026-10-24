@@ -17,6 +17,9 @@ public:
     // the block parses, has the expected sequence and, when expectedHash is not empty, the hash
     // computed from its bytes is expectedHash; for sequence >= 1 its signatures verify against its
     // own confidants with the real trusted mask (as tryFlushDeferredBlock does). Block 0 has none.
+    // An empty expectedHash proves only that the block is consistent with itself (anyone can sign a
+    // block with confidants of their own): the caller must anchor it, e.g. check that it links to
+    // a block it already trusts (previous_hash), as storeBlock does.
     static bool verify(const csdb::Pool& block, cs::Sequence expectedSequence, const csdb::PoolHash& expectedHash, std::string& reason);
 
     // the pool signatures alone: outside the hashed part, so the only thing a sender could alter

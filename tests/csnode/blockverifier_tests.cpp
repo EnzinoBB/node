@@ -92,31 +92,55 @@ TEST(BlockVerifier, WrongSequenceOrHashFails) {
 
 TEST(BlockVerifier, AlteredOrMissingSignatureFails) {
     const auto keys = makeKeys(3);
-    auto bytes = signedBlock(10, keys, 0b111).to_binary();
-    // the signatures are the tail of the stored bytes: flip a bit in the last one
-    bytes.back() ^= 1;
-    const auto altered = csdb::Pool::from_binary(std::move(bytes));
+    const auto block = signedBlock(10, keys, 0b111);
     std::string reason;
-    if (altered.is_valid()) {
-        EXPECT_FALSE(cs::BlockVerifier::verifySignatures(altered, reason));
-    }
 
-    // a signature by a key that is not the confidant's
+    // the pool signatures follow the hashed part and its length (a size_t): flip a bit of the first
+    auto bytes = block.to_binary();
+    bytes[block.hashingLength() + sizeof(size_t)] ^= 1;
+    const auto altered = csdb::Pool::from_binary(std::move(bytes));
+    ASSERT_TRUE(altered.is_valid());
+    EXPECT_EQ(altered.hash(), block.hash());   // outside the hash: only the signature check sees it
+    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(altered, reason));
+
+    // signatures by keys other than the confidants'
     auto wrongKeys = makeKeys(3);
-    wrongKeys.pub = keys.pub;   // the block lists keys' confidants, wrongKeys sign
+    wrongKeys.pub = keys.pub;
     EXPECT_FALSE(cs::BlockVerifier::verifySignatures(signedBlock(10, wrongKeys, 0b111), reason));
 
-    // fewer signatures than the real trusted mask announces
-    auto block = signedBlock(10, keys, 0b111);
-    csdb::Pool p(csdb::PoolHash{}, 10);
-    p.set_confidants(keys.pub);
-    p.add_number_trusted(3);
-    p.add_real_trusted(0b111);
-    std::vector<cs::Signature> one{block.signatures().front()};
-    p.set_signatures(one);
-    ASSERT_TRUE(p.compose());
-    const auto fewer = csdb::Pool::from_binary(p.to_binary());
-    EXPECT_FALSE(cs::BlockVerifier::verifySignatures(fewer, reason));
+    // more signatures than the mask has entries: realTrusted with a bit beyond numberTrusted
+    {
+        auto four = makeKeys(4);
+        csdb::Pool p(csdb::PoolHash{}, 10);
+        p.set_confidants(keys.pub);
+        p.add_number_trusted(3);
+        p.add_real_trusted(0b1111);
+        auto probe = p.clone();
+        ASSERT_TRUE(probe.compose());
+        const cs::Hash hash = toHash(probe.hash());
+        std::vector<cs::Signature> sigs;
+        for (size_t i = 0; i < 3; ++i) {
+            sigs.push_back(cscrypto::generateSignature(keys.priv[i], hash.data(), hash.size()));
+        }
+        sigs.push_back(cscrypto::generateSignature(four.priv[3], hash.data(), hash.size()));
+        p.set_signatures(sigs);
+        ASSERT_TRUE(p.compose());
+        const auto extra = csdb::Pool::from_binary(p.to_binary());
+        ASSERT_TRUE(extra.is_valid());
+        EXPECT_FALSE(cs::BlockVerifier::verifySignatures(extra, reason));
+    }
+
+    // no confidants, no signatures
+    {
+        csdb::Pool p(csdb::PoolHash{}, 10);
+        p.add_number_trusted(0);
+        p.add_real_trusted(0);
+        ASSERT_TRUE(p.compose());
+        const auto empty = csdb::Pool::from_binary(p.to_binary());
+        ASSERT_TRUE(empty.is_valid());
+        EXPECT_FALSE(cs::BlockVerifier::verifySignatures(empty, reason));
+        EXPECT_NE(reason.find("no confidants"), std::string::npos) << reason;
+    }
 
     // a block that does not parse is never taken for the genesis block
     EXPECT_FALSE(cs::BlockVerifier::verifySignatures(csdb::Pool{}, reason));
@@ -138,4 +162,8 @@ TEST(BlockVerifier, RoundConfirmationsAgainstThePreviousConfidants) {
     std::string reason;
     EXPECT_TRUE(cs::BlockVerifier::verifyConfirmations(block, previous.pub, reason)) << reason;
     EXPECT_FALSE(cs::BlockVerifier::verifyConfirmations(block, keys.pub, reason));
+    // a normal round's block without confirmations is refused, as storeBlock does
+    EXPECT_FALSE(cs::BlockVerifier::verifyConfirmations(signedBlock(20, keys, 0b111), previous.pub, reason));
+    // confirmations from a set of another size
+    EXPECT_FALSE(cs::BlockVerifier::verifyConfirmations(block, makeKeys(4).pub, reason));
 }
