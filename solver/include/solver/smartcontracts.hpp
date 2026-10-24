@@ -2,6 +2,7 @@
 
 #include <csdb/address.hpp>
 #include <csdb/pool.hpp>
+#include <solver/statefetcher.hpp>
 #include <csdb/transaction.hpp>
 #include <csdb/user_field.hpp>
 #include <lib/system/common.hpp>
@@ -402,6 +403,10 @@ public:
 
     // the state the item holds is not the one the chain declares (an unknown declaration is not stale)
     static bool is_stale(const StateItem& item);
+
+    // a state a peer sent for the call reply_ref, against what the chain declares for the contract
+    enum class StateReplyCheck { Accepted, Newer, Older, HashMismatch, Undeclared };
+    static StateReplyCheck verify_state_reply(const SmartContractRef& reply_ref, const std::string& state, const StateItem& item);
     size_t count_stale() const;
     // records the call and hash a new_state declares into the contract's item, if it has one
     void record_declared(const csdb::Address& abs_addr, const SmartContractRef& ref_start, const csdb::Transaction& new_state);
@@ -656,9 +661,13 @@ private:
     std::unordered_set<csdb::Address> blacklistedContracts_;
 
     std::unordered_set<csdb::Address> locked_contracts;
-    // contracts whose state this node asked the confidants for, with the round of the last request;
-    // a StateReply for any other contract is not an answer to this node
-    std::unordered_map<csdb::Address, cs::RoundNumber> pending_state_requests;
+    // contracts whose state is not the one the chain declares: asked for at the head, paced; a
+    // StateReply for any other contract is not an answer to this node
+    StateFetcher state_fetcher_;
+    // the previous stored block was read (sync, start-up), not live: the next live one starts a fetch
+    bool was_reading_db_ = true;
+    cs::RoundNumber last_state_summary_ = 0;
+    void on_live_block(cs::RoundNumber round);
 
     //uint64_t testValue = 0;
 

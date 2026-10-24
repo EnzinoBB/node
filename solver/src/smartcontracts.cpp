@@ -1428,12 +1428,12 @@ void SmartContracts::on_store_block(const csdb::Pool& block) {
 
     cs::Lock lock(public_access_lock);
     bool should_stop = false;
-    if (cur_round > last_block && cur_round - last_block > 1) {
-        on_next_block_impl(block, true, &should_stop);
+    const bool reading_db = cur_round > last_block && cur_round - last_block > 1;
+    on_next_block_impl(block, reading_db, &should_stop);
+    if (!reading_db) {
+        on_live_block(cur_round);
     }
-    else {
-        on_next_block_impl(block, false, &should_stop);
-    }
+    was_reading_db_ = reading_db;
 }
 
 /*public*/
@@ -3397,8 +3397,58 @@ bool SmartContracts::wait_until_executor(unsigned int test_freq, unsigned int ma
 }
 
 void SmartContracts::net_request_contract_state(const csdb::Address& abs_addr) {
-    pending_state_requests[abs_addr] = cs::Conveyer::instance().currentRoundNumber();
-    pnode->sendStateRequest(abs_addr, cs::Conveyer::instance().confidants());
+    // asked at the next live block, paced with the other stale contracts
+    state_fetcher_.markStale(abs_addr);
+}
+
+/*static*/
+SmartContracts::StateReplyCheck SmartContracts::verify_state_reply(const SmartContractRef& reply_ref, const std::string& state, const StateItem& item) {
+    if (item.declared_hash == cs::Zero::hash || !item.declared_ref.is_valid()) {
+        return StateReplyCheck::Undeclared;
+    }
+    if (item.declared_ref < reply_ref) {
+        return StateReplyCheck::Newer;   // the peer executed a call this node has not reached yet
+    }
+    if (reply_ref < item.declared_ref) {
+        return StateReplyCheck::Older;   // the peer's state is stale
+    }
+    if (state.empty() || cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(state.data()), state.size()) != item.declared_hash) {
+        return StateReplyCheck::HashMismatch;
+    }
+    return StateReplyCheck::Accepted;
+}
+
+void SmartContracts::on_live_block(cs::RoundNumber round) {
+    if (was_reading_db_) {
+        // the node has just become live: every contract whose state is not the declared one is asked for
+        for (const auto& [addr, item] : known_contracts) {
+            if (is_stale(item)) {
+                state_fetcher_.markStale(addr);
+            }
+        }
+        cslog() << kLogPrefix << "contract states: " << known_contracts.size() << " known, " << count_stale() << " stale, "
+                << state_fetcher_.size() << " to fetch from the confidants";
+        last_state_summary_ = round;
+    }
+    if (state_fetcher_.size() > 0) {
+        const auto confidants = cs::Conveyer::instance().confidants();
+        if (!confidants.empty()) {
+            for (const auto& addr : state_fetcher_.due(round)) {
+                // updated meanwhile, by a live new_state with its state
+                const auto it = known_contracts.find(addr);
+                if (it != known_contracts.end() && !is_stale(it->second) && it->second.declared_hash != cs::Zero::hash) {
+                    state_fetcher_.done(addr);
+                    continue;
+                }
+                pnode->sendStateRequest(addr, confidants);
+            }
+        }
+        if (round >= last_state_summary_ + 1000) {
+            cslog() << kLogPrefix << "contract states: " << known_contracts.size() << " known, " << count_stale() << " stale, "
+                    << state_fetcher_.size() << " to fetch from the confidants";
+            last_state_summary_ = round;
+        }
+    }
 }
 
 /*public*/
@@ -3412,17 +3462,12 @@ void SmartContracts::net_update_contract_state(const csdb::Address& contract_abs
     stream >> ref.sequence >> ref.transaction >> state;
 
     if (stream.isValid() && !stream.isAvailable(1)) {
-        // several confidants answer one request, so the entry stays until it expires
-        constexpr cs::RoundNumber kStateRequestRounds = 1000;
-        const cs::RoundNumber round = cs::Conveyer::instance().currentRoundNumber();
-        const auto pending = pending_state_requests.find(contract_abs_addr);
-        if (pending == pending_state_requests.end() || pending->second + kStateRequestRounds < round) {
-            if (pending != pending_state_requests.end()) {
-                pending_state_requests.erase(pending);
-            }
-            cswarning() << kLogPrefix << "ignore " << cs::SmartContracts::to_base58(contract_abs_addr) << " state, it was not requested";
+        // several confidants answer one request: the contract stays wanted until a state verifies
+        if (!state_fetcher_.isWanted(contract_abs_addr)) {
+            csdebug() << kLogPrefix << "ignore " << cs::SmartContracts::to_base58(contract_abs_addr) << " state, it was not requested";
             return;
         }
+        const cs::RoundNumber round = cs::Conveyer::instance().currentRoundNumber();
         // a state cannot refer to a block later than the current round, and caching one would make every
         // real update look outdated
         if (ref.sequence > round) {
@@ -3430,60 +3475,78 @@ void SmartContracts::net_update_contract_state(const csdb::Address& contract_abs
             return;
         }
 
+        bool declared = false;
         if (in_known_contracts(contract_abs_addr)) {
             auto& item = known_contracts[contract_abs_addr];
-            if (item.ref_execute > ref) {
-                cswarning() << kLogPrefix << "ignore outdated " << cs::SmartContracts::to_base58(contract_abs_addr) << " state";
-                return;
+            // the chain says which call's state the contract holds and its hash: nothing else is taken
+            switch (verify_state_reply(ref, state, item)) {
+                case StateReplyCheck::Accepted:
+                    declared = true;
+                    break;
+                case StateReplyCheck::Newer:
+                    csdebug() << kLogPrefix << "ignore " << to_base58(contract_abs_addr) << " state after " << ref << ", newer than the declared "
+                              << item.declared_ref << ": asked again later";
+                    return;
+                case StateReplyCheck::Older:
+                    csdebug() << kLogPrefix << "ignore " << to_base58(contract_abs_addr) << " state after " << ref << ", older than the declared "
+                              << item.declared_ref;
+                    return;
+                case StateReplyCheck::HashMismatch:
+                    cswarning() << kLogPrefix << to_base58(contract_abs_addr) << " state received for " << ref << " does not have the declared hash";
+                    return;
+                case StateReplyCheck::Undeclared:
+                    break;
             }
-            // test state hash before dbcache_update
-            csdebug() << kLogPrefix << "test " << cs::SmartContracts::to_base58(contract_abs_addr) << " state received";
-            bool state_found = false;
-            bool state_test_passed = false;
-            SmartContractRef ref_state;
-            for (cs::Sequence i = ref.sequence; i < ref.sequence + Consensus::MaxRoundsCancelContract; ++i) {
-                csdb::Pool b = bc.loadBlock(i);
-                if (b.is_valid() && b.transactions_count() > 0) {
+            if (!declared) {
+                if (item.ref_execute > ref) {
+                    cswarning() << kLogPrefix << "ignore outdated " << cs::SmartContracts::to_base58(contract_abs_addr) << " state";
+                    return;
+                }
+                // no declaration (a checkpoint of an earlier build): the new_state of that call must be in a stored block
+                bool state_found = false;
+                bool state_test_passed = false;
+                for (cs::Sequence i = ref.sequence; i < ref.sequence + Consensus::MaxRoundsCancelContract && !state_found; ++i) {
+                    csdb::Pool b = bc.loadBlock(i);
+                    if (!b.is_valid() || b.transactions_count() == 0) {
+                        continue;
+                    }
                     for (const auto& t : b.transactions()) {
-                        if (is_new_state(t)) {
-                            csdb::UserField fld = t.user_field(trx_uf::new_state::RefStart);
-                            if (fld.is_valid()) {
-                                if (SmartContractRef(fld) == ref) {
-                                    // corresponding new state found, test it
-                                    state_found = true;
-                                    ref_state.sequence = t.id().pool_seq();
-                                    ref_state.transaction = t.id().index();
-                                    fld = t.user_field(trx_uf::new_state::Hash);
-                                    if (fld.is_valid()) {
-                                        std::string hash_bytes = fld.value<std::string>();
-                                        cs::Hash hash;
-                                        if (hash.size() == hash_bytes.size()) {
-                                            std::copy(hash_bytes.cbegin(), hash_bytes.cend(), hash.begin());
-                                            if (state.empty()) {
-                                                state_test_passed = (hash == cs::Zero::hash);
-                                            }
-                                            else {
-                                                state_test_passed = (hash == cscrypto::calculateHash((cs::Byte*)state.data(), state.size()));
-                                            }
-                                        }
-                                    }
-                                    break; // transactions cycle
-                                }
+                        if (!is_new_state(t)) {
+                            continue;
+                        }
+                        csdb::UserField fld = t.user_field(trx_uf::new_state::RefStart);
+                        if (!fld.is_valid() || !(SmartContractRef(fld) == ref)) {
+                            continue;
+                        }
+                        state_found = true;
+                        fld = t.user_field(trx_uf::new_state::Hash);
+                        if (fld.is_valid()) {
+                            std::string hash_bytes = fld.value<std::string>();
+                            cs::Hash hash;
+                            if (hash.size() == hash_bytes.size()) {
+                                std::copy(hash_bytes.cbegin(), hash_bytes.cend(), hash.begin());
+                                state_test_passed = state.empty() ? (hash == cs::Zero::hash)
+                                                                  : (hash == cscrypto::calculateHash((cs::Byte*)state.data(), state.size()));
                             }
                         }
+                        break;
                     }
                 }
-                if (state_found) {
-                    break;
+                // a state whose call this node cannot find on its chain is not taken unverified
+                if (!state_found || !state_test_passed) {
+                    cswarning() << kLogPrefix << to_base58(contract_abs_addr) << " state received for " << ref
+                                << (state_found ? " does not match the hash on the chain" : " cannot be verified: its block is not stored");
+                    return;
                 }
             }
-            if (state_found && !state_test_passed) {
-                cswarning() << kLogPrefix << to_base58(contract_abs_addr) << " state received does not match hash value in " << ref_state;
-                return;
-            }
         }
-        
-        if (dbcache_update(contract_abs_addr, ref, state, false)) {
+        else {
+            cswarning() << kLogPrefix << "ignore a state of " << to_base58(contract_abs_addr) << ", a contract this node does not know";
+            return;
+        }
+
+        // forced: the cache may hold a wrong state with the same call from a re-execution
+        if (dbcache_update(contract_abs_addr, ref, state, true)) {
             if (in_known_contracts(contract_abs_addr)) {
                 auto& item = known_contracts[contract_abs_addr];
                 cscrypto::Bytes st1(item.state.data(), item.state.data() + item.state.size());
@@ -3494,8 +3557,9 @@ void SmartContracts::net_update_contract_state(const csdb::Address& contract_abs
                 csdebug() << kLogPrefix << kLogPrefix << __func__ << " updated value value: " << cs::Utils::byteStreamToHex(st1);
                 item.ref_cache = ref;
                 item.ref_execute = ref;
-                csdebug() << kLogPrefix << to_base58(contract_abs_addr) << " state has updated from net package with " << ref << " state value";
+                cslog() << kLogPrefix << "state of " << to_base58(contract_abs_addr) << " after " << ref << " received from peer, verified";
             }
+            state_fetcher_.done(contract_abs_addr);
             return;
         }
         else {
@@ -3630,7 +3694,8 @@ void SmartContracts::clear() {
     exe_queue.clear();
     blacklistedContracts_.clear();
     locked_contracts.clear();
-    pending_state_requests.clear();
+    state_fetcher_.reset();
+    was_reading_db_ = true;
 }
 
 
