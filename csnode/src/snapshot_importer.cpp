@@ -22,6 +22,7 @@ namespace fs = std::filesystem;
 
 constexpr uint64_t kMaxRawFile = 4ull << 30;
 constexpr size_t kBatch = 1000;
+constexpr uint32_t kMaxContractField = 64u << 20;
 
 std::string hexOf(const uint8_t* data, size_t size) {
     static const char* digits = "0123456789abcdef";
@@ -183,7 +184,9 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
         std::vector<csdb::Database::PendingWrite> batch;
         cs::Sequence expected = m.firstBlock;
         csdb::PoolHash previous;
+        cs::PublicKeys previousConfidants;
         std::string reason;
+        const auto* blocksFile = m.file("blocks.bin.lz4");
         const bool read = forEachSnapshotBlock(srcDir / "blocks.bin.lz4", [&](cs::Sequence seq, cs::Bytes&& bytes) {
             if (stopped(stop)) {
                 reason = "stopped";
@@ -204,6 +207,13 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
                 reason = "block " + std::to_string(seq) + " does not follow block " + std::to_string(seq - 1);
                 return false;
             }
+            // and the confidants of each round confirmed the next round's, as the node checks when
+            // it stores a block: a forged range needs the keys of every round's confidants
+            if (seq > m.firstBlock && !BlockVerifier::verifyConfirmations(pool, previousConfidants, why)) {
+                reason = "block " + std::to_string(seq) + " " + why;
+                return false;
+            }
+            previousConfidants = pool.confidants();
             const auto hash = pool.hash();
             if (seq == S && hexOf(hash.to_binary().data(), hash.to_binary().size()) != m.headHash) {
                 reason = "block " + std::to_string(S) + " is not the manifest's head";
@@ -224,7 +234,7 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
             previous = hash;
             ++expected;
             return true;
-        });
+        }, blocksFile ? blocksFile->rawSize : 0);
         if (!read || expected != S + 1) {
             hashes.close();
             return failWith(reason.empty() ? "blocks.bin.lz4 is truncated or malformed" : reason, "blocks.bin.lz4");
@@ -238,14 +248,27 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
         if (const auto* f = m.file("contracts.bin.lz4")) {
             std::vector<uint8_t> pending;
             bool good = true;
+            uint64_t total = 0;
             const bool ok = snapshot_lz4::decompressFile(srcDir / f->name, [&](const uint8_t* data, size_t size) {
+                total += size;
+                if (total > f->rawSize) {
+                    return false;
+                }
                 pending.insert(pending.end(), data, data + size);
                 size_t pos = 0;
                 for (;;) {
                     if (pending.size() - pos < 4) break;
                     const uint32_t klen = getU32(pending.data() + pos);
+                    if (klen > kMaxContractField) {
+                        good = false;
+                        return false;
+                    }
                     if (pending.size() - pos < 8ull + klen) break;
                     const uint32_t vlen = getU32(pending.data() + pos + 4 + klen);
+                    if (vlen > kMaxContractField) {
+                        good = false;
+                        return false;
+                    }
                     if (pending.size() - pos < 8ull + klen + vlen) break;
                     const cs::Bytes key(pending.begin() + static_cast<ptrdiff_t>(pos + 4), pending.begin() + static_cast<ptrdiff_t>(pos + 4 + klen));
                     const cs::Bytes value(pending.begin() + static_cast<ptrdiff_t>(pos + 8 + klen),
@@ -259,7 +282,7 @@ SnapshotImportResult importSnapshot(const fs::path& srcDir, const SnapshotManife
                 pending.erase(pending.begin(), pending.begin() + static_cast<ptrdiff_t>(pos));
                 return true;
             });
-            if (!ok || !good || !pending.empty()) {
+            if (!ok || !good || !pending.empty() || total != f->rawSize) {
                 hashes.close();
                 return failWith("contracts.bin.lz4 does not restore", f->name);
             }

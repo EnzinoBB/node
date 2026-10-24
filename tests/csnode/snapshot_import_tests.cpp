@@ -11,6 +11,7 @@
 #include <csdb/pool.hpp>
 #include <csdb/storage_backend.hpp>
 #include <csnode/blockhashes.hpp>
+#include <csnode/odatastream.hpp>
 #include <csnode/snapshot_builder.hpp>
 #include <csnode/snapshot_importer.hpp>
 #include <csnode/snapshot_manifest.hpp>
@@ -48,6 +49,21 @@ SignedChain makeSignedChain(cs::Sequence count) {
             p.set_confidants(pub);
             p.add_number_trusted(3);
             p.add_real_trusted(0b111);
+            if (s > 1) {
+                // the previous round's confidants (the same keys here) confirm this round's
+                cs::Bytes trustedToHash;
+                cs::ODataStream stream(trustedToHash);
+                stream << s;
+                stream << pub;
+                const cs::Hash h = cscrypto::calculateHash(trustedToHash.data(), trustedToHash.size());
+                std::vector<cs::Signature> confirmations;
+                for (const auto& k : priv) {
+                    confirmations.push_back(cscrypto::generateSignature(k, h.data(), h.size()));
+                }
+                p.add_number_confirmations(3);
+                p.add_confirmation_mask(0b111);
+                p.add_round_confirmations(confirmations);
+            }
             auto probe = p.clone();
             EXPECT_TRUE(probe.compose());
             const auto hash = toHash(probe.hash());
@@ -277,3 +293,23 @@ TEST(SnapshotImport, ExistingDatabaseRefused) {
     cs::Bytes bytes;
     EXPECT_TRUE(db && db->get(150u, &bytes));
 }
+
+TEST(SnapshotImport, BlockWithoutTheRoundsConfirmationsRejected) {
+    Fixture fx("snapshot_import_confirmations");
+    // block 100 rebuilt without confirmations: still signed by its confidants, still in the chain
+    // for the builder, but no longer confirmed by the round before it
+    const auto original = csdb::Pool::from_binary(cs::Bytes(fx.chain.blocks[100]));
+    csdb::Pool p(original.previous_hash(), 100);
+    p.add_user_field(1, original.user_field(1).value<std::string>());
+    p.set_confidants(original.confidants());
+    p.add_number_trusted(3);
+    p.add_real_trusted(0b111);
+    ASSERT_TRUE(p.compose());
+    fx.chain.blocks[100] = p.to_binary();   // the chain is broken at 101 now: the import must stop at 100 or 101
+    const auto built = fx.build();
+    if (built.ok) {
+        EXPECT_FALSE(fx.import(built).ok);
+        fx.expectNothingLeft();
+    }
+}
+

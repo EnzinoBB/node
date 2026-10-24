@@ -48,9 +48,11 @@ struct SnapshotBuildResult {
 SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::filesystem::path& outRoot,
                                   const cs::PrivateKey& key);
 
-// the blocks.bin record stream: "u32 seq, u32 len, bytes" (little-endian)
+// the blocks.bin record stream: "u32 seq, u32 len, bytes" (little-endian); false beyond maxRawBytes
+// decompressed bytes (a manifest's raw_size), for a record above 64 MB, or a truncated stream
 bool forEachSnapshotBlock(const std::filesystem::path& blocksFile,
-                          const std::function<bool(cs::Sequence, cs::Bytes&&)>& visit);
+                          const std::function<bool(cs::Sequence, cs::Bytes&&)>& visit,
+                          uint64_t maxRawBytes = UINT64_MAX);
 
 }  // namespace cs
 
