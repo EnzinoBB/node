@@ -142,3 +142,41 @@ TEST(SmartContract, EmittedTransactionBelongsToTheNewStateBeforeIt) {
     EXPECT_FALSE(cs::SmartContracts::emitting_new_state(block, 3, B, identity).has_value());
     EXPECT_TRUE(cs::SmartContracts::emitting_new_state(block, 100, A, identity).has_value());
 }
+
+// step 2 of the contract state sync plan: the declared call and hash survive a checkpoint, an item of
+// an earlier build loads without them, and staleness compares the state with the declared hash
+TEST(SmartContract, DeclaredStateSurvivesCheckpointAndOldItemsLoad) {
+    cs::SmartContracts::StateItem item;
+    item.ref_execute.sequence = 7;
+    item.ref_execute.transaction = 1;
+    item.state = "state after 7.1";
+    item.declared_ref = item.ref_execute;
+    item.declared_hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(item.state.data()), item.state.size());
+
+    auto bytes = item.to_bytes();
+    const auto back = cs::SmartContracts::StateItem::from_bytes(bytes);
+    EXPECT_EQ(back.declared_ref.sequence, 7u);
+    EXPECT_EQ(back.declared_ref.transaction, 1u);
+    EXPECT_EQ(back.declared_hash, item.declared_hash);
+    EXPECT_EQ(back.state, item.state);
+
+    // an earlier build wrote no declaration: the same bytes without the tail
+    auto old = item.to_bytes();
+    old.resize(old.size() - (sizeof(item.declared_ref.sequence) + sizeof(item.declared_ref.transaction) + item.declared_hash.size()));
+    const auto earlier = cs::SmartContracts::StateItem::from_bytes(old);
+    EXPECT_EQ(earlier.state, item.state);
+    EXPECT_FALSE(earlier.declared_ref.is_valid());
+    EXPECT_EQ(earlier.declared_hash, cs::Hash{});
+}
+
+TEST(SmartContract, StaleMeansNotTheDeclaredState) {
+    cs::SmartContracts::StateItem item;
+    item.state = "current";
+    EXPECT_FALSE(cs::SmartContracts::is_stale(item));            // nothing declared: unknown, not stale
+    item.declared_hash = cscrypto::calculateHash(reinterpret_cast<const cs::Byte*>(item.state.data()), item.state.size());
+    EXPECT_FALSE(cs::SmartContracts::is_stale(item));            // holds the declared state
+    item.state = "an earlier one";
+    EXPECT_TRUE(cs::SmartContracts::is_stale(item));             // another state
+    item.state.clear();
+    EXPECT_TRUE(cs::SmartContracts::is_stale(item));             // no state at all
+}
