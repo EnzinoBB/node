@@ -32,7 +32,12 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #87 | csnode: every checkpoint saves the digest of the state it holds (wallets, their count, consensus settings) as `state_digest.bin` and logs it; a quick start recomputes it and moves aside a checkpoint whose caches do not match |
+| #88 | client: `[snapshot]` section of `config.ini` for snapshots served by community nodes (no behaviour yet) |
+| #90 | csnode: `BlockVerifier` for blocks that come from outside the consensus (hash, signatures against the block's confidants, round confirmations), for the snapshot import and backward sync |
+| #89 | csnode, client: snapshot format 2 built by the node from its own checkpoint and blocks on any backend (lz4, per-chunk SHA-256, manifest signed with the node key); `--export-snapshot <dir>` |
 
 ## community.11 — 2026-10-24
 
