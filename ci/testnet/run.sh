@@ -474,7 +474,9 @@ seq_of() {
 # STATE DIGEST is the digest of its head, and stop it again
 digest_offline() {
     local i=$1 dir="$WORK/n$1" before
-    kill -TERM "${PIDS[$i]}"; wait "${PIDS[$i]}" 2>/dev/null || true
+    # this runs in a subshell ($(...)): wait cannot wait for the node, which is not its child
+    kill -TERM "${PIDS[$i]}"
+    for _ in $(seq 1 180); do kill -0 "${PIDS[$i]}" 2>/dev/null || break; sleep 1; done
     pkill -f "cs.testnet.node=n$i " 2>/dev/null || true
     # an empty hosts file stops the node ("No hosts specified"): one host nobody listens on
     echo "127.0.0.1:9 11111111111111111111111111111111" > "$dir/hosts-none.txt"
@@ -483,18 +485,22 @@ digest_offline() {
         /^hosts_filename=/ { print "hosts_filename=hosts-none.txt"; next }
         section == "[host_input]" && /^port=/ { print "port=" port; next }
         { print }' "$dir/config.ini" > "$dir/config-offline.ini"
-    before=$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)
+    # the start-up line only ("... wallets <n>" at the end), not the checkpoint lines
+    local startup='STATE DIGEST #[0-9]+ [0-9A-Fa-f]+ wallets [0-9]+ *$'
+    before=$(grep -acE "$startup" "$dir/node.log" || true)
     (cd "$dir" && exec "$BIN" --db-path db --config-file config-offline.ini </dev/null >> stdout.log 2>&1) &
     local pid=$! deadline=$(( $(date +%s) + 300 ))
-    while [ "$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)" -le "${before:-0}" ] && [ "$(date +%s)" -lt "$deadline" ]; do
+    while [ "$(grep -acE "$startup" "$dir/node.log" || true)" -le "${before:-0}" ] && [ "$(date +%s)" -lt "$deadline" ]; do
         sleep 2
     done
     kill -TERM "$pid"; wait "$pid" 2>/dev/null || true
-    if [ "$(grep -ac 'STATE DIGEST #' "$dir/node.log" || true)" -le "${before:-0}" ]; then
+    for _ in $(seq 1 180); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+    pkill -f "[c]ontract-executor.*n$i/" 2>/dev/null || true
+    if [ "$(grep -acE "$startup" "$dir/node.log" || true)" -le "${before:-0}" ]; then
         echo "FAIL: n$i logged no start-up digest without peers" >&2
         return 1
     fi
-    grep -a 'STATE DIGEST #' "$dir/node.log" | tail -1 | sed 's/^.*STATE DIGEST/STATE DIGEST/'
+    grep -aE "$startup" "$dir/node.log" | tail -1 | sed 's/^.*STATE DIGEST/STATE DIGEST/'
 }
 
 # the lowest sequence among the nodes of the restart test
