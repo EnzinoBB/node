@@ -36,6 +36,7 @@ const std::string BLOCK_NAME_HOST_OUTPUT = "host_output";
 const std::string BLOCK_NAME_HOST_ADDRESS = "host_address";
 const std::string BLOCK_NAME_POOL_SYNC = "pool_sync";
 const std::string BLOCK_NAME_STORAGE = "storage";
+const std::string BLOCK_NAME_SNAPSHOT = "snapshot";
 const std::string BLOCK_NAME_API = "api";
 const std::string BLOCK_NAME_CONVEYER = "conveyer";
 const std::string BLOCK_NAME_EVENT_REPORTER = "event_report";
@@ -882,6 +883,7 @@ Config Config::readFromFile(const std::string& fileName) {
         result.setLoggerSettings(config);
         result.readPoolSynchronizerData(config);
         result.readStorageData(config);
+        result.snapshotData_ = parseSnapshotData(config);
         result.readApiData(config);
         result.readConveyerData(config);
         result.readEventsReportData(config);
@@ -997,6 +999,91 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
             storageData_.checkpointKeep = 2;
         }
     }
+}
+
+namespace {
+// a [snapshot] number: the default and a warning when it is not a number or out of [min, max]
+template <typename T>
+void readSnapshotNumber(const boost::property_tree::ptree& data, const std::string& key, T& value, T min, T max) {
+    if (!data.count(key)) {
+        return;
+    }
+    const auto text = data.get<std::string>(key);
+    try {
+        size_t used = 0;
+        const unsigned long long parsed = std::stoull(text, &used);
+        if (used == text.size() && text.find('-') == std::string::npos && parsed >= min && parsed <= max) {
+            value = static_cast<T>(parsed);
+            return;
+        }
+    }
+    catch (const std::exception&) {
+    }
+    cswarning() << "config: [snapshot] " << key << "=" << text << " is not in [" << min << ", " << max << "], using " << value;
+}
+
+void readSnapshotBool(const boost::property_tree::ptree& data, const std::string& key, bool& value) {
+    if (!data.count(key)) {
+        return;
+    }
+    const auto text = data.get<std::string>(key);
+    if (text == "true" || text == "1" || text == "on") {
+        value = true;
+    }
+    else if (text == "false" || text == "0" || text == "off") {
+        value = false;
+    }
+    else {
+        cswarning() << "config: [snapshot] " << key << "=" << text << " is not true or false, using " << (value ? "true" : "false");
+    }
+}
+
+void readSnapshotChoice(const boost::property_tree::ptree& data, const std::string& key, std::string& value,
+                        std::initializer_list<const char*> choices) {
+    if (!data.count(key)) {
+        return;
+    }
+    const auto text = data.get<std::string>(key);
+    for (const char* choice : choices) {
+        if (text == choice) {
+            value = text;
+            return;
+        }
+    }
+    cswarning() << "config: [snapshot] " << key << "=" << text << " is not a known value, using " << value;
+}
+}  // namespace
+
+SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config) {
+    SnapshotData result;
+    if (!config.count(BLOCK_NAME_SNAPSHOT)) {
+        return result;
+    }
+    const boost::property_tree::ptree& data = config.get_child(BLOCK_NAME_SNAPSHOT);
+    readSnapshotNumber<uint16_t>(data, "serve_port", result.servePort, 0, 65535);
+    if (data.count("serve_bind")) {
+        result.serveBind = data.get<std::string>("serve_bind");
+    }
+    readSnapshotNumber<size_t>(data, "serve_max_connections", result.serveMaxConnections, 1, 1024);
+    readSnapshotNumber<size_t>(data, "serve_rate_kbps", result.serveRateKbps, 0, 10'000'000);
+    readSnapshotNumber<size_t>(data, "snapshot_blocks", result.snapshotBlocks, 1000, 10'000'000);
+    readSnapshotChoice(data, "fetch", result.fetch, {"auto", "off"});
+    // empty values are meaningful here: no extra sources, no sources file, no GitHub source
+    if (data.count("sources")) {
+        result.sources = data.get<std::string>("sources");
+    }
+    if (data.count("sources_file")) {
+        result.sourcesFile = data.get<std::string>("sources_file");
+    }
+    readSnapshotBool(data, "probe_known_hosts", result.probeKnownHosts);
+    if (data.count("github_manifest")) {
+        result.githubManifest = data.get<std::string>("github_manifest");
+    }
+    readSnapshotNumber<size_t>(data, "min_sources", result.minSources, 1, 20);
+    readSnapshotChoice(data, "fallback", result.fallback, {"github", "none"});
+    readSnapshotNumber<size_t>(data, "fetch_connections", result.fetchConnections, 1, 16);
+    readSnapshotNumber<size_t>(data, "fetch_rate_kbps", result.fetchRateKbps, 0, 10'000'000);
+    return result;
 }
 
 void Config::readApiData(const boost::property_tree::ptree& config) {
@@ -1173,6 +1260,27 @@ bool operator!=(const ApiData& lhs, const ApiData& rhs) {
     return !(lhs == rhs);
 }
 
+bool operator==(const SnapshotData& lhs, const SnapshotData& rhs) {
+    return lhs.servePort == rhs.servePort &&
+           lhs.serveBind == rhs.serveBind &&
+           lhs.serveMaxConnections == rhs.serveMaxConnections &&
+           lhs.serveRateKbps == rhs.serveRateKbps &&
+           lhs.snapshotBlocks == rhs.snapshotBlocks &&
+           lhs.fetch == rhs.fetch &&
+           lhs.sources == rhs.sources &&
+           lhs.sourcesFile == rhs.sourcesFile &&
+           lhs.probeKnownHosts == rhs.probeKnownHosts &&
+           lhs.githubManifest == rhs.githubManifest &&
+           lhs.minSources == rhs.minSources &&
+           lhs.fallback == rhs.fallback &&
+           lhs.fetchConnections == rhs.fetchConnections &&
+           lhs.fetchRateKbps == rhs.fetchRateKbps;
+}
+
+bool operator!=(const SnapshotData& lhs, const SnapshotData& rhs) {
+    return !(lhs == rhs);
+}
+
 bool operator==(const ConveyerData& lhs, const ConveyerData& rhs) {
     return lhs.maxPacketLifeTime == rhs.maxPacketLifeTime;
 }
@@ -1233,6 +1341,7 @@ bool operator==(const Config& lhs, const Config& rhs) {
         lhs.privateKey_ == rhs.privateKey_ &&
         lhs.poolSyncData_ == rhs.poolSyncData_ &&
         lhs.apiData_ == rhs.apiData_ &&
+        lhs.snapshotData_ == rhs.snapshotData_ &&
         lhs.alwaysExecuteContracts_ == rhs.alwaysExecuteContracts_ &&
         lhs.compatibleVersion_ == rhs.compatibleVersion_ &&
         lhs.recreateIndex_ == rhs.recreateIndex_ &&
