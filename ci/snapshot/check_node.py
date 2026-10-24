@@ -59,16 +59,18 @@ def monitor(path):
 
 
 def wait_head(args):
-    node = client(args.api)
+    node = None
     deadline = time.time() + args.timeout_min * 60
     near_since = None
     while time.time() < deadline:
         try:
+            # the node opens its API only once its database is loaded: connect (again) until it does
+            node = node or client(args.api)
             s = node.SyncStateGet()
             gap = s.currRound - s.lastBlock
         except Exception as e:  # the node may still be starting
             print(f"sync state unavailable: {e}", flush=True)
-            node = client(args.api)
+            node = None
             gap = None
         if gap is not None and s.lastBlock > 0 and gap <= 3:
             near_since = near_since or time.time()
