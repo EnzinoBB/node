@@ -336,6 +336,18 @@ def dice_plays(client_for, master, dice):
         while time.time() < deadline and balance(funder, dice) < before + 10:
             time.sleep(3)
         print(f"Dice: top-up after play {n + 1}: {'ok' if ok else 'FAILED ' + str(message)}, contract balance {balance(funder, dice)}", flush=True)
+    # two plays at once: both executions in one block, so that a node charges both payouts the way the
+    # live nodes do (to the latest successful execution of the block, not to the one before each)
+    master.next_inner_id = None
+    ok, message = send(funder, master, dice, 20)
+    deadline = time.time() + 120
+    while time.time() < deadline and balance(funder, dice) < 45:
+        time.sleep(3)
+    print(f"Dice: 20 CS more for two plays at once: {'ok' if ok else 'FAILED ' + str(message)}, contract balance {balance(funder, dice)}", flush=True)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda i: call(client_for(1 + i), players[i], dice, "play", f"Dice play at once by player {i + 1}"),
+                                range(2)))
+    print(f"Dice: two plays at once sent: {results}", flush=True)
     return failures
 
 
@@ -561,7 +573,7 @@ def main():
 
     if dice:
         failures += dice_plays(client_for, master, dice)
-        failures += read_all(dice, "plays", 3, "Dice.plays")
+        failures += read_all(dice, "plays", 5, "Dice.plays")
     failures += read_all(counter, "get", calls, "Counter.get before restart")
     failures += read_all(ledger, "entries", calls, "Ledger.entries before restart")
 
