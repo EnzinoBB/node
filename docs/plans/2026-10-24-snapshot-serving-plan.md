@@ -356,17 +356,20 @@ run skips when no checkpoint boundary was crossed and publishes when one was.
 Nothing of this feature reaches mainnet before it has run on a testnet: the official testnet has
 no nodes (monitor: 0 online), so the trial runs on a persistent private network of our own.
 
-- **Testnet.** A long-running private network on the local host (Docker, 7 to 9 nodes, own
-  genesis and keys, the run.sh configuration with checkpoints every 1,000 to 10,000 blocks),
-  kept up for days; some even nodes run the official binary, as in the mixed CI scenarios.
+- **Testnet.** Private networks on GitHub Actions, as the scale runs (`scale.yml`, up to 51 nodes
+  on one runner): about 50 nodes, 7 to 9 trusted per round, nodes below the minimum stake, some
+  even nodes on the official binary (`node_alt_ref`), checkpoints every 1,000 to 10,000 blocks. A
+  job lasts at most 6 hours, so "days" means repeated runs of a `snapshot-testnet` scenario, not
+  one network kept alive (Actions is not for permanent services, and this repository's Actions was
+  disabled once for heavy use: keep the runs to what each step needs).
 - **What runs there, step by step as it is merged:** checkpoint digests (1), format-2 export and
   import (3a-3c), serving with limits switched at run time (4), fresh nodes joining from the
   network only (5a-5b, GitHub source off and on), a forged source and a dropped source (7), a
   full node starting from a network snapshot. Pass: no node stops or forks, every join agrees on
   the digest, the official nodes see no difference.
 - **Only then mainnet:** the local mainnet node serves first, alone, with a low rate; the
-  release that turns serving on by default in the packages comes after a week without problems
-  on the testnet and a few days on the local mainnet node.
+  release that turns serving on by default in the packages comes after the testnet runs of every
+  step pass and a few days without problems on the local mainnet node.
 
 ## Sizes and order
 
