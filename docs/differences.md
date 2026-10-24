@@ -45,6 +45,21 @@ The conversion is verified batch by batch. If it is interrupted (by Ctrl-C, a ki
 cut), it resumes at the next start. Checkpoints and the transaction index stay valid, so the node
 quick-starts after a conversion.
 
+### Snapshots built and restored by the node
+
+- `--export-snapshot <dir>`, on a stopped node of any backend, pruned or full, builds a snapshot
+  of its latest periodic checkpoint: the checkpoint files, the blocks before it as a hash chain
+  ending at the checkpoint's block, and the contract data, compressed, with a SHA-256 for every
+  file and every 4 MB piece, in a `snapshot.json` signed with the node's key.
+- `--import-snapshot <snapshot.json>` restores such a snapshot into an empty database of the
+  configured backend (LMDB or RocksDB). Every file is checked against the manifest and every
+  block before it is written: its signatures against its confidants, the confirmations of the
+  round before, and the hash chain to the declared block; the checkpoint must declare the
+  manifest's state digest. Anything wrong leaves nothing behind. The node then quick-starts from
+  that checkpoint.
+- The `[snapshot]` section of `config.ini` holds the settings of the coming snapshot service
+  (served by community nodes, fetched at a first start); it does nothing yet.
+
 ## Start-up behaviour
 
 - **Database check.** Before opening the block database, the node looks at `db/`. It writes the
@@ -109,14 +124,19 @@ quick-starts after a conversion.
   memory and retries.
 - **Pruned storage.** A pruned node answers NoSuchBlocks for blocks it has pruned, so a peer
   asks another node for them. `TransactionsListGet` skips pruned blocks.
-- **Contract replay.** A node that syncs re-executes contract calls to recover their states.
-  For some contracts this is not reproducible (official behaviour): a game that reads its own
-  balance sees it after the block's payout. The state then stays out of date, and the fee of a
-  later payout of the contract can be charged to an earlier caller. Such a node can disagree with
-  the network on a caller's balance by a fee, and mainnet nodes already disagree among themselves
-  on some of these wallets. The node now logs a warning when a state declared by a block is not
-  available; with `compatible_version=false` it would stop at the first block whose transaction
-  its own balances reject.
+- **Contract states while syncing.** Blocks carry only the hash of a contract's new state. The
+  official node, when it syncs, re-executes the calls to rebuild the states; for some contracts
+  this is not reproducible (a game that reads its own balance sees it after the block's payout),
+  the state stays out of date, and the fee of a later payout was charged to an earlier caller, so
+  official nodes disagree among themselves on such callers' balances. The community node:
+  - charges a payout's fee as the nodes that executed the contract do (see "Consensus fixes");
+  - records, for every contract, the call and the hash of the state the chain declares, and once
+    it is live asks the confidants for every state it holds out of date (at most 16 a round,
+    then less and less often), taking only the declared one; the log has a line per state received
+    and a summary (`contract states: N known, S stale, …`) when the node becomes live and every
+    1000 rounds while some remain;
+  - `[params] sync_contract_execution` (default `true`): `false` skips the re-execution while
+    syncing altogether, and every state comes from the confidants.
 
 ## Security and correctness fixes
 
@@ -158,6 +178,13 @@ consensus rules.
   always failed. It now works. Residual risk, as in the official design: a package with more
   signatures that reaches only part of the network would move only that part.
 
+- **Fees of contract payouts.** A transaction a contract emits is charged to the contract's
+  latest successful execution in the same block, which is what a node that executed the contract
+  does (it applies every new state of the block before the payouts). A syncing official node whose
+  re-execution failed charges it to an earlier caller instead. This changes, by one fee, the
+  balances such a node computes for those callers, and makes them those of the nodes that took
+  part in the rounds.
+
 Official nodes on the side that keeps its block behave as before; mixed networks do not fork (CI:
 equal state digests with official binaries on half of the nodes, and the same share of signed
 rounds for both).
@@ -170,13 +197,14 @@ rounds for both).
 
   Each package includes the JDK of the official release and the community build of the contract
   executor.
-- **`config.ini` in the packages.** It is the official one, with four changes:
+- **`config.ini` in the packages.** It is the official one, with five changes:
   - `[event_report]` is commented out (it reports node events to a fixed address);
   - `executor_commit_max` accepts the community executor;
   - `compatible_version=true`, the default of the node binary (the official file sets `false`):
     a synced block that fails the node's own transaction check is logged
     (`skip block validation`) and stored, instead of stopping the node at it for good. See
-    "Contract replay" below;
+    "Contract states while syncing";
+  - `sync_contract_execution=true` (the default), with a comment;
   - the pruned package adds a `[storage]` section.
 
   The executor listens on 127.0.0.1 only.

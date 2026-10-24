@@ -32,6 +32,10 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.12 — 2026-10-24
+
 | PR | Change |
 |---|---|
 | #87 | csnode: every checkpoint saves the digest of the state it holds (wallets, their count, consensus settings) as `state_digest.bin` and logs it; a quick start recomputes it and moves aside a checkpoint whose caches do not match |
@@ -42,6 +46,15 @@ lines under the new release.
 | #93 | ci(testnet): a Dice contract that reads its own balance, played by two players (also twice in one block); scenario `contracts-dice-join`, where a node syncing through the plays must end with the live nodes' balances and contract state |
 | #94 | solver: an emitted transaction's fee is charged to the contract's latest successful execution in its block, as the live nodes charge it; a syncing node whose re-execution of a contract failed charged it to an earlier caller. Consensus-relevant: balances of such callers change by a fee compared with an official node that syncs the same blocks |
 | #95 | solver: each contract records the call and hash of the state the chain declares; once live, a node asks the confidants for the states it holds stale (paced, with backoff) and takes only the declared one; a state whose block is not stored is no longer taken unverified |
+| #96 | solver, client: `[params] sync_contract_execution` (default true): false skips the re-execution of contract calls while syncing, every state is fetched from the confidants; set explicitly in the packaged `config.ini` |
+
+Contract states while syncing (#93–#96): a syncing node no longer disagrees with the network on the
+balances of callers of contracts whose re-execution is not reproducible (such as dice games), and
+gets the states of such contracts from the confidants, verified against the hash the chain declares.
+#94 is consensus-relevant: it charges contract payouts as the nodes that executed the contract do.
+Snapshots (#87–#92): checkpoints carry the digest of their state, and the node builds and restores
+signed snapshots itself (`--export-snapshot`, `--import-snapshot`) on any backend; serving them
+between nodes comes next.
 
 ## community.11 — 2026-10-24
 
