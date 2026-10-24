@@ -352,11 +352,10 @@ public:
     // new state of contract, result of invocation of executable transaction
     static bool is_new_state(const csdb::Transaction&);
 
-    // the start of the execution that emitted transaction tr_idx of the block: the RefStart of the
-    // contract's new_state nearest before it in the same block (the smart consensus puts every
-    // emitted transaction after its new_state); nullopt when there is none. The live nodes, which
-    // have the new state before the block, charge an emitted transaction's fee to that execution's
-    // initiator; this finds it from the block alone, whatever state the node holds.
+    // the execution an emitted transaction of the contract is charged to, from the block alone: the
+    // contract's latest successful execution in the block (highest RefStart of its new_states with a
+    // non-zero hash), which is what a live node charges since it applies every new_state of the block
+    // before the emitted transactions; nullopt when the block has none. tr_idx is not used by the rule.
     static std::optional<SmartContractRef> emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
                                                               const std::function<csdb::Address(const csdb::Address&)>& absolute);
 

@@ -99,9 +99,9 @@ csdb::Transaction plain(csdb::Address src, csdb::Address tgt, int64_t id) {
 }
 
 // a new_state of contract `contract` for the execution started at ref
-csdb::Transaction newState(csdb::Address contract, cs::Sequence seq, cs::Sequence index, int64_t id) {
+csdb::Transaction newState(csdb::Address contract, cs::Sequence seq, cs::Sequence index, int64_t id, char hashByte = 'h') {
     auto t = plain(contract, contract, id);
-    t.add_user_field(cs::trx_uf::new_state::Hash, std::string(32, 'h'));
+    t.add_user_field(cs::trx_uf::new_state::Hash, std::string(32, hashByte));
     cs::SmartContractRef ref;
     ref.sequence = seq;
     ref.transaction = index;
@@ -110,35 +110,36 @@ csdb::Transaction newState(csdb::Address contract, cs::Sequence seq, cs::Sequenc
 }
 }  // namespace
 
-// the execution that emitted a transaction is the contract's nearest new_state before it in the
-// block: the fee of an emitted transaction goes to that execution's initiator (step 1 of the
-// contract state sync plan), whatever state the node holds
-TEST(SmartContract, EmittedTransactionBelongsToTheNewStateBeforeIt) {
+// the execution an emitted transaction is charged to is the contract's latest successful execution
+// in the block (step 1 of the contract state sync plan): a live node applies every new_state of the
+// block before it charges the emitted transactions, so it charges that one, wherever they stand
+TEST(SmartContract, EmittedTransactionIsChargedToTheLatestExecutionInTheBlock) {
     const auto A = addressOf(1), B = addressOf(2), player = addressOf(3);
     csdb::Pool block(csdb::PoolHash{}, 50);
-    block.add_transaction(plain(A, player, 1));            // 0: emitted by A before any new_state of A
-    block.add_transaction(newState(A, 40, 0, 2));          // 1: A's execution started at 40.0
-    block.add_transaction(plain(A, player, 3));            // 2: emitted by it
-    block.add_transaction(newState(B, 41, 1, 4));          // 3: B's execution started at 41.1
-    block.add_transaction(plain(B, player, 5));            // 4: emitted by it
-    block.add_transaction(newState(A, 45, 2, 6));          // 5: A's next execution, started at 45.2
-    block.add_transaction(plain(A, player, 7));            // 6: emitted by that one, not by 40.0
+    block.add_transaction(newState(A, 40, 0, 1));          // 0: A's execution started at 40.0
+    block.add_transaction(plain(A, player, 2));            // 1: emitted by it
+    block.add_transaction(newState(B, 41, 1, 3));          // 2: B's execution started at 41.1
+    block.add_transaction(plain(B, player, 4));            // 3: emitted by it
+    block.add_transaction(newState(A, 45, 2, 5));          // 4: A's next execution, started at 45.2
+    block.add_transaction(plain(A, player, 6));            // 5: emitted by that one
+    const auto failed = newState(A, 47, 0, 7, '\0');     // 6: A's last execution failed (zero hash)
+    block.add_transaction(failed);
     block.add_transaction(plain(player, A, 8));            // 7: a plain transfer to A
 
     const auto identity = [](const csdb::Address& a) { return a; };
-    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(block, 0, A, identity).has_value());
-    auto ref = cs::SmartContracts::emitting_new_state(block, 2, A, identity);
-    ASSERT_TRUE(ref.has_value());
-    EXPECT_EQ(ref->sequence, 40u);
-    EXPECT_EQ(ref->transaction, 0u);
-    ref = cs::SmartContracts::emitting_new_state(block, 4, B, identity);
-    ASSERT_TRUE(ref.has_value());
-    EXPECT_EQ(ref->sequence, 41u);
-    ref = cs::SmartContracts::emitting_new_state(block, 6, A, identity);
-    ASSERT_TRUE(ref.has_value());
-    EXPECT_EQ(ref->sequence, 45u);
-    EXPECT_EQ(ref->transaction, 2u);
-    // B's new_state is no answer for A, and an index past the block is bounded
-    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(block, 3, B, identity).has_value());
-    EXPECT_TRUE(cs::SmartContracts::emitting_new_state(block, 100, A, identity).has_value());
+    // both payouts of A go to 45.2, the latest successful execution: the failed 47.0 does not count
+    for (size_t i : {size_t(1), size_t(5)}) {
+        const auto ref = cs::SmartContracts::emitting_new_state(block, i, A, identity);
+        ASSERT_TRUE(ref.has_value());
+        EXPECT_EQ(ref->sequence, 45u);
+        EXPECT_EQ(ref->transaction, 2u);
+    }
+    const auto refB = cs::SmartContracts::emitting_new_state(block, 3, B, identity);
+    ASSERT_TRUE(refB.has_value());
+    EXPECT_EQ(refB->sequence, 41u);
+    // a contract without a successful execution in the block: none (the caller falls back)
+    csdb::Pool other(csdb::PoolHash{}, 51);
+    other.add_transaction(failed);
+    other.add_transaction(plain(A, player, 9));
+    EXPECT_FALSE(cs::SmartContracts::emitting_new_state(other, 1, A, identity).has_value());
 }

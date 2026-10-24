@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <smartcontracts.hpp>
 #include <solvercontext.hpp>
 
@@ -321,18 +322,33 @@ bool SmartContracts::is_start(const csdb::Transaction& tr) {
 /*static*/
 std::optional<SmartContractRef> SmartContracts::emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
                                                                    const std::function<csdb::Address(const csdb::Address&)>& absolute) {
-    const auto& transactions = block.transactions();
-    for (size_t i = std::min(tr_idx, transactions.size()); i > 0; --i) {
-        const auto& t = transactions[i - 1];
-        if (is_new_state(t) && absolute(t.target()) == abs_addr) {
-            const csdb::UserField fld = t.user_field(trx_uf::new_state::RefStart);
-            if (!fld.is_valid()) {
-                return std::nullopt;
+    // A live node applies every new_state of the block (Conveyer::statesCreated -> on_update) before
+    // it charges any emitted transaction, so the execution it charges is the contract's latest
+    // successful one in the block, wherever the emitted transaction stands in it. A failed execution
+    // (zero hash) does not change the contract's execution and is not counted.
+    (void)tr_idx;
+    std::optional<SmartContractRef> latest;
+    for (const auto& t : block.transactions()) {
+        if (!is_new_state(t) || absolute(t.target()) != abs_addr) {
+            continue;
+        }
+        const csdb::UserField hash = t.user_field(trx_uf::new_state::Hash);
+        if (hash.is_valid()) {
+            const std::string bytes = hash.value<std::string>();
+            if (bytes.size() == cs::Hash{}.size() && std::all_of(bytes.begin(), bytes.end(), [](char c) { return c == 0; })) {
+                continue;
             }
-            return SmartContractRef(fld);
+        }
+        const csdb::UserField fld = t.user_field(trx_uf::new_state::RefStart);
+        if (!fld.is_valid()) {
+            continue;
+        }
+        const SmartContractRef ref(fld);
+        if (!latest.has_value() || *latest < ref) {
+            latest = ref;
         }
     }
-    return std::nullopt;
+    return latest;
 }
 
 bool SmartContracts::is_new_state(const csdb::Transaction& tr) {
