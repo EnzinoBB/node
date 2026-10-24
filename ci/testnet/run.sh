@@ -34,6 +34,8 @@
 #        node reached CONTRACTS_AFTER_AT (default 0); the states are compared once every node,
 #        a joining one too, reached TARGET_SEQ. contracts.py sends everything through n1: a
 #        contract scenario never kills, partitions or slows n1
+#        SYNC_CONTRACT_EXECUTION=0: every node runs with sync_contract_execution=false (no contract
+#        re-execution while reading the blockchain; states fetched from the confidants once live)
 #        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
 #        times before the restart test; a node that syncs through the plays re-executes them
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
@@ -179,6 +181,7 @@ JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
 CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
 CONTRACT_DICE=${CONTRACT_DICE:-0}
+SYNC_CONTRACT_EXECUTION=${SYNC_CONTRACT_EXECUTION:-1}
 [ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
     || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
 PRUNE_NODE=${PRUNE_NODE:-0}
@@ -369,6 +372,7 @@ ipv6=false
 traverse_nat=false
 min_neighbours=1
 max_neighbours=16
+sync_contract_execution=$([ "$SYNC_CONTRACT_EXECUTION" = 0 ] && echo false || echo true)
 round_elapse_time=$ROUND_ELAPSE_MS
 
 [host_input]
