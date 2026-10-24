@@ -351,20 +351,22 @@ its own small PR.
 `CREDITS_SNAPSHOT_MIN_SOURCES=1` restores from GitHub format 2 and verifies; the next scheduled
 run skips when no checkpoint boundary was crossed and publishes when one was.
 
-## Step 9. Mainnet trial and release (small)
+## Step 9. Community testnet trial, then mainnet (user's rule, 2026-10-24)
 
-- The local pruned node (`credits-pruned-c3`) gets `[snapshot] serve_port=9511`,
-  `serve_rate_kbps=2000` in its `config.ini` while running (the user does this; the design's
-  dynamic start is the check); its next periodic checkpoint builds a snapshot; `curl` from the
-  host fetches the manifest.
-- A fresh container on this host with `sources=<host ip>:9511`, `min_sources=2`, GitHub on:
-  first agreement between a node and the workflow (same `S` once GitHub is on checkpoint blocks);
-  the digest groups logged are recorded in the design's section 7.1.
-- `docs/CHANGES.md`, `docs/differences.md`, `docs/snapshots.md`, `packaging/docker/README.md`
-  final text; release `community.N`.
+Nothing of this feature reaches mainnet before it has run on a testnet: the official testnet has
+no nodes (monitor: 0 online), so the trial runs on a persistent private network of our own.
 
-**Pass.** The container restores from the two sources, verifies, reaches the head; the weekly
-job's first `snapshots.md` after the release lists at least the local node.
+- **Testnet.** A long-running private network on the local host (Docker, 7 to 9 nodes, own
+  genesis and keys, the run.sh configuration with checkpoints every 1,000 to 10,000 blocks),
+  kept up for days; some even nodes run the official binary, as in the mixed CI scenarios.
+- **What runs there, step by step as it is merged:** checkpoint digests (1), format-2 export and
+  import (3a-3c), serving with limits switched at run time (4), fresh nodes joining from the
+  network only (5a-5b, GitHub source off and on), a forged source and a dropped source (7), a
+  full node starting from a network snapshot. Pass: no node stops or forks, every join agrees on
+  the digest, the official nodes see no difference.
+- **Only then mainnet:** the local mainnet node serves first, alone, with a low rate; the
+  release that turns serving on by default in the packages comes after a week without problems
+  on the testnet and a few days on the local mainnet node.
 
 ## Sizes and order
 
