@@ -289,6 +289,12 @@ public:
 
     void dumpJSONKeys(const std::string& fName) const;
 
+    // re-execute contract calls while reading the blockchain (sync, start-up) to get their states
+    // provisionally; off: never, the states are fetched from the confidants once the node is live
+    bool syncContractExecution() const {
+        return syncContractExecution_;
+    }
+
     bool alwaysExecuteContracts() const {
         return alwaysExecuteContracts_;
     }
@@ -442,6 +448,7 @@ private:
 
     bool showBalanceChange_ = false;
     bool alwaysExecuteContracts_ = false;
+    bool syncContractExecution_ = true;
     bool recreateIndex_ = false;
     bool newBlockchainTop_ = false;
     bool autoShutdownEnabled_ = true;

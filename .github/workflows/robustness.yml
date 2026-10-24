@@ -292,6 +292,10 @@ jobs:
           - name: contracts-dice-join
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300
             contracts: true
+          # the same with sync_contract_execution=false: no re-execution while syncing, every state fetched
+          - name: contracts-dice-join-nosync-exec
+            env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300 SYNC_CONTRACT_EXECUTION=0
+            contracts: true
           - name: contracts-crash
             env: DB_BACKEND=lmdb CRASH_NODE=6 CONTRACTS=1 TARGET_SEQ=1600
             contracts: true
