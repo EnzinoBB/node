@@ -113,6 +113,7 @@ TEST(SnapshotBuilder, BuildsAVerifiableSnapshot) {
     Fixture fx("snapshot_build_ok");
     makeCheckpoint(fx.root / "qs" / "200", 200, fx.chain.hashes[200]);
     fs::create_directories(fx.root / "out" / "100");   // an older snapshot: removed
+    std::ofstream(fx.root / "out" / "100" / "snapshot.json") << "{}";
     const auto r = cs::buildSnapshot(fx.input(), fx.root / "out", fx.key);
     ASSERT_TRUE(r.ok) << r.error;
     EXPECT_FALSE(fs::exists(fx.root / "out" / "100"));
