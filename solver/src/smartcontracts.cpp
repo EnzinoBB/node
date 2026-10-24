@@ -1236,6 +1236,8 @@ csdb::Transaction SmartContracts::get_actual_state(const csdb::Transaction& hash
 
     std::string hash_string = fld.value<std::string>();
     cs::Hash hash;
+    // the block declares a new state that this node has to obtain (cache, execution or network)
+    bool state_expected = false;
     csdb::Transaction tr_state(0, hashed_state.source(), hashed_state.target(), hashed_state.currency(),
         hashed_state.amount(), hashed_state.max_fee(), hashed_state.counted_fee(), hashed_state.signature());
 
@@ -1254,6 +1256,7 @@ csdb::Transaction SmartContracts::get_actual_state(const csdb::Transaction& hash
     else {
         std::copy(hash_string.cbegin(), hash_string.cend(), hash.begin());
         if (hash != cs::Zero::hash) {
+            state_expected = true;
             fld = hashed_state.user_field(new_state::RefStart);
             if (!fld.is_valid()) {
                 cserror() << kLogPrefix << "hashed_state does not refer to start transaction, use empty new_state";
@@ -1278,6 +1281,13 @@ csdb::Transaction SmartContracts::get_actual_state(const csdb::Transaction& hash
                             tr_state.add_user_field(new_state::Value, std::string{});
                         }
                     }
+                }
+                // sync_contract_execution off: no re-execution while reading the blockchain, the state is
+                // fetched from the confidants once the node is live (an empty value marks it stale)
+                if (reading_db && tr_state.user_field_ids().count(new_state::Value) == 0 &&
+                    !cs::ConfigHolder::instance().config()->syncContractExecution()) {
+                    tr_state.add_user_field(new_state::Value, std::string{});
+                    sync_execution_skipped_ = true;
                 }
                 // execute contract to get last state if state is not found in cache
                 if (tr_state.user_field_ids().count(new_state::Value) == 0) {
@@ -1387,6 +1397,19 @@ csdb::Transaction SmartContracts::get_actual_state(const csdb::Transaction& hash
     // set empty new state in case of any problem
     if (tr_state.user_field_ids().count(new_state::Value) == 0) {
         tr_state.add_user_field(new_state::Value, std::string{});
+    }
+    // a contract whose execution is not reproducible (e.g. one that reads its own balance) leaves its
+    // state unknown here, and the fees of its later emitted transactions can then be charged to an
+    // earlier initiator: this node's balances may differ from the network's by such fees
+    if (sync_execution_skipped_) {
+        // expected with sync_contract_execution off: not a warning
+        sync_execution_skipped_ = false;
+        csdebug() << kLogPrefix << "state of " << to_base58(absolute_address(hashed_state.target())) << " not re-executed while reading the blockchain";
+    }
+    else if (state_expected && tr_state.user_field(new_state::Value).value<std::string>().empty()) {
+        cswarning() << kLogPrefix << "state of " << to_base58(absolute_address(hashed_state.target()))
+            << " declared by the block is not available" << (reading_db ? " while reading the blockchain" : "")
+            << ", the contract state is out of date";
     }
     return tr_state;
 }

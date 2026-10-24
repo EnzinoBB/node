@@ -651,6 +651,8 @@ private:
     StateFetcher state_fetcher_;
     // the previous stored block was read (sync, start-up), not live: the next live one starts a fetch
     bool was_reading_db_ = true;
+    // get_actual_state skipped a re-execution because of sync_contract_execution=off
+    bool sync_execution_skipped_ = false;
     cs::RoundNumber last_state_summary_ = 0;
     void on_live_block(cs::RoundNumber round);
 
