@@ -412,6 +412,13 @@ difference of one fee on one wallet gives a different digest. Known facts:
   head when the contract ran apply the states the blocks carry and should agree. How fast
   families form is not known; nobody has measured it.
 
+Measured on 2026-10-24 (plan step 0): the local pruned node (synced from block 0, at the head
+since then) and two nodes restored from the two published snapshots (blocks 186,460,890 and
+186,466,024, each catching up on its own through about 5,000 replayed blocks) logged the same
+`STATE DIGEST` at every common sequence, 186,467,000 to 186,470,000. One family inside the GitHub
+lineage so far. Official nodes log no digest, so their families can only be seen through
+balances (the 7/13 split above).
+
 What follows for the design:
 
 - Agreement on `(S, head_hash)` is cheap, strong and independent of this problem; it is required.
