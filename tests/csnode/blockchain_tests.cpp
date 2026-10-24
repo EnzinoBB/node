@@ -3,7 +3,10 @@
 #include "clientconfigmock.hpp"
 #include "gtest/gtest.h"
 
+#include <array>
 #include <filesystem>
+#include <functional>
+#include <vector>
 #include <limits>
 #include <set>
 
@@ -234,4 +237,83 @@ TEST(BlockChain, SpecialOrdersSurviveCheckpoint) {
     ASSERT_TRUE(loaded.getSpecialOrders().empty());
 
     std::filesystem::remove_all(dir);
+}
+
+namespace {
+void setEverySetting(BlockChain& chain) {
+    chain.setBlockReward(csdb::Amount{ 3 });
+    chain.setMiningCoefficient(csdb::Amount{ 2 });
+    chain.setStakingOn(true);
+    chain.setMiningOn(true);
+    chain.setTimeMinStage1(700);
+    BlockChain::PendingConsensusSettings pending;
+    pending.round = 900;
+    pending.stakingOn = true;
+    pending.blockReward = csdb::Amount{ 5 };
+    chain.setPendingConsensusSettings(pending);
+    chain.setStartingDPOS(450);
+    csdb::Pool orders;
+    orders.add_transaction(specialOrderTransaction(1, 26, 1000));
+    orders.add_transaction(specialOrderTransaction(2, 35, 777));
+    chain.recordSpecialOrders(orders);
+}
+}  // namespace
+
+// a checkpoint saves the hash of the consensus settings with the caches, and a quick start
+// rejects the checkpoint when the loaded settings hash differently: every field must come back
+// from blockchain.dat and consensus_pending.dat exactly
+TEST(BlockChain, ConsensusSettingsDigestSurvivesCheckpoint) {
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    const auto dir = std::filesystem::temp_directory_path() / "cs_settings_digest_test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+
+    std::set<cs::PublicKey> confidants;
+    std::array<uint8_t, 32> savedDigest{};
+    {
+        BlockChain saved(genesis, start);
+        setEverySetting(saved);
+        savedDigest = saved.consensusSettingsDigest();
+        ASSERT_EQ(saved.checkpointDigest().settings, savedDigest);
+        cs::BlockChain_Serializer serializer;
+        serializer.bind(saved, confidants);
+        serializer.save(dir);
+    }
+
+    BlockChain loaded(genesis, start);
+    ASSERT_NE(loaded.consensusSettingsDigest(), savedDigest);
+    cs::BlockChain_Serializer serializer;
+    serializer.bind(loaded, confidants);
+    serializer.load(dir);
+    ASSERT_EQ(loaded.consensusSettingsDigest(), savedDigest);
+
+    std::filesystem::remove_all(dir);
+}
+
+TEST(BlockChain, ConsensusSettingsDigestCoversEverySetting) {
+    const csdb::Address genesis = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000001");
+    const csdb::Address start = csdb::Address::from_string("0000000000000000000000000000000000000000000000000000000000000002");
+    BlockChain base(genesis, start);
+    setEverySetting(base);
+    const auto digest = base.consensusSettingsDigest();
+
+    const std::vector<std::function<void(BlockChain&)>> changes = {
+        [](BlockChain& c) { c.setBlockReward(csdb::Amount{ 4 }); },
+        [](BlockChain& c) { c.setMiningCoefficient(csdb::Amount{ 1 }); },
+        [](BlockChain& c) { c.setStakingOn(false); },
+        [](BlockChain& c) { c.setMiningOn(false); },
+        [](BlockChain& c) { c.setTimeMinStage1(800); },
+        [](BlockChain& c) { auto p = c.getPendingConsensusSettings(); p.round = 901; c.setPendingConsensusSettings(p); },
+        [](BlockChain& c) { auto p = c.getPendingConsensusSettings(); p.miningCoefficient = csdb::Amount{ 9 }; c.setPendingConsensusSettings(p); },
+        [](BlockChain& c) { c.setStartingDPOS(451); },
+        [](BlockChain& c) { csdb::Pool o; o.add_transaction(specialOrderTransaction(3, 26, 2000)); c.recordSpecialOrders(o); },
+    };
+    for (size_t i = 0; i < changes.size(); ++i) {
+        BlockChain changed(genesis, start);
+        setEverySetting(changed);
+        ASSERT_EQ(changed.consensusSettingsDigest(), digest);
+        changes[i](changed);
+        EXPECT_NE(changed.consensusSettingsDigest(), digest) << "change " << i;
+    }
 }

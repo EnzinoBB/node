@@ -62,6 +62,8 @@ public:
     // order-independent digest of every wallet's balance-relevant state (ECMH, see statedigest.hpp);
     // computed in full on the first call, then kept up to date on every wallet update
     MultisetHash::Digest stateDigest() const;
+    // the wallets were replaced as a whole (a checkpoint loaded): the next stateDigest() recomputes
+    void invalidateStateDigest();
     void iterate(std::function<bool(const PublicKey& key, const InternalData& data)> func);
 
 protected:

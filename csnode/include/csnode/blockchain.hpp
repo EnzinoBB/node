@@ -402,6 +402,14 @@ public:
     void tryFlushDeferredBlock();
     void addIncorrectBlockNumber(cs::Sequence seq);
 
+    // the state the caches hold now: wallets digest, wallet count and consensus settings hash, as a
+    // checkpoint saves it (state_digest.bin)
+    cs::CheckpointDigest checkpointDigest() const;
+    // hash of the consensus settings a checkpoint carries: block reward, mining coefficient, staking
+    // and mining flags, minimal stage-1 time, pending settings, DPOS start and the recorded special
+    // orders (the initial confidants come from the node's configuration and are not included)
+    std::array<uint8_t, 32> consensusSettingsDigest() const;
+
     csdb::Amount getBlockReward() {
         return csdb::Amount(blockRewardIntegral_, blockRewardFraction_);
     }

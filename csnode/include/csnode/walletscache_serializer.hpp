@@ -29,6 +29,7 @@ using namespace boost::multi_index;
 
 namespace cs {
 class WalletsCache;
+class MultiWallets;
 
 class WalletsCache_Serializer {
 public:
@@ -218,6 +219,8 @@ private:
 #endif
     CurrentDelegations *currentDelegations_ = nullptr;
     MiningDelegations *miningDelegations_ = nullptr;
+    // its state digest is kept up to date incrementally: replacing the wallets invalidates it
+    MultiWallets *multiWallets_ = nullptr;
 };
 } // namespace cs
 #endif // WALLETS_CACHE_SERIALIZER_HPP

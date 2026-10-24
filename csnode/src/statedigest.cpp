@@ -1,12 +1,15 @@
 #include <csnode/statedigest.hpp>
 
 #include <algorithm>
+#include <fstream>
+#include <sstream>
 #include <tuple>
 #include <vector>
 
 #include <sodium.h>
 
 #include <csnode/nodecore.hpp>
+#include <lib/system/utils.hpp>
 
 namespace {
 static_assert(crypto_core_ristretto255_BYTES == 32, "ristretto255 element size");
@@ -125,4 +128,44 @@ cs::Bytes serializeWalletState(const WalletsCache::WalletData& wallet) {
     return out;
 }
 
+bool CheckpointDigest::write(const std::filesystem::path& file) const {
+    cs::Bytes out;
+    putU8(out, kVersion);
+    out.insert(out.end(), digest.begin(), digest.end());
+    putU64(out, wallets);
+    out.insert(out.end(), settings.begin(), settings.end());
+    std::ofstream f(file, std::ios::binary | std::ios::trunc);
+    f.write(reinterpret_cast<const char*>(out.data()), static_cast<std::streamsize>(out.size()));
+    f.flush();
+    return static_cast<bool>(f);
+}
+
+std::optional<CheckpointDigest> CheckpointDigest::read(const std::filesystem::path& file) {
+    std::ifstream f(file, std::ios::binary);
+    if (!f.is_open()) {
+        return std::nullopt;
+    }
+    constexpr size_t kSize = 1 + 32 + 8 + 32;
+    std::array<uint8_t, kSize + 1> in{};
+    f.read(reinterpret_cast<char*>(in.data()), static_cast<std::streamsize>(in.size()));
+    if (static_cast<size_t>(f.gcount()) != kSize || in[0] != kVersion) {
+        return std::nullopt;
+    }
+    CheckpointDigest result;
+    std::copy(in.begin() + 1, in.begin() + 33, result.digest.begin());
+    for (int i = 0; i < 8; ++i) {
+        result.wallets |= static_cast<uint64_t>(in[33 + i]) << (8 * i);
+    }
+    std::copy(in.begin() + 41, in.begin() + 73, result.settings.begin());
+    return result;
+}
+
+std::string stateDigestLine(cs::Sequence sequence, const MultisetHash::Digest& digest, uint64_t wallets) {
+    std::ostringstream os;
+    os << "STATE DIGEST #" << sequence << " " << cs::Utils::byteStreamToHex(digest.data(), digest.size())
+       << " wallets " << wallets;
+    return os.str();
+}
+
 }  // namespace cs
+

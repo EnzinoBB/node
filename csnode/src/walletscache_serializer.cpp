@@ -26,6 +26,7 @@ void WalletsCache_Serializer::bind(WalletsCache& wCache) {
     canceledSmarts_ = reinterpret_cast<decltype(canceledSmarts_)>(&wCache.canceledSmarts_);
     static_assert(sizeof(WalletData) == sizeof(WalletsCache::WalletData), "WalletData mirror must match WalletsCache::WalletData");
     wallets_ = reinterpret_cast<decltype(wallets_)>(&wCache.multiWallets_->indexes_);
+    multiWallets_ = wCache.multiWallets_.get();
 #ifdef MONITOR_NODE
     trusted_info_ = reinterpret_cast<decltype(trusted_info_)>(&wCache.trusted_info_);
 #endif
@@ -44,6 +45,7 @@ void WalletsCache_Serializer::clear(const std::filesystem::path& rootDir) {
 #endif
     currentDelegations_->clear();
     miningDelegations_->clear();
+    multiWallets_->invalidateStateDigest();
 }
 
 void WalletsCache_Serializer::save(const std::filesystem::path& rootDir) {
@@ -108,5 +110,6 @@ void WalletsCache_Serializer::load(const std::filesystem::path& rootDir) {
 #endif
     ia >> *currentDelegations_;
     ia >> *miningDelegations_;
+    multiWallets_->invalidateStateDigest();
 }
 }  // namespace cs

@@ -95,6 +95,11 @@ void cs::MultiWallets::onWalletCacheUpdated(const cs::WalletsCache::WalletData& 
     }
 }
 
+void cs::MultiWallets::invalidateStateDigest() {
+    cs::Lock lock(mutex_);
+    digestReady_ = false;
+}
+
 cs::MultisetHash::Digest cs::MultiWallets::stateDigest() const {
     cs::Lock lock(mutex_);
 

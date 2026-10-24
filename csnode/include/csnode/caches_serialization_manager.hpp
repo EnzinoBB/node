@@ -6,6 +6,7 @@
 #include <set>
 
 #include <client/params.hpp>
+#include <csnode/statedigest.hpp>
 #include <lib/system/common.hpp>
 
 class BlockChain;
@@ -51,7 +52,8 @@ public:
 
     void clear(size_t version = 0);
 
-    bool save(size_t version, const CheckpointHead& head);
+    // digest: the state the caches hold, written as state_digest.bin next to them
+    bool save(size_t version, const CheckpointHead& head, const std::optional<CheckpointDigest>& digest = std::nullopt);
     bool save(size_t version = 0);   // legacy: no chain-binding (qs/0 from pre-A nodes)
     // Optional verifier is called after each candidate's hashes pass; if it
     // returns false (e.g. chain-binding mismatch), the candidate is
@@ -64,6 +66,9 @@ public:
     std::optional<CheckpointHead> getLoadedHead() const;
     // the version load() took the caches from, if any
     std::optional<size_t> getLoadedVersion() const;
+    // the state_digest.bin of the version being loaded or loaded, nullopt when it has none; set
+    // before the ChainVerifier is called, so that the verifier can compare it with the caches
+    std::optional<CheckpointDigest> getLoadedDigest() const;
     // moves a version aside to qs/<version>.bad, so that load() no longer takes it
     void quarantine(size_t version);
     // Sticky bit indicating the caches have been validated by a full

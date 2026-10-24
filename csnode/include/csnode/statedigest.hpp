@@ -3,6 +3,9 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
 
 #include <csnode/walletscache.hpp>
 #include <lib/system/common.hpp>
@@ -40,6 +43,34 @@ private:
 // and delegations in both directions, sorted. Empty for a wallet without such state, so that empty
 // records do not change the digest.
 cs::Bytes serializeWalletState(const WalletsCache::WalletData& wallet);
+
+// The state a checkpoint holds, saved with it as state_digest.bin: the digest of the wallets
+// (MultiWallets::stateDigest), their number, and a hash of the consensus settings the checkpoint
+// carries (BlockChain::consensusSettingsDigest). A snapshot made from the checkpoint declares the
+// same values, and a node that loads the checkpoint recomputes and compares them.
+struct CheckpointDigest {
+    static constexpr uint8_t kVersion = 1;
+    static constexpr const char* kFileName = "state_digest.bin";
+
+    MultisetHash::Digest digest{};
+    uint64_t wallets = 0;
+    std::array<uint8_t, 32> settings{};
+
+    bool write(const std::filesystem::path& file) const;
+    // nullopt for a missing, truncated or unknown-version file
+    static std::optional<CheckpointDigest> read(const std::filesystem::path& file);
+
+    bool operator==(const CheckpointDigest& other) const {
+        return digest == other.digest && wallets == other.wallets && settings == other.settings;
+    }
+    bool operator!=(const CheckpointDigest& other) const {
+        return !(*this == other);
+    }
+};
+
+// "STATE DIGEST #<sequence> <hex> wallets <n>": the form every digest line of the log has, so that
+// scripts read the same fields from the periodic, the start-up and the checkpoint lines
+std::string stateDigestLine(cs::Sequence sequence, const MultisetHash::Digest& digest, uint64_t wallets);
 
 }  // namespace cs
 
