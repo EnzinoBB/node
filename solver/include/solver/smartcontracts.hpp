@@ -352,6 +352,13 @@ public:
     // new state of contract, result of invocation of executable transaction
     static bool is_new_state(const csdb::Transaction&);
 
+    // the execution an emitted transaction of the contract is charged to, from the block alone: the
+    // contract's latest successful execution in the block (highest RefStart of its new_states with a
+    // non-zero hash), which is what a live node charges since it applies every new_state of the block
+    // before the emitted transactions; nullopt when the block has none. tr_idx is not used by the rule.
+    static std::optional<SmartContractRef> emitting_new_state(const csdb::Pool& block, size_t tr_idx, const csdb::Address& abs_addr,
+                                                              const std::function<csdb::Address(const csdb::Address&)>& absolute);
+
     // locked contracts that are neither executed now nor used by an executed contract
     static std::vector<csdb::Address> stale_locks(const std::unordered_set<csdb::Address>& locked, const std::vector<csdb::Address>& in_use);
 
