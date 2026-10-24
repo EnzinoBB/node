@@ -14,13 +14,13 @@ awk '
     section == "[host_input]" && /^port=/ { print "port=19510"; next }
     section == "[api]" && /^port=/ { print "port=0"; next }
     { print }' config.ini > config-offline.ini
-# oldest first by modification time: by name log_10 would come before log_9
-logs() { cat $(ls -tr log/log_*.txt 2>/dev/null) /dev/null 2>/dev/null || true; }
-before=$(logs | grep -ac 'STATE DIGEST #' || true)
+# the node's console output of this run (the packaged config.ini logs info to the console): a count
+# of digest lines in log/ can go down when the start rotates the logs and removes the oldest file
+digests() { grep -a 'STATE DIGEST #' offline.out 2>/dev/null || true; }
 ./node --db-path db --config-file config-offline.ini </dev/null > offline.out 2>&1 &
 pid=$!
 deadline=$(( $(date +%s) + timeout ))
-until [ "$(logs | grep -ac 'STATE DIGEST #' || true)" -gt "${before:-0}" ] || [ "$(date +%s)" -ge "$deadline" ]; do
+until [ -n "$(digests)" ] || [ "$(date +%s)" -ge "$deadline" ]; do
     kill -0 "$pid" 2>/dev/null || break
     sleep 2
 done
@@ -29,6 +29,6 @@ for _ in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
 kill -0 "$pid" 2>/dev/null && { kill -KILL "$pid"; echo "the offline node did not stop in 120 s" >&2; exit 1; }
 pkill -f "[c]ontract-executor[.]jar" 2>/dev/null || true
 rm -f config-offline.ini hosts-none.txt
-line=$(logs | grep -a 'STATE DIGEST #' | tail -1)
-[ "$(logs | grep -ac 'STATE DIGEST #' || true)" -gt "${before:-0}" ] || { echo "no start-up digest" >&2; exit 1; }
-echo "${line#*] }"
+line=$(digests | tail -1)
+[ -n "$line" ] || { echo "no start-up digest" >&2; exit 1; }
+echo "STATE DIGEST #${line#*STATE DIGEST #}"
