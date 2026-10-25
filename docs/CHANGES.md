@@ -38,6 +38,7 @@ lines under the new release.
 | #100 | net: four p2p messages for snapshot manifests and pieces (types 40-43) with bounded decoders; this build answers requests as not serving and sends none |
 | #101 | net: `host_data` announces snapshot serving (bit 24, `[snapshot] serve=on` at start) and the community version (bits 32-47, `MINOR_NODE_VERSION`, now 13); `known_peers.json` at a clean stop lists the known peers with what they announce |
 | #102 | snapshot: a node with `[snapshot] serve=on` builds the snapshot of each periodic checkpoint and serves it to its p2p neighbours, within `serve_rate_kbps` (KB/s), `serve_max_peers` and per-peer limits, at half budget while trusted; snapshots use 512 KiB chunks and no contracts file |
+| #104 | snapshot: the p2p fetcher (not started yet): finds the neighbours that serve snapshots, agrees on one (a configured `sources=` key first, then the most independent sources by /24 or /48, the highest block only as a tie-break), downloads its pieces from several sources with every piece and file checked against the signed manifest, an adaptive piece timeout for slow links, limits per network prefix against made-up keys, and the fallback to syncing from block 0 after `fetch_wait` (or a bounded total time) |
 
 ## community.12 — 2026-10-24
 
