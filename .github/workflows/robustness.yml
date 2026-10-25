@@ -319,6 +319,7 @@ jobs:
           # (docs/specs/2026-10-24-contract-state-sync-design.md): its balances and the contract's
           # state must end as the live nodes', the state fetched from the confidants once it is live
           - name: contracts-dice-join
+            official: 'no'   # an official joiner (n8) re-executes Dice while syncing and ends on another state: the official behaviour #93-#96 fixed (reproduced 2026-10-25)
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300
             contracts: true
           # the same with sync_contract_execution=false: no re-execution while syncing, every state fetched
