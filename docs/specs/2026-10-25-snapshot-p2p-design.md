@@ -269,6 +269,20 @@ answers and the fetcher moves to another source of the same `sha256` group (6.5)
   window): a flood of requests from unknown keys costs one map lookup and one small reply each,
   bounded by the per-peer and global buckets; the map is capped at 64 entries (oldest evicted).
 
+### 5.3a As implemented in P3 (review notes)
+
+- A manifest request gets no answer (not a busy status) when the same key asked less than 5 s
+  ago, when any manifest was sent less than 50 ms ago, or when the global bucket is empty: the
+  fetcher (P4) treats silence as "ask again after 5 s" and moves to its other sources meanwhile.
+- The 64-entry peer table evicts the oldest key that has not downloaded in the last 30 s first, so
+  that keys made up by one host cannot push out a peer in the middle of a download; the table is
+  still keyed by node key (unauthenticated), so one host can occupy `serve_max_peers` slots: a
+  denial of the serving function only, bounded by the global bucket. Keying by address needs a
+  per-key address lookup in the transport (later).
+- The configuration is read per request through `ConfigHolder::config()`, which returns a raw
+  pointer into a `shared_ptr` the observer may swap; the same pattern exists across the node. A
+  `shared_ptr<const Config>` accessor is a follow-up for every reader on more than one thread.
+
 ### 5.4 What of PR #98 survives
 
 Reused as they are, moved to the first serving step (plan P3): `csnode/src/snapshot_service.cpp`
@@ -630,7 +644,7 @@ every key but `fetch*` takes effect while the node runs):
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `serve` | `off` (binary); `on` in the packages' `config.ini` and in Docker | build snapshots after each periodic checkpoint and answer snapshot requests over p2p; also sets bit 24 at start |
-| `serve_rate_kbps` | `2000` | upload cap for pieces, all peers together; `0` = unlimited |
+| `serve_rate_kbps` | `2000` | upload cap for pieces and manifests, all peers together, in KB/s (2000 = 2 MB/s, as #98 and P3 read it); `0` = unlimited |
 | `serve_max_peers` | `8` | peers served within 30 s; more get busy |
 | `snapshot_blocks` | `101000`, later `1` | blocks before the checkpoint in a built snapshot (range 1..10,000,000) |
 | `fetch` | `auto` | `auto`: a start with an empty database (lmdb or rocksdb) fetches from the neighbours; `off`: never |
@@ -639,7 +653,7 @@ every key but `fetch*` takes effect while the node runs):
 | `min_sources` | `2` (question 1) | independent sources that must agree |
 | `sources` | empty | base58 keys of trusted nodes, counted once each whatever their address |
 | `sources_file` | `snapshot_sources.txt` | `ip:port key` lines of known serving nodes, brought into the neighbour table first; missing file = none |
-| `fetch_rate_kbps` | `0` | download cap; `0` = unlimited |
+| `fetch_rate_kbps` | `0` | download cap, KB/s; `0` = unlimited |
 
 Removed from #88's set: `serve_port`, `serve_bind`, `serve_max_connections`, `probe_known_hosts`,
 `github_manifest`, `fallback`, `fetch_connections` (a warning for a key that no longer exists,
