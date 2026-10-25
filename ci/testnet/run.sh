@@ -204,6 +204,12 @@ SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 SNAPSHOT_SERVE_NODES=${SNAPSHOT_SERVE_NODES:-}
+if [ -n "$BIN_ALT" ]; then
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        # the even nodes run BIN_ALT, which may not serve snapshots
+        [ $((i % 2)) -eq 1 ] || { echo "FAIL: SNAPSHOT_SERVE_NODES names n$i, an even node, which runs BIN_ALT"; exit 1; }
+    done
+fi
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
@@ -1325,9 +1331,9 @@ if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
     # checkpoint at 1'000 on a thread of low priority: a minute at most)
     for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
         for _ in $(seq 1 60); do grep -aq 'SNAPSHOT: serving block' "$WORK/n$i/node.log" && break; sleep 1; done
-        built=$(grep -a 'SNAPSHOT: built block' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*(built block [0-9]+[^,]*, [^,]*, [^,]*).*/\1/')
-        serving=$(grep -a 'SNAPSHOT: serving block' "$WORK/n$i/node.log" | tail -1 | sed -E 's/.*SNAPSHOT: //')
-        [ -n "$built" ] && [ -n "$serving" ] || { echo "FAIL: n$i did not build and serve a snapshot"; grep -a 'SNAPSHOT' "$WORK/n$i/node.log" | tail -5; exit 1; }
+        built=$({ grep -a 'SNAPSHOT: built block' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E 's/.*(built block [0-9]+[^,]*, [^,]*, [^,]*).*/\1/')
+        serving=$({ grep -a 'SNAPSHOT: serving block' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E 's/.*SNAPSHOT: //')
+        [ -n "$built" ] && [ -n "$serving" ] || { echo "FAIL: n$i did not build and serve a snapshot"; { grep -a 'SNAPSHOT' "$WORK/n$i/node.log" || true; } | tail -5; exit 1; }
         echo "snapshot: n$i $built; $serving"
     done
     # known_peers.json is written at a clean stop: stop one node of this build that does not serve

@@ -250,9 +250,10 @@ jobs:
           # host_data; a stopped node lists them
           - name: snapshot-capability
             env: SNAPSHOT_SERVE_NODES=3,5
-          # a pruned LMDB node and a full RocksDB one serve, the pruned one while it prunes
+          # a pruned LMDB node and a full RocksDB one serve, the pruned one while it prunes (odd nodes:
+          # the even ones run node_alt_ref in a mixed run)
           - name: snapshot-p2p-serve
-            env: NODE_STORAGE=berkeleydb,berkeleydb,berkeleydb,berkeleydb,berkeleydb,lmdb:pruned,rocksdb SNAPSHOT_SERVE_NODES=6,7 TARGET_SEQ=2600
+            env: NODE_STORAGE=berkeleydb,berkeleydb,berkeleydb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=5,7 TARGET_SEQ=2600
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300
