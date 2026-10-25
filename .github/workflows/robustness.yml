@@ -202,28 +202,28 @@ jobs:
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6 DISK_FULL_AT=700
           # pruning starts at the periodic checkpoint #2000 (checkpoint_every + prune_keep_blocks <= 2000)
           - name: rocksdb-pruned-join
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=2300
           # a full node syncs from block 0 among mostly pruned peers, with special order 35 active: the pruned
           # peers must answer NoSuchBlocks, not AwaitAnswer and then nothing
           - name: pruned-peers-join
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=lmdb,lmdb,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
             fixed: true
           # kills that land while the node prunes, or right after a checkpoint it prunes from
           - name: rocksdb-pruned-crash
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           - name: lmdb-pruned-crash
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           # API threads read blocks while the node prunes (the pool cache is shared)
           - name: lmdb-pruned-api
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 API_LOAD_NODE=6 TARGET_SEQ=3000
           # docker stop with a short timeout: SIGTERM, then SIGKILL while the node shuts down
           - name: lmdb-pruned-term-kill
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 TARGET_SEQ=3000
           - name: berkeleydb-term-kill
             env: DB_BACKEND=berkeleydb TERM_KILL_NODE=3
@@ -237,7 +237,7 @@ jobs:
             env: DB_BACKEND=rocksdb APPLY_FAIL_AT=400
           # a node that lost its transaction index rebuilds it from its blocks after a quick start
           - name: lmdb-pruned-index-loss
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 INDEX_LOSS_AT=2300 TARGET_SEQ=3000
           # a full node without its transaction index: quick start, then the index from its blocks
           - name: berkeleydb-index-loss
@@ -246,7 +246,7 @@ jobs:
           - name: hashdb-damage
             env: DB_BACKEND=lmdb HASHDB_DAMAGE_AT=500 TARGET_SEQ=1100
           - name: hashdb-loss-pruned
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 HASHDB_DAMAGE_NODE=6 HASHDB_DAMAGE=remove HASHDB_DAMAGE_AT=2300 TARGET_SEQ=3000
           # network faults on two nodes (tc netem on everything they send and on what is sent to them)
           - name: net-loss
@@ -275,43 +275,43 @@ jobs:
           # snapshot of n5); then the same network with crashes of the pruned BerkeleyDB node, and
           # with a power cut and packet corruption
           - name: all-storage
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=5 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
           - name: all-storage-crash
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_NODE=4 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=3300
             fixed: true
           - name: all-storage-power-cut
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_ALL_AT=2500 NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=2,6 TARGET_SEQ=3300
             fixed: true
           # a node joining from a snapshot taken after the first pruning, and from a truncated one
           - name: snapshot-join
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100
           - name: snapshot-corrupt
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_CORRUPT=1 TARGET_SEQ=3100
           # format 2 across block databases: exported by a pruned BerkeleyDB node into a pruned LMDB one,
           # and by a pruned RocksDB node into a full RocksDB one; format 1 kept for the previous image
           - name: snapshot-join-from-berkeleydb
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=4 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
           - name: snapshot-join-rocksdb-full
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,rocksdb PRUNE_NODE=6 JOIN_FULL=1 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
           - name: snapshot-join-format1
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_FORMAT=1 TARGET_SEQ=3100
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
           - name: storage-switch
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=2300 TARGET_SEQ=3300
           - name: db-convert
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 TARGET_SEQ=2500
           # smart contracts (each node with its executor, contracts.py through n1) across the faults:
           # six SIGKILLs of n6 and its executor while contracts are deployed and called
@@ -323,7 +323,7 @@ jobs:
             contracts: true
           # the same with sync_contract_execution=false: no re-execution while syncing, every state fetched
           - name: contracts-dice-join-nosync-exec
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300 SYNC_CONTRACT_EXECUTION=0
             contracts: true
           - name: contracts-crash
@@ -349,17 +349,17 @@ jobs:
             manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=3000
             contracts: true
           # a node joining from block 0 past the deploys, then following live calls
           - name: contracts-pruned-join
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=2300
             contracts: true
           # block databases converted with contract records in them
           - name: contracts-db-convert
-            official: false   # needs a feature of this fork on an even node
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 CONTRACTS=1 CONTRACTS_AFTER_AT=1700 TARGET_SEQ=2500
             contracts: true
     name: ${{ matrix.name }}
@@ -367,7 +367,7 @@ jobs:
     env:
       # the scenarios with a NODE_STORAGE list are laid out for 7 nodes
       # manual scenarios (known failures kept as reproductions) run only when named in `only`
-      SELECTED: ${{ ((inputs.only == '' && matrix.manual != true) || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') && (inputs.node_alt_ref != 'official' || matrix.official != false) }}
+      SELECTED: ${{ ((inputs.only == '' && matrix.manual != true) || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') && (inputs.node_alt_ref != 'official' || matrix.official != 'no') }}
     steps:
       - name: Skip unselected scenario
         if: env.SELECTED != 'true'
