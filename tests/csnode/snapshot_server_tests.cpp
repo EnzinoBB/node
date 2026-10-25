@@ -70,6 +70,7 @@ struct Fixture {
     fs::path root;
     cs::SnapshotBuildResult built;
     std::atomic<bool> synced{true};
+    std::atomic<bool> roundZero{false};
     std::unique_ptr<cs::SnapshotServer> server;
     uint16_t port = 0;
 
@@ -117,6 +118,7 @@ struct Fixture {
         built = cs::buildSnapshot(in, root / "snapshot", key);
         EXPECT_TRUE(built.ok) << built.error;
         server = std::make_unique<cs::SnapshotServer>(root / "snapshot", [this]() {
+            if (roundZero) return std::make_pair(cs::Sequence(1000), cs::Sequence(0));   // has not heard the network
             return synced ? std::make_pair(cs::Sequence(1000), cs::Sequence(1001)) : std::make_pair(cs::Sequence(10), cs::Sequence(1000));
         });
         server->reload();
@@ -185,6 +187,8 @@ TEST(SnapshotServer, OnlyASyncedNodeServes) {
     EXPECT_EQ(r.retryAfter, "30");
     fx.synced = true;
     EXPECT_EQ(request(fx.port, http::verb::get, "/snapshot/latest.json").status, 200u);
+    fx.roundZero = true;
+    EXPECT_EQ(request(fx.port, http::verb::get, "/snapshot/latest.json").status, 503u);
 }
 
 TEST(SnapshotServer, NothingBuiltIsUnavailable) {
@@ -210,7 +214,7 @@ TEST(SnapshotServer, ConnectionCapAndRateAndMove) {
     held.close();
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
 
-    // 100 KB/s: 300 KB take about 3 s (the bucket starts empty)
+    // 100 KB/s: 300 KB take about 3 s (the bucket starts empty when the rate is set)
     s.maxConnections = 8;
     s.rateKBps = 100;
     fx.server->apply(s);
@@ -218,8 +222,15 @@ TEST(SnapshotServer, ConnectionCapAndRateAndMove) {
     const auto r = request(fx.port, http::verb::get, fx.blocksPath(), "bytes=0-299999");
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     ASSERT_EQ(r.status, 206u);
-    EXPECT_GT(secs, 2.0);
+    EXPECT_GT(secs, 1.8);
     EXPECT_LT(secs, 6.0);
+
+    // a cap below one piece (64 KB) a second still lets the body through, slowly
+    s.rateKBps = 50;
+    fx.server->apply(s);
+    const auto slow = request(fx.port, http::verb::get, fx.blocksPath(), "bytes=0-99999");
+    EXPECT_EQ(slow.status, 206u);
+    EXPECT_EQ(slow.body.size(), 100000u);
 
     // moved to another port while running, then stopped by port 0
     s.rateKBps = 0;

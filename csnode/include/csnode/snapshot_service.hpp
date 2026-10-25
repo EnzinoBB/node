@@ -2,6 +2,7 @@
 #define SNAPSHOT_SERVICE_HPP
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <filesystem>
 #include <memory>
@@ -42,6 +43,9 @@ private:
     std::thread thread_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> buildPending_{true};
+    static constexpr int kMaxBuildAttempts = 5;
+    int failedBuilds_ = 0;
+    std::chrono::steady_clock::time_point retryAt_{};
     std::mutex m_;
     std::condition_variable cv_;
 };

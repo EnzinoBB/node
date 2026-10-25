@@ -90,12 +90,14 @@ public:
     void setRate(size_t kBps) {
         std::lock_guard<std::mutex> lock(m_);
         rate_ = static_cast<double>(kBps) * 1000.0;
-        tokens_ = std::min(tokens_, rate_);
+        tokens_ = 0;
+        last_ = std::chrono::steady_clock::now();
     }
-    // waits until n bytes may be sent; false when the server stops meanwhile
-    bool take(size_t n, const std::atomic<bool>& stopping) {
+    // waits until n bytes may be sent; a piece larger than a second's worth is let through as soon as
+    // the bucket is not in debt, and leaves it in debt. false when the server stops or the deadline passes
+    bool take(size_t n, const std::atomic<bool>& stopping, std::chrono::steady_clock::time_point deadline) {
         for (;;) {
-            if (stopping) {
+            if (stopping || std::chrono::steady_clock::now() >= deadline) {
                 return false;
             }
             std::unique_lock<std::mutex> lock(m_);
@@ -105,11 +107,12 @@ public:
             const auto now = std::chrono::steady_clock::now();
             tokens_ = std::min(rate_, tokens_ + rate_ * std::chrono::duration<double>(now - last_).count());
             last_ = now;
-            if (tokens_ >= static_cast<double>(n)) {
+            const double need = std::min(static_cast<double>(n), rate_);
+            if (tokens_ >= need) {
                 tokens_ -= static_cast<double>(n);
                 return true;
             }
-            const double wait = (static_cast<double>(n) - tokens_) / rate_;
+            const double wait = (need - tokens_) / rate_;
             lock.unlock();
             std::this_thread::sleep_for(std::chrono::duration<double>(std::min(wait, 0.2)));
         }
@@ -181,6 +184,7 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
     std::unique_ptr<tcp::acceptor> acceptor;
     std::thread acceptThread;
     std::atomic<bool> stopping{false};
+    Settings lastFailure;
 
     std::shared_ptr<const Loaded> current() {
         std::lock_guard<std::mutex> lock(loadedLock);
@@ -192,7 +196,8 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             return true;
         }
         const auto [lastBlock, round] = syncedTo();
-        return lastBlock > 0 && round <= lastBlock + kSyncedRounds;
+        // round 0: the node has not heard the network yet (a restart, a firewall), not synced
+        return lastBlock > 0 && round > 0 && round <= lastBlock + kSyncedRounds;
     }
 
     template <class Body>
@@ -219,11 +224,12 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             http::response<http::string_body> res{status, req.version()};
             res.set(http::field::content_type, "text/plain");
             if (retry) res.set(http::field::retry_after, "30");
-            res.body() = text + "\n";
-            finish(res, keepAlive);
+            const bool head = req.method() == http::verb::head;
+            res.body() = head ? std::string{} : text + "\n";
+            finish(res, keepAlive && !head);
             boost::system::error_code ec;
             http::write(socket, res, ec);
-            return !ec && keepAlive;
+            return !ec && keepAlive && !head;
         };
         if (req.method() != http::verb::get && req.method() != http::verb::head) {
             return simple(http::status::method_not_allowed, "GET or HEAD only");
@@ -320,9 +326,11 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             if (static_cast<size_t>(in.gcount()) != n) {
                 return false;
             }
-            if (!bucket.take(n, stopping)) {
+            if (!bucket.take(n, stopping, usage.end)) {
                 return false;
             }
+            // the wait for the bandwidth cap is not the reader's: the write deadline starts after it
+            setDeadline(socketPtr, std::chrono::seconds(kWriteTimeoutSec));
             const auto t0 = std::chrono::steady_clock::now();
             asio::write(socket, asio::buffer(buffer.data(), n), ec);
             if (ec) {
@@ -467,9 +475,15 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             return 0;
         }
         acceptor = std::make_unique<tcp::acceptor>(io);
-        const tcp::endpoint endpoint(address, s.port);
+        tcp::endpoint endpoint(address, s.port);
         acceptor->open(endpoint.protocol(), ec);
-        if (!ec && address.is_v6()) {
+        if (ec && s.bind.empty()) {
+            // a host without IPv6 (common in containers): every IPv4 interface
+            ec.clear();
+            endpoint = tcp::endpoint(asio::ip::address_v4::any(), s.port);
+            acceptor->open(endpoint.protocol(), ec);
+        }
+        if (!ec && endpoint.address().is_v6()) {
             acceptor->set_option(asio::ip::v6_only(false), ec);
             ec.clear();
         }
@@ -478,10 +492,14 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
         if (!ec) acceptor->listen(asio::socket_base::max_listen_connections, ec);
         if (!ec) acceptor->non_blocking(true, ec);
         if (ec) {
-            cserror() << "SNAPSHOT: cannot listen on " << (s.bind.empty() ? "port " : s.bind + ":") << s.port << ": " << ec.message();
+            if (!(lastFailure == s)) {   // once per setting, not every 10 s
+                cserror() << "SNAPSHOT: cannot listen on " << (s.bind.empty() ? "port " : s.bind + ":") << s.port << ": " << ec.message();
+                lastFailure = s;
+            }
             acceptor.reset();
             return 0;
         }
+        lastFailure = Settings{};
         const uint16_t bound = acceptor->local_endpoint(ec).port();
         acceptThread = std::thread([this]() { acceptLoop(); });
         return bound;

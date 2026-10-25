@@ -1065,6 +1065,16 @@ void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
     }
 }
 
+bool BlockChain::blockBytes(cs::Sequence sequence, cs::Bytes& out) const {
+    std::lock_guard lock(dbLock_);
+    return storage_.pool_bytes(sequence, out);
+}
+
+cs::Sequence BlockChain::pruneTarget() const {
+    std::lock_guard lock(dbLock_);
+    return pruneUpTo_;
+}
+
 bool BlockChain::forEachContractData(const std::function<bool(const cs::Bytes& key, const cs::Bytes& value)>& fn) const {
     return storage_.forEachContractData(fn);
 }

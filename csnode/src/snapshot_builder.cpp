@@ -333,6 +333,9 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
         Lz4Writer w(tmp / f.name, m.chunkSize);
         std::vector<uint8_t> piece(snapshot_lz4::kBlockSize);
         while (in) {
+            if (stopped(input)) {
+                return failWith("stopped");
+            }
             in.read(reinterpret_cast<char*>(piece.data()), static_cast<std::streamsize>(piece.size()));
             const auto n = in.gcount();
             if (n > 0) {

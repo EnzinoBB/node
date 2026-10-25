@@ -70,6 +70,7 @@ void SnapshotService::stop() {
 
 void SnapshotService::onCheckpointSaved(cs::Sequence sequence) {
     (void)sequence;
+    failedBuilds_ = 0;
     buildPending_ = true;
     cv_.notify_all();
 }
@@ -79,13 +80,17 @@ void SnapshotService::run() {
     ::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 10);
     server_->reload();
     while (!stop_) {
-        const auto& cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
+        const auto cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();   // a copy: the observer may swap the config
         SnapshotServer::Settings settings;
         settings.bind = cfg.serveBind;
         settings.port = cfg.servePort;
         settings.maxConnections = cfg.serveMaxConnections;
         settings.rateKBps = cfg.serveRateKbps;
         server_->apply(settings);
+        if (settings.port != 0 && retryAt_ != std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now() >= retryAt_) {
+            retryAt_ = {};
+            buildPending_ = true;
+        }
         if (settings.port != 0 && buildPending_.exchange(false)) {
             buildLatest();
         }
@@ -100,33 +105,46 @@ void SnapshotService::buildLatest() {
     if (S == 0 || fs::exists(root_ / std::to_string(S) / "snapshot.json", ec)) {
         return;   // nothing new: no checkpoint with a digest yet, or already built
     }
-    const auto& cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
+    const auto cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
     SnapshotBuildInput in;
     in.seq = S;
     in.checkpointDir = fs::path("qs") / std::to_string(S);
-    in.firstStored = blockchain_.getFirstStoredSequence();
+    // pruning may be removing the lowest blocks right now (it follows the same checkpoint): start above it
+    in.firstStored = std::max(blockchain_.getFirstStoredSequence(), blockchain_.pruneTarget());
     in.snapshotBlocks = cfg.snapshotBlocks;
     in.nodeVersion = nodeVersion_;
     in.stop = &stop_;
     in.blockBytes = [this](cs::Sequence seq, cs::Bytes& out) {
-        const csdb::Pool pool = blockchain_.loadBlock(seq);
-        if (!pool.is_valid()) {
-            return false;
-        }
-        out = pool.to_binary();
-        return !out.empty();
+        return blockchain_.blockBytes(seq, out) && !out.empty();
     };
     // no contract records: the contracts database holds the latest state of each contract, later than
     // S, while the signed snapshot is the state at S; the checkpoint carries the states at S
     // (smartcontracts.dat) and the node fetches any it lacks from the confidants
     fs::create_directories(root_, ec);
+    // the node's own database shares the disk: a build that could fill it is not started
+    uint64_t estimate = 512ull << 20;
+    for (const auto& entry : fs::directory_iterator(in.checkpointDir, ec)) {
+        estimate += entry.is_regular_file(ec) ? entry.file_size(ec) / 4 : 0;
+    }
+    const auto space = fs::space(root_, ec);
+    if (!ec && space.available < 2 * estimate) {
+        cswarning() << "SNAPSHOT: not enough free disk for the snapshot of checkpoint " << S << " (" << space.available / (1u << 20)
+                    << " MB free, about " << estimate / (1u << 20) << " MB needed twice)";
+        return;
+    }
     cslog() << "SNAPSHOT: building the snapshot of checkpoint " << S;
     const auto started = std::chrono::steady_clock::now();
     const auto r = buildSnapshot(in, root_, key_);
     if (!r.ok) {
-        cswarning() << "SNAPSHOT: no snapshot of checkpoint " << S << ": " << r.error;
+        // tried again a few times a minute apart (the block range may have been pruned under it)
+        const bool retry = !stop_ && ++failedBuilds_ < kMaxBuildAttempts;
+        cswarning() << "SNAPSHOT: no snapshot of checkpoint " << S << ": " << r.error << (retry ? ", trying again in a minute" : "");
+        if (retry) {
+            retryAt_ = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+        }
         return;
     }
+    failedBuilds_ = 0;
     uint64_t bytes = 0;
     for (const auto& f : r.manifest.files) {
         bytes += f.size;

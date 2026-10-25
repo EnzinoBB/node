@@ -95,6 +95,10 @@ public:
     // pruned storage ([storage] prune_keep_blocks): the blocks before getFirstStoredSequence() were
     // removed once a later periodic checkpoint made them unnecessary
     cs::Sequence getFirstStoredSequence() const;
+    // the stored bytes of a block, under the storage lock, for a snapshot: no parsing, no pool cache
+    bool blockBytes(cs::Sequence sequence, cs::Bytes& out) const;
+    // pruned storage: the blocks below this one are being or will be removed (0: nothing scheduled)
+    cs::Sequence pruneTarget() const;
     // every contract record of the storage, for a snapshot of the node's state
     bool forEachContractData(const std::function<bool(const cs::Bytes& key, const cs::Bytes& value)>& fn) const;
 
