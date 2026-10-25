@@ -40,6 +40,20 @@ TEST(SnapshotMessages, ManifestRequestRoundTrip) {
     expectTruncationsRefused<ManifestRequest>(encode(in));
 }
 
+TEST(SnapshotMessages, ManifestRequestVersions) {
+    ManifestRequest out;
+    cs::Bytes current{kProtocol};
+    EXPECT_TRUE(decodeBytes(current, out));
+    current.push_back(0);
+    EXPECT_FALSE(decodeBytes(current, out));
+    // a later protocol with more fields is read
+    cs::Bytes later{2, 9, 9, 9};
+    ASSERT_TRUE(decodeBytes(later, out));
+    EXPECT_EQ(out.protocol, 2);
+    cs::Bytes zero{0};
+    EXPECT_FALSE(decodeBytes(zero, out));
+}
+
 TEST(SnapshotMessages, ManifestReplyRoundTrip) {
     ManifestReply in;
     in.status = ManifestStatus::Ready;

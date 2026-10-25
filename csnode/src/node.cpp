@@ -2145,7 +2145,6 @@ void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
     }
 }
 
-// thread safe slot (called from poolSynchronizer_)
 void Node::sendSnapshotMessage(const cs::PublicKey& target, MsgTypes type, const cs::Bytes& payload) {
     // the payload goes as it is: lz4 files and JSON, nothing to gain from the packet compression
     cs::Bytes packetBytes;
@@ -2206,6 +2205,7 @@ void Node::getSnapshotPieceReply(const uint8_t* data, const size_t size, const c
     logSnapshotDrop(snapshotMessagesDropped_, "an unexpected piece reply", sender);
 }
 
+// thread safe slot (called from poolSynchronizer_)
 void Node::sendBlockRequest(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
     status_ = cs::NodeStatus::Synchronization;
     const auto round = cs::Conveyer::instance().currentRoundNumber();
@@ -2253,6 +2253,11 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         case MsgTypes::BlockAlarm:
         case MsgTypes::EventReport:
         case MsgTypes::SyncroMsg:
+        // answered or dropped whatever the round: a joining node is at round 0
+        case MsgTypes::SnapshotManifestRequest:
+        case MsgTypes::SnapshotManifestReply:
+        case MsgTypes::SnapshotPieceRequest:
+        case MsgTypes::SnapshotPieceReply:
             return MessageActions::Process;
 
         default:
@@ -2285,11 +2290,6 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         return MessageActions::Process;
     }
 
-    if (type == MsgTypes::SnapshotManifestRequest || type == MsgTypes::SnapshotManifestReply ||
-        type == MsgTypes::SnapshotPieceRequest || type == MsgTypes::SnapshotPieceReply) {
-        // answered or dropped whatever the round: a joining node is at round 0
-        return MessageActions::Process;
-    }
 
     if (type == MsgTypes::RoundTableReply) {
         return (rNum >= round ? MessageActions::Process : MessageActions::Drop);

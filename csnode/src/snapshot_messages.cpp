@@ -8,9 +8,8 @@
 namespace cs::snapshot_p2p {
 
 namespace {
-// Reads the network payload with every length checked against what is left. IDataStream's
-// parseString/parseVector are not used here: their bound check adds a length taken from the
-// packet to the read position, which a length near 2^64 wraps.
+// A small reader with an explicit limit for every field; every length is checked against the bytes
+// left before anything is read or allocated.
 class Reader {
 public:
     Reader(const uint8_t* data, size_t size)
@@ -104,7 +103,11 @@ bool decode(const uint8_t* data, size_t size, ManifestRequest& message) {
     }
     Reader reader(data, size);
     ManifestRequest result;
-    if (!reader.value(result.protocol) || !reader.atEnd()) {
+    if (!reader.value(result.protocol) || result.protocol == 0) {
+        return false;
+    }
+    // a later protocol may append fields: the request is still read, the reply says what this node speaks
+    if (result.protocol == kProtocol && !reader.atEnd()) {
         return false;
     }
     message = result;
