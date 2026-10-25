@@ -38,6 +38,9 @@ TEST(SnapshotAgreement, NetPrefix) {
     EXPECT_EQ(cs::netPrefix("2001:db8:1::1"), "2001:db8:1::/48");
     EXPECT_EQ(cs::netPrefix(""), "");
     EXPECT_EQ(cs::netPrefix("not an address"), "");
+    EXPECT_EQ(cs::netBlock("10.1.2.3:6000"), "10.1");
+    EXPECT_EQ(cs::netBlock("2001:db8:1:2::1"), "2001:db8::/32");
+    EXPECT_EQ(cs::netBlock(""), "");
 }
 
 TEST(SnapshotAgreement, Threshold) {
@@ -99,11 +102,17 @@ TEST(SnapshotAgreement, Ipv6Slash48) {
     EXPECT_EQ(r.chosen->keys.size(), 3u);
 }
 
-TEST(SnapshotAgreement, UnknownAddressesCountTogether) {
-    const std::vector<cs::SourceManifest> v{source(1, "", 1000), source(2, "", 1000), source(3, "garbage", 1000)};
-    const auto r = cs::agree(v, 2);
+TEST(SnapshotAgreement, UnknownAddressesDoNotCount) {
+    std::vector<cs::SourceManifest> v{source(1, "", 1000), source(2, "garbage", 1000), source(3, "10.0.3.1", 1000)};
+    auto r = cs::agree(v, 2);
     EXPECT_FALSE(r.chosen);
     EXPECT_EQ(r.groups[0].independent, 1u);
+    EXPECT_EQ(r.groups[0].keys.size(), 3u);
+    // a trusted key counts by key whatever its address
+    v[0].trusted = true;
+    r = cs::agree(v, 2);
+    ASSERT_TRUE(r.chosen);
+    EXPECT_EQ(r.chosen->independent, 2u);
 }
 
 TEST(SnapshotAgreement, SameKeyCountsOnce) {

@@ -465,7 +465,7 @@ TEST(SnapshotFetcher, FullTableMakesRoomForANewPrefix) {
             k.fill(0x50);
             k[0] = static_cast<uint8_t>(p);
             k[1] = static_cast<uint8_t>(i);
-            net.addresses[k] = "10.8." + std::to_string(p) + "." + std::to_string(i + 1);
+            net.addresses[k] = "10." + std::to_string(100 + p) + ".0." + std::to_string(i + 1);
             net.peers.known.emplace_back(k, cs::hostdata::kSnapshotProtocolV1);
         }
     }
@@ -483,6 +483,76 @@ TEST(SnapshotFetcher, FullTableMakesRoomForANewPrefix) {
     EXPECT_EQ(net.addCalls[1].count(net.key(Snapshots::A2)), 1u);
     net.peers.neighbours.insert(net.key(Snapshots::A1));
     net.peers.neighbours.insert(net.key(Snapshots::A2));
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+}
+
+// 64 keys over 64 networks that never answer do not keep a new honest peer out
+TEST(SnapshotFetcher, SilentSpreadKeysDoNotLockNewcomersOut) {
+    TmpDir tmp("spreadkeys");
+    Net net;
+    for (int p = 0; p < 64; ++p) {
+        cs::PublicKey k{};
+        k.fill(0x60);
+        k[0] = static_cast<uint8_t>(p);
+        net.addresses[k] = std::to_string(20 + p) + "." + std::to_string(p) + ".0.1";
+        net.peers.known.emplace_back(k, cs::hostdata::kSnapshotProtocolV1);
+        net.peers.neighbours.insert(k);
+    }
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    net.step(fetcher);
+    // a full table makes room at once, before anything has had time to answer
+    net.add(Snapshots::A1, false);
+    net.step(fetcher);
+    ASSERT_FALSE(net.addCalls.empty());
+    EXPECT_EQ(net.addCalls.back().count(net.key(Snapshots::A1)), 1u);
+    net.peers.neighbours.insert(net.key(Snapshots::A1));
+    for (int i = 0; i < 610; ++i) {   // the others asked, never answering, for a minute
+        net.step(fetcher);
+    }
+    EXPECT_EQ(fetcher.phase(), Phase::Collect);
+    EXPECT_EQ(fetcher.manifests(), 1u);
+    net.add(Snapshots::A2);
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+}
+
+// an address not known yet: no cap at discovery, no vote until it is known; the cap is applied
+// to the address resolved when the manifest arrives
+TEST(SnapshotFetcher, UnknownAddresses) {
+    TmpDir tmp("unknownaddr");
+    Net net;
+    for (auto i : {Snapshots::A1, Snapshots::A2, Snapshots::B, Snapshots::D, Snapshots::E}) {
+        net.add(i).address.clear();
+    }
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    fetcher.tick(net.peers);
+    EXPECT_EQ(net.manifestQueue.size(), 5u);   // five unknown addresses, none refused
+    net.step(fetcher);
+    EXPECT_EQ(fetcher.manifests(), 5u);
+    for (int i = 0; i < 10; ++i) {
+        net.step(fetcher);
+    }
+    EXPECT_EQ(fetcher.phase(), Phase::Collect);   // nothing counts without an address
+    EXPECT_FALSE(fetcher.groups().empty());
+    EXPECT_EQ(fetcher.groups()[0].independent, 0u);
+
+    // all five turn out to be in one /24: four are kept, they count once
+    int n = 1;
+    for (auto& [key, source] : net.sources) {
+        source.address = "10.0.7." + std::to_string(n++);
+    }
+    net.nowMs += SnapshotFetcher::kManifestIntervalMs;
+    fetcher.tick(net.peers);
+    net.deliver(fetcher);
+    EXPECT_EQ(fetcher.manifests(), 4u);
+    EXPECT_TRUE(net.logged("too many sources at 10.0.7"));
+    fetcher.tick(net.peers);
+    EXPECT_EQ(fetcher.phase(), Phase::Collect);   // one network: one source
+
+    // known in different networks, they agree
+    n = 1;
+    for (auto& [key, source] : net.sources) {
+        source.address = "10.0." + std::to_string(n++) + ".1";
+    }
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
 }
 

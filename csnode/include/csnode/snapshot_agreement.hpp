@@ -26,6 +26,8 @@ struct SourceManifest {
 // IPv6 one ("2001:db8:1::/48"); an IPv4-mapped IPv6 address counts as IPv4. A port after the
 // address (a.b.c.d:port, [v6]:port) is ignored. Empty for an address that does not parse.
 std::string netPrefix(const std::string& address);
+// the wider block around it: /16 for IPv4, /32 for IPv6; empty when the address does not parse
+std::string netBlock(const std::string& address);
 
 // sources declaring one (seq, head_hash, state_digest, settings_digest)
 struct AgreementGroup {
@@ -56,7 +58,7 @@ struct AgreementResult {
 // sources at a made-up later block do not beat a larger honest group; an honest network's newest
 // snapshot gains sources as the nodes rebuild, and the fetcher asks again every 30 s). Two groups
 // equal on all three are a conflict: nothing is chosen. Sources are counted by netPrefix(address),
-// trusted ones by key; sources whose address does not parse count together as one; a key that
+// trusted ones by key; a source whose address is unknown or does not parse does not count; a key that
 // appears twice counts once. Every group that is not chosen carries the reason.
 AgreementResult agree(const std::vector<SourceManifest>& sources, size_t minSources);
 

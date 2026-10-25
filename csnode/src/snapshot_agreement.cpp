@@ -31,13 +31,15 @@ std::string unitOf(const SourceManifest& s) {
         return "key:" + EncodeBase58(s.key.data(), s.key.data() + s.key.size());
     }
     const auto prefix = netPrefix(s.address);
-    return prefix.empty() ? std::string("unknown address") : "net:" + prefix;
+    return prefix.empty() ? std::string() : "net:" + prefix;
 }
 
 size_t countUnits(const std::vector<size_t>& indices, const std::vector<std::string>& units) {
     std::set<std::string> distinct;
     for (auto i : indices) {
-        distinct.insert(units[i]);
+        if (!units[i].empty()) {   // an address not known (yet) is no evidence of independence
+            distinct.insert(units[i]);
+        }
     }
     return distinct.size();
 }
@@ -47,7 +49,9 @@ std::string shortHex(const std::string& hex) {
 }
 }  // namespace
 
-std::string netPrefix(const std::string& address) {
+namespace {
+// the prefix of the given length in bits (24 or 16 for IPv4 addresses, 48 or 32 for IPv6)
+std::string prefixOf(const std::string& address, bool wide) {
     boost::system::error_code ec;
     auto ip = boost::asio::ip::make_address(hostPart(address), ec);
     if (ec) {
@@ -58,11 +62,21 @@ std::string netPrefix(const std::string& address) {
     }
     if (ip.is_v4()) {
         const auto b = ip.to_v4().to_bytes();
-        return std::to_string(b[0]) + "." + std::to_string(b[1]) + "." + std::to_string(b[2]);
+        return wide ? std::to_string(b[0]) + "." + std::to_string(b[1])
+                    : std::to_string(b[0]) + "." + std::to_string(b[1]) + "." + std::to_string(b[2]);
     }
     auto b = ip.to_v6().to_bytes();
-    std::fill(b.begin() + 6, b.end(), 0);
-    return boost::asio::ip::address_v6(b).to_string() + "/48";
+    std::fill(b.begin() + (wide ? 4 : 6), b.end(), 0);
+    return boost::asio::ip::address_v6(b).to_string() + (wide ? "/32" : "/48");
+}
+}  // namespace
+
+std::string netPrefix(const std::string& address) {
+    return prefixOf(address, false);
+}
+
+std::string netBlock(const std::string& address) {
+    return prefixOf(address, true);
 }
 
 AgreementResult agree(const std::vector<SourceManifest>& sources, size_t minSources) {

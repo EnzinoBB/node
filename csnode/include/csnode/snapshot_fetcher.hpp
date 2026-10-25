@@ -63,6 +63,9 @@ public:
     static constexpr size_t kPiecesTotal = 8;
     static constexpr size_t kMaxSources = 64;        // discovered sources; configured keys come on top
     static constexpr size_t kMaxPerPrefix = 4;       // discovered sources per /24 (IPv4) or /48 (IPv6)
+    static constexpr size_t kMaxPerBlock = 16;       // discovered sources per /16 (IPv4) or /32 (IPv6)
+    static constexpr uint64_t kEvictedMs = 600'000;  // an evicted or silent key is not taken again before
+    static constexpr size_t kMaxEvicted = 1024;
     static constexpr size_t kMaxAttempts = 3;
     static constexpr size_t kMaxSourcesFileKeys = 64;
 
@@ -101,7 +104,9 @@ private:
         bool configured = false;      // [snapshot] sources or sources_file
         bool trusted = false;         // [snapshot] sources
         bool serving = false;         // announced capability bit 24
-        std::string prefix;           // netPrefix of the address when discovered
+        std::string prefix;           // netPrefix and netBlock of the address, empty while unknown;
+        std::string block;            // resolved again when a manifest arrives
+        bool everAnswered = false;
         uint64_t discoveredAt = 0;
         uint64_t addedAt = 0;         // last addNeighbours
         bool added = false;
@@ -143,6 +148,10 @@ private:
     Source* findSource(const cs::PublicKey& key);
     Source* addConfigured(const cs::PublicKey& key);
     Source* addDiscovered(const cs::PublicKey& key, uint64_t t);
+    bool roomFor(const cs::PublicKey& key, const std::string& prefix, const std::string& block) const;
+    bool evictOne(uint64_t t);
+    bool silent(const Source& s, uint64_t t) const;
+    void evict(std::map<cs::PublicKey, Source>::iterator it, uint64_t t);
     bool isProtected(const cs::PublicKey& key, const Source& s) const;
     void loadSourcesFile();
 
@@ -182,6 +191,7 @@ private:
     uint64_t startedAt_ = 0;
     std::map<cs::PublicKey, Source> sources_;
     std::set<cs::PublicKey> neighbours_;   // as of the last tick
+    std::map<cs::PublicKey, uint64_t> evicted_;   // discovered keys let go, and when
 
     AgreementResult agreement_;
     std::vector<SourceManifest> agreedSources_;

@@ -118,51 +118,111 @@ bool SnapshotFetcher::isProtected(const cs::PublicKey& key, const Source& s) con
                                                  [&](const SourceManifest& m) { return m.key == key; });
 }
 
+bool SnapshotFetcher::roomFor(const cs::PublicKey& key, const std::string& prefix, const std::string& block) const {
+    // an address not known yet is not capped here: it is resolved and checked again with its manifest
+    size_t samePrefix = 0;
+    size_t sameBlock = 0;
+    for (const auto& [k, s] : sources_) {
+        if (k == key || s.configured) {
+            continue;
+        }
+        samePrefix += !prefix.empty() && s.prefix == prefix;
+        sameBlock += !block.empty() && s.block == block;
+    }
+    return samePrefix < kMaxPerPrefix && sameBlock < kMaxPerBlock;
+}
+
 SnapshotFetcher::Source* SnapshotFetcher::addDiscovered(const cs::PublicKey& key, uint64_t t) {
     if (auto* s = findSource(key)) {
         return s;
     }
-    // peer keys cost nothing: discovered sources are limited per /24 (/48) and in all, so that one
-    // network cannot fill the table; when it is full the oldest entry of the most represented
-    // prefix makes room, unless the newcomer's prefix would become as represented
-    std::string prefix = netPrefix(hooks_.addressOf ? hooks_.addressOf(key) : std::string());
-    if (prefix.empty()) {
-        prefix = "unknown";
+    if (auto e = evicted_.find(key); e != evicted_.end()) {
+        if (t - e->second < kEvictedMs) {
+            return nullptr;
+        }
+        evicted_.erase(e);
     }
-    std::map<std::string, size_t> perPrefix;
+    // peer keys cost nothing: discovered sources are limited per /24 (/48), per /16 (/32) and in
+    // all, so that no network can fill the table
+    const std::string address = hooks_.addressOf ? hooks_.addressOf(key) : std::string();
+    const std::string prefix = netPrefix(address);
+    const std::string block = netBlock(address);
+    if (!roomFor(key, prefix, block)) {
+        return nullptr;
+    }
     size_t discovered = 0;
+    for (const auto& [k, s] : sources_) {
+        discovered += !s.configured;
+    }
+    if (discovered >= kMaxSources && !evictOne(t)) {
+        return nullptr;
+    }
+    auto& s = sources_[key];
+    s.address = address;
+    s.prefix = prefix;
+    s.block = block;
+    s.discoveredAt = t;
+    return &s;
+}
+
+bool SnapshotFetcher::silent(const Source& s, uint64_t t) const {
+    return !s.configured && s.everAsked && !s.everAnswered && t - s.discoveredAt > kMarkMs;
+}
+
+void SnapshotFetcher::evict(std::map<cs::PublicKey, Source>::iterator it, uint64_t t) {
+    // an evicted key is not taken again for a while, so that keys that come back at every tick
+    // cannot churn the table
+    if (evicted_.size() >= kMaxEvicted) {
+        auto oldest = std::min_element(evicted_.begin(), evicted_.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        evicted_.erase(oldest);
+    }
+    evicted_[it->first] = t;
+    sources_.erase(it);
+}
+
+bool SnapshotFetcher::evictOne(uint64_t t) {
+    // the least useful discovered source makes room, whatever its prefix: one that is not a
+    // neighbour now, then one that never answered in a minute, then one without a manifest after
+    // a minute, then one without a manifest in the most represented prefix, then the oldest of the
+    // most represented prefix; never a configured source, one with pieces outstanding or one of the
+    // agreed group during a fetch
+    std::map<std::string, size_t> perPrefix;
     for (const auto& [k, s] : sources_) {
         if (!s.configured) {
             ++perPrefix[s.prefix];
-            ++discovered;
         }
     }
-    if (perPrefix[prefix] >= kMaxPerPrefix) {
-        return nullptr;
+    size_t most = 0;
+    for (const auto& [prefix, n] : perPrefix) {
+        most = std::max(most, n);
     }
-    if (discovered >= kMaxSources) {
-        auto most = std::max_element(perPrefix.begin(), perPrefix.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
-        if (most->second <= perPrefix[prefix] + 1) {
-            return nullptr;
+    auto tier = [&](const cs::PublicKey& key, const Source& s) {
+        const bool old = t - s.discoveredAt > kMarkMs;
+        const bool crowded = perPrefix[s.prefix] == most;
+        if (neighbours_.count(key) == 0) return 0;
+        if (silent(s, t)) return 1;
+        if (old && !s.manifest) return 2;
+        if (crowded && !s.manifest) return 3;
+        if (crowded) return 4;
+        return 5;
+    };
+    auto victim = sources_.end();
+    int victimTier = 5;
+    for (auto it = sources_.begin(); it != sources_.end(); ++it) {
+        if (isProtected(it->first, it->second)) {
+            continue;
         }
-        auto victim = sources_.end();
-        for (auto it = sources_.begin(); it != sources_.end(); ++it) {
-            if (it->second.configured || it->second.prefix != most->first || isProtected(it->first, it->second)) {
-                continue;
-            }
-            if (victim == sources_.end() || it->second.discoveredAt < victim->second.discoveredAt) {
-                victim = it;
-            }
+        const int k = tier(it->first, it->second);
+        if (k < victimTier || (k == victimTier && victim != sources_.end() && it->second.discoveredAt < victim->second.discoveredAt)) {
+            victim = it;
+            victimTier = k;
         }
-        if (victim == sources_.end()) {
-            return nullptr;
-        }
-        sources_.erase(victim);
     }
-    auto& s = sources_[key];
-    s.prefix = prefix;
-    s.discoveredAt = t;
-    return &s;
+    if (victim == sources_.end()) {
+        return false;
+    }
+    evict(victim, t);
+    return true;
 }
 
 void SnapshotFetcher::loadSourcesFile() {
@@ -249,6 +309,14 @@ void SnapshotFetcher::tick(const Peers& peers) {
 }
 
 void SnapshotFetcher::discover(const Peers& peers, uint64_t t) {
+    // discovered sources that never answered a manifest request in a minute are let go
+    for (auto it = sources_.begin(); it != sources_.end();) {
+        auto next = std::next(it);
+        if (silent(it->second, t) && !isProtected(it->first, it->second)) {
+            evict(it, t);
+        }
+        it = next;
+    }
     for (const auto& [key, capabilities] : peers.known) {
         if ((capabilities & cs::hostdata::kSnapshotProtocolV1) == 0) {
             continue;
@@ -309,6 +377,7 @@ void SnapshotFetcher::onManifestReply(const cs::PublicKey& sender, const snapsho
         return;
     }
     s->awaiting = false;
+    s->everAnswered = true;
     const uint64_t t = now();
     if (reply.status != snapshot_p2p::ManifestStatus::Ready) {
         // not serving, not synced or still building: whatever it declared before is not served now
@@ -335,10 +404,22 @@ void SnapshotFetcher::onManifestReply(const cs::PublicKey& sender, const snapsho
         log("SNAPSHOT: manifest from " + keyText(sender) + " dropped: " + why, true);
         return;
     }
+    // the address the table limits and the agreement count are taken from, resolved again now
+    const std::string address = hooks_.addressOf ? hooks_.addressOf(sender) : std::string();
+    const std::string prefix = netPrefix(address);
+    const std::string block = netBlock(address);
+    if (!s->configured && !roomFor(sender, prefix, block)) {
+        ++dropped_;
+        log("SNAPSHOT: manifest from " + keyText(sender) + " dropped: too many sources at " + prefix);
+        sources_.erase(sender);
+        return;
+    }
+    s->address = address;
+    s->prefix = prefix;
+    s->block = block;
     s->filesHash = manifest->filesHash();
     s->manifest = std::move(manifest);
     s->manifestAt = t;
-    s->address = hooks_.addressOf ? hooks_.addressOf(sender) : std::string();
     // agreement is tried at the next tick, so that the replies to one round of requests count together
 }
 
