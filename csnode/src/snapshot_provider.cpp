@@ -15,7 +15,7 @@ namespace cs {
 
 namespace {
 namespace fs = std::filesystem;
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 bool fail(std::string* error, const std::string& text) {
     if (error) {
@@ -28,7 +28,7 @@ bool powerOfTwo(uint64_t v) {
     return v != 0 && (v & (v - 1)) == 0;
 }
 
-uint32_t msUntil(Clock::time_point now, Clock::time_point when) {
+uint32_t msUntil(SteadyClock::time_point now, SteadyClock::time_point when) {
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(when - now).count();
     return static_cast<uint32_t>(std::clamp<int64_t>(ms, 1, SnapshotProvider::kMaxRetryMs));
 }
@@ -55,7 +55,7 @@ struct SnapshotProvider::Loaded {
     }
 };
 
-bool SnapshotProvider::Bucket::take(double cost, double rate, double burst, Clock::time_point now, uint32_t& retryMs) {
+bool SnapshotProvider::Bucket::take(double cost, double rate, double burst, SteadyClock::time_point now, uint32_t& retryMs) {
     const double elapsed = std::chrono::duration<double>(now - at).count();
     tokens = std::min(burst, tokens + std::max(0.0, elapsed) * rate);
     at = now;
@@ -154,7 +154,7 @@ std::optional<cs::Sequence> SnapshotProvider::loadedSeq() const {
     return loaded_->manifest.seq;
 }
 
-SnapshotProvider::Peer& SnapshotProvider::peer(const cs::PublicKey& key, Clock::time_point now) {
+SnapshotProvider::Peer& SnapshotProvider::peer(const cs::PublicKey& key, SteadyClock::time_point now) {
     auto it = peers_.find(key);
     if (it == peers_.end()) {
         if (peers_.size() >= kMaxPeers) {
@@ -168,10 +168,10 @@ SnapshotProvider::Peer& SnapshotProvider::peer(const cs::PublicKey& key, Clock::
     return it->second;
 }
 
-size_t SnapshotProvider::activePeers(Clock::time_point now, const cs::PublicKey& except) const {
+size_t SnapshotProvider::activePeers(SteadyClock::time_point now, const cs::PublicKey& except) const {
     size_t n = 0;
     for (const auto& [key, p] : peers_) {
-        if (key != except && p.lastPiece != Clock::time_point{} && now - p.lastPiece < kPeerWindow) {
+        if (key != except && p.lastPiece != SteadyClock::time_point{} && now - p.lastPiece < kPeerWindow) {
             ++n;
         }
     }
@@ -268,7 +268,7 @@ snapshot_p2p::PieceReply SnapshotProvider::onPieceRequest(const cs::PublicKey& s
     const auto length = static_cast<size_t>(std::min<uint64_t>(chunkSize, file->second.size - offset));
 
     auto& p = peer(sender, now);
-    const bool active = p.lastPiece != Clock::time_point{} && now - p.lastPiece < kPeerWindow;
+    const bool active = p.lastPiece != SteadyClock::time_point{} && now - p.lastPiece < kPeerWindow;
     if (!active && activePeers(now, sender) >= std::max<size_t>(settings.maxPeers, 1)) {
         return busy(kMaxRetryMs);
     }
