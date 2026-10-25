@@ -27,6 +27,10 @@
 class Transport;
 
 namespace cs {
+class SnapshotService;
+}
+
+namespace cs {
 class SolverCore;
 }
 
@@ -485,6 +489,7 @@ private:
 
 #ifdef NODE_API
     std::unique_ptr<csconnector::connector> api_;
+    std::unique_ptr<cs::SnapshotService> snapshotService_;
 #endif
 
     uint32_t startPacketRequestPoint_ = 0;

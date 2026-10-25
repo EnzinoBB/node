@@ -40,7 +40,9 @@
 
 #include <cscrypto/cscrypto.hpp>
 
+#include <fstream>
 #include <observer.hpp>
+#include <csnode/snapshot_service.hpp>
 #include <numeric>
 
 namespace {
@@ -258,6 +260,23 @@ bool Node::init() {
     api_->run();
 #endif  // NODE_API
 
+    // snapshots served by this node: [snapshot] serve_port, read again every 10 s (off by default)
+    {
+        std::string version;
+        std::ifstream versionFile("VERSION");
+        if (!versionFile || !std::getline(versionFile, version) || version.empty() || version.size() > 64) {
+            version = "4.2." + std::to_string(Config::getNodeVersion());
+        }
+        for (auto& c : version) {
+            if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
+                c = '_';
+            }
+        }
+        snapshotService_ = std::make_unique<cs::SnapshotService>(blockChain_, solver_->getPrivateKey(), version);
+        cs::Connector::connect(&blockChain_.checkpointSavedEvent, snapshotService_.get(), &cs::SnapshotService::onCheckpointSaved);
+        snapshotService_->start();
+    }
+
     if (!transport_->isGood()) {
         return false;
     }
@@ -356,6 +375,11 @@ void Node::destroy() {
 
     api_->stop();
     cswarning() << "[API STOPPED]";
+
+    if (snapshotService_) {
+        snapshotService_->stop();
+        cswarning() << "[SNAPSHOT SERVICE STOPPED]";
+    }
 
     solver_->finish();
     cswarning() << "[SOLVER STOPPED]";

@@ -1350,6 +1350,14 @@ bool Storage::pool_prune_batch(const std::vector<PoolHash>& hashes) {
     return true;
 }
 
+bool Storage::forEachContractData(const std::function<bool(const cs::Bytes& key, const cs::Bytes& value)>& fn) const {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    return d->db->forEachContractData(fn);
+}
+
 cs::Sequence Storage::first_sequence() const {
     if (!isOpen()) {
         d->set_last_error(NotOpen);
