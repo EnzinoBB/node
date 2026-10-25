@@ -67,6 +67,9 @@
 #        snapshot with --import-snapshot into its own backend and joins; with SNAPSHOT_CORRUPT=1 the
 #        blocks file is truncated first, so the restore must fail and that node syncs from block 0.
 #        SNAPSHOT_FORMAT=1: packaging/docker/snapshot-make.sh and snapshot-restore.sh instead
+#        SNAPSHOT_SERVE_NODES (optional, comma separated): those nodes run with [snapshot] serve=on;
+#        at the end one other node of this build is stopped and its known_peers.json must list each
+#        of them with the snapshot capability, and no other node with it
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -199,6 +202,7 @@ JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
+SNAPSHOT_SERVE_NODES=${SNAPSHOT_SERVE_NODES:-}
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
@@ -384,6 +388,7 @@ $(api_settings "$i")
 ajax_port=0
 diag_port=0
 $(storage_section "$i")
+$([[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && printf "\n[snapshot]\nserve=on\n")
 
 [Core]
 Filter="%Severity% >= info"
@@ -1309,5 +1314,34 @@ if [ "$LOW_STAKE_NODES" -gt 0 ]; then
     done
     [ "$low_trusted" -eq 0 ] || { echo "FAIL: nodes below the minimum stake were elected trusted"; exit 1; }
     echo "stake: none of the $LOW_STAKE_NODES nodes below the minimum stake was trusted after round $from"
+fi
+if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
+    # known_peers.json is written at a clean stop: stop one node of this build that does not serve
+    observer=0
+    for i in $(seq 1 "$NODES"); do
+        [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && continue
+        [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
+        observer=$i; break
+    done
+    [ "$observer" -gt 0 ] || { echo "FAIL: no node left to read the capabilities from"; exit 1; }
+    kill -TERM "${PIDS[$observer]}" 2>/dev/null || true
+    for _ in $(seq 1 60); do kill -0 "${PIDS[$observer]}" 2>/dev/null || break; sleep 1; done
+    kill -0 "${PIDS[$observer]}" 2>/dev/null && { echo "FAIL: n$observer did not stop in 60 s"; exit 1; }
+    wait "${PIDS[$observer]}" 2>/dev/null || true
+    [ -f "$WORK/n$observer/known_peers.json" ] || { echo "FAIL: n$observer wrote no known_peers.json"; exit 1; }
+    serving=""
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do serving="$serving ${KEYS[$((i - 1))]}"; done
+    python3 - "$WORK/n$observer/known_peers.json" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
+import json, sys
+peers = {p["id"]: p for p in json.load(open(sys.argv[1]))}
+serving = set(sys.argv[2:])
+bad = [k for k in serving if peers.get(k, {}).get("capabilities") != 1]
+extra = [k for k, p in peers.items() if k not in serving and p["capabilities"] != 0]
+community = sum(1 for p in peers.values() if p["minor"] > 0)
+print(f"capabilities: {len(peers)} known peers, {len(serving) - len(bad)} of {len(serving)} serving nodes announce snapshots, "
+      f"{len(extra)} others do, {community} announce a community version")
+sys.exit(1 if bad or extra else 0)
+PY
+    PIDS[$observer]=""
 fi
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

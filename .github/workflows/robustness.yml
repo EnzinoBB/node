@@ -246,6 +246,9 @@ jobs:
           # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
             env: SLOW_NODES=3,6 SLOW_CPU=5
+          # snapshot sharing announced in host_data: n3 and n5 serve, a stopped node lists them
+          - name: snapshot-capability
+            env: SNAPSHOT_SERVE_NODES=3,5
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300

@@ -355,6 +355,7 @@ public:
     void swap(Config& config);
 
     void updateKnownHosts(std::vector<cs::PeerData>&) const;
+    static std::string knownPeersJson(const std::vector<cs::PeerData>& peers);
 
     const EventsReportData& getEventsReportData() const {
         return eventsReport_;
