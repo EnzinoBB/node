@@ -157,16 +157,16 @@ Four new `MsgTypes` values (`net/include/net/packet.hpp:24-66`; 40-43 are free, 
 is 255). All are direct packets (`Node::sendDirect`, `node.cpp:2307-2312`), flags
 `BaseFlags::Clear` (the payloads are lz4 files or JSON; the node's `Compressed` flag is only a
 marker, compression is explicit per type), round = the sender's current round (0 on a joining
-node). Serialisation with `cs::ODataStream`/`cs::IDataStream` as every node message; strings are
-length-prefixed; every limit below is checked on the receiving side before anything is parsed
+node). Serialisation with `cs::ODataStream` as every node message (strings and byte arrays carry a
+`u64` length first), read back by a bounded reader of the codec (P1); every limit below is checked on the receiving side before anything is parsed
 further, and a packet beyond it is dropped and counted.
 
 | Value | Name | Payload | Limit |
 | --- | --- | --- | --- |
-| 40 | `SnapshotManifestRequest` | `u8 protocol = 1` | 16 bytes |
+| 40 | `SnapshotManifestRequest` | `u8 protocol = 1` (0 refused; a higher value may be followed by fields of that protocol, which a version 1 node skips) | 16 bytes |
 | 41 | `SnapshotManifestReply` | `u8 status` (0 ready, 1 not serving, 2 not synced, 3 building), `u64 last_seq`, `u64 round`, `u8 serving_trusted` (0/1), then if ready `string manifest_json` | 256 KB |
 | 42 | `SnapshotPieceRequest` | `u64 seq`, `string name` (from the fixed table, at most 64 chars), `u32 chunk` | 128 bytes |
-| 43 | `SnapshotPieceReply` | `u8 status` (0 ok, 1 unknown snapshot/name/chunk, 2 busy: retry after `u32 retry_ms`, 3 not serving), `u64 seq`, `string name`, `u32 chunk`, `bytes data` | `chunk_size` from the manifest, at most 1 MiB |
+| 43 | `SnapshotPieceReply` | `u8 status` (0 ok, 1 unknown snapshot/name/chunk, 2 busy, 3 not serving), `u32 retry_ms` (always present, meaningful when busy), `u64 seq`, `string name`, `u32 chunk`, then if ok `bytes data` | `chunk_size` from the manifest, at most 1 MiB |
 
 Wiring: the four values in `Packet::messageTypeToString` (`net/src/packet.cpp`), in the
 validator's never-cut list (`packetvalidator.cpp:94-109`: a joining node is at round 0, so the
