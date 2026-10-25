@@ -208,6 +208,13 @@ public:
     void getBlockReply(const uint8_t*, const size_t, const cs::PublicKey& sender);
 
     void sendSyncroMessage(cs::Byte msg, const cs::PublicKey& target);
+
+    // snapshots shared between community nodes (MsgTypes 40-43, csnode/snapshot_messages.hpp)
+    void getSnapshotManifestRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void getSnapshotManifestReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void getSnapshotPieceRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void getSnapshotPieceReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void sendSnapshotMessage(const cs::PublicKey& target, MsgTypes type, const cs::Bytes& payload);
     void getSyncroMessage(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
 
     // syncro log functions
@@ -416,6 +423,9 @@ public slots:
     void storeSmartStageOne(const cs::StageOneSmarts& stage);
 
 private:
+    // snapshot messages dropped: malformed, or not expected by this node
+    uint64_t snapshotMessagesDropped_ = 0;
+
     bool init();
     void initPoolSynchronizer();
 

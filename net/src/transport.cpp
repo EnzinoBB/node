@@ -396,6 +396,14 @@ void Transport::dispatchNodeMessage(const cs::PublicKey& sender, const MsgTypes 
             return node_->getPacketHashRequest(data, size, rNum, sender);
         case MsgTypes::TransactionsPacketBaseReply:
             return node_->getPacketHashesBaseReply(data, size, rNum, sender);
+        case MsgTypes::SnapshotManifestRequest:
+            return node_->getSnapshotManifestRequest(data, size, sender);
+        case MsgTypes::SnapshotManifestReply:
+            return node_->getSnapshotManifestReply(data, size, sender);
+        case MsgTypes::SnapshotPieceRequest:
+            return node_->getSnapshotPieceRequest(data, size, sender);
+        case MsgTypes::SnapshotPieceReply:
+            return node_->getSnapshotPieceReply(data, size, sender);
         default:
             break;
     }

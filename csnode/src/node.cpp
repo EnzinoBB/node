@@ -13,6 +13,7 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
+#include <csnode/snapshot_messages.hpp>
 #include <csnode/node.hpp>
 #include <csnode/blockrequest.hpp>
 #include <csnode/nodecore.hpp>
@@ -2144,6 +2145,66 @@ void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
     }
 }
 
+void Node::sendSnapshotMessage(const cs::PublicKey& target, MsgTypes type, const cs::Bytes& payload) {
+    // the payload goes as it is: lz4 files and JSON, nothing to gain from the packet compression
+    cs::Bytes packetBytes;
+    cs::ODataStream stream(packetBytes);
+    stream << BaseFlags::Clear << type << cs::Conveyer::instance().currentRoundNumber();
+    packetBytes.insert(packetBytes.end(), payload.begin(), payload.end());
+    transport_->sendDirect(Packet(std::move(packetBytes)), target);
+}
+
+namespace {
+void logSnapshotDrop(uint64_t& dropped, const char* what, const cs::PublicKey& sender) {
+    ++dropped;
+    csdebug() << "NODE> snapshot: dropped " << what << " from " << cs::Utils::byteStreamToHex(sender.data(), sender.size())
+              << " (" << dropped << " dropped so far)";
+}
+}  // namespace
+
+void Node::getSnapshotManifestRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::ManifestRequest request;
+    if (!cs::snapshot_p2p::decode(data, size, request)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed manifest request", sender);
+    }
+    // this build does not serve snapshots yet
+    cs::snapshot_p2p::ManifestReply reply;
+    reply.status = cs::snapshot_p2p::ManifestStatus::NotServing;
+    reply.lastSeq = blockChain_.getLastSeq();
+    reply.round = cs::Conveyer::instance().currentRoundNumber();
+    sendSnapshotMessage(sender, MsgTypes::SnapshotManifestReply, cs::snapshot_p2p::encode(reply));
+}
+
+void Node::getSnapshotManifestReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::ManifestReply reply;
+    if (!cs::snapshot_p2p::decode(data, size, reply)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed manifest reply", sender);
+    }
+    // nothing asked for it yet
+    logSnapshotDrop(snapshotMessagesDropped_, "an unexpected manifest reply", sender);
+}
+
+void Node::getSnapshotPieceRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::PieceRequest request;
+    if (!cs::snapshot_p2p::decode(data, size, request)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed piece request", sender);
+    }
+    cs::snapshot_p2p::PieceReply reply;
+    reply.status = cs::snapshot_p2p::PieceStatus::NotServing;
+    reply.seq = request.seq;
+    reply.name = request.name;
+    reply.chunk = request.chunk;
+    sendSnapshotMessage(sender, MsgTypes::SnapshotPieceReply, cs::snapshot_p2p::encode(reply));
+}
+
+void Node::getSnapshotPieceReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::PieceReply reply;
+    if (!cs::snapshot_p2p::decode(data, size, reply)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed piece reply", sender);
+    }
+    logSnapshotDrop(snapshotMessagesDropped_, "an unexpected piece reply", sender);
+}
+
 // thread safe slot (called from poolSynchronizer_)
 void Node::sendBlockRequest(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
     status_ = cs::NodeStatus::Synchronization;
@@ -2192,6 +2253,11 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         case MsgTypes::BlockAlarm:
         case MsgTypes::EventReport:
         case MsgTypes::SyncroMsg:
+        // answered or dropped whatever the round: a joining node is at round 0
+        case MsgTypes::SnapshotManifestRequest:
+        case MsgTypes::SnapshotManifestReply:
+        case MsgTypes::SnapshotPieceRequest:
+        case MsgTypes::SnapshotPieceReply:
             return MessageActions::Process;
 
         default:
@@ -2223,6 +2289,7 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         // which round would not be on the remote we may require the requested block or get block request
         return MessageActions::Process;
     }
+
 
     if (type == MsgTypes::RoundTableReply) {
         return (rNum >= round ? MessageActions::Process : MessageActions::Drop);

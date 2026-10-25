@@ -72,6 +72,7 @@ add_library(csnode
   include/csnode/snapshot_manifest.hpp
   include/csnode/snapshot_builder.hpp
   include/csnode/snapshot_importer.hpp
+  include/csnode/snapshot_messages.hpp
   include/csnode/blockverifier.hpp
   include/csnode/sendcachedata.hpp
   include/csnode/eventreport.hpp
@@ -116,6 +117,7 @@ add_library(csnode
   src/snapshot_manifest.cpp
   src/snapshot_builder.cpp
   src/snapshot_importer.cpp
+  src/snapshot_messages.cpp
   src/blockverifier.cpp
   src/sendcachedata.cpp
   src/eventreport.cpp
