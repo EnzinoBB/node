@@ -57,8 +57,11 @@ quick-starts after a conversion.
   round before, and the hash chain to the declared block; the checkpoint must declare the
   manifest's state digest. Anything wrong leaves nothing behind. The node then quick-starts from
   that checkpoint.
-- The `[snapshot]` section of `config.ini` holds the settings of the coming snapshot service
-  (served by community nodes, fetched at a first start); it does nothing yet.
+- The `[snapshot]` section of `config.ini` holds the settings of the coming p2p snapshot
+  sharing (snapshots served by community nodes to their neighbours and fetched from them at a
+  first start: `serve`, `serve_rate_kbps`, `serve_max_peers`, `snapshot_blocks`, `fetch`,
+  `fetch_wait`, `fetch_fallback`, `min_sources`, `sources`, `sources_file`, `fetch_rate_kbps`);
+  it does nothing yet. A key that is not one of these is logged and ignored.
 
 ## Start-up behaviour
 
