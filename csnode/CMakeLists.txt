@@ -76,6 +76,7 @@ add_library(csnode
   include/csnode/snapshot_provider.hpp
   include/csnode/snapshot_service.hpp
   include/csnode/snapshot_agreement.hpp
+  include/csnode/snapshot_bootstrap.hpp
   include/csnode/snapshot_fetcher.hpp
   include/csnode/blockverifier.hpp
   include/csnode/sendcachedata.hpp
@@ -125,6 +126,7 @@ add_library(csnode
   src/snapshot_provider.cpp
   src/snapshot_service.cpp
   src/snapshot_agreement.cpp
+  src/snapshot_bootstrap.cpp
   src/snapshot_fetcher.cpp
   src/blockverifier.cpp
   src/sendcachedata.cpp

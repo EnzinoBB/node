@@ -8,6 +8,8 @@
 
 #include <lib/system/logger.hpp>
 #include <csnode/configholder.hpp>
+#include <csnode/node.hpp>
+#include <csnode/snapshot_bootstrap.hpp>
 
 #include <params.hpp>
 #include "dbcheck.hpp"
@@ -191,6 +193,18 @@ int main(int argc, char* argv[]) {
     }
 
     {
+        // db/ first, so that dbcheck takes db/.lock for the whole run, a start on an empty database
+        // too (it may fetch a snapshot and import it); then what an import killed midway left, before
+        // dbcheck would take it for a database
+        std::error_code ec;
+        std::filesystem::create_directories(config.getPathToDB(), ec);
+        std::string removed;
+        if (cs::snapshot_bootstrap::cleanupInterruptedImport(".", config.getPathToDB(), removed)) {
+            std::cout << "SNAPSHOT: removed the files of an interrupted import (" << removed << ")" << std::endl;
+        }
+    }
+
+    {
         const bool convertOnly = vm.count("convert-only") > 0;
         const int rc = dbcheck::check(config.getPathToDB(), config.getStorageSettings().dbBackend,
                                       convertOnly || vm.count("convert-db") > 0, convertOnly,
@@ -231,5 +245,10 @@ int main(int argc, char* argv[]) {
 
     cs::Peer peer(kServiceName, config, vm);
     int result = peer.executeProtocol();
+    // the node's own code wins (a refused start returns -1 from executeProtocol): 4 for a state
+    // restored from a snapshot that does not match its digest
+    if (Node::exitCode() != 0) {
+        result = Node::exitCode();
+    }
     return result;
 }
