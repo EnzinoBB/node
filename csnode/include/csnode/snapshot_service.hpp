@@ -48,7 +48,7 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> buildPending_{true};
     static constexpr int kMaxBuildAttempts = 5;
-    int failedBuilds_ = 0;
+    std::atomic<int> failedBuilds_{0};   // reset by onCheckpointSaved on the thread that stores blocks
     std::chrono::steady_clock::time_point retryAt_{};
     std::mutex m_;
     std::condition_variable cv_;

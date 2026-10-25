@@ -168,9 +168,13 @@ TEST(SnapshotProvider, ManifestStatuses) {
     EXPECT_TRUE(parsed->verify());
     EXPECT_EQ(parsed->seq, 200u);
 
-    // once per peer every 5 s
+    // once per peer every 5 s, one to anyone every 50 ms
+    fx.now += 50ms;
     EXPECT_FALSE(fx.provider.onManifestRequest(a, serving(), synced()));
     EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(2), serving(), synced()));
+    EXPECT_FALSE(fx.provider.onManifestRequest(peerKey(3), serving(), synced()));
+    fx.now += 50ms;
+    EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(3), serving(), synced()));
     fx.now += 5s;
     EXPECT_TRUE(fx.provider.onManifestRequest(a, serving(), synced()));
 
@@ -295,17 +299,25 @@ TEST(SnapshotProvider, MaxPeers) {
     EXPECT_EQ(fx.provider.onPieceRequest(peerKey(2), piece("blocks.bin.lz4", 0), serving(0, 1), synced()).status, PieceStatus::Ok);
 }
 
-TEST(SnapshotProvider, PeerTableEvictsTheOldest) {
+TEST(SnapshotProvider, NewKeysDoNotEvictADownloader) {
     Fixture fx("snapshot_provider_table");
     ASSERT_TRUE(fx.provider.load(fx.dir));
-    EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(0), serving(), synced()));
-    EXPECT_FALSE(fx.provider.onManifestRequest(peerKey(0), serving(), synced()));
-    for (uint8_t i = 1; i <= cs::SnapshotProvider::kMaxPeers; ++i) {
-        fx.now += 1ms;
+    const auto downloader = peerKey(200);
+    const auto idle = peerKey(201);
+    EXPECT_TRUE(fx.provider.onManifestRequest(downloader, serving(), synced()));
+    EXPECT_EQ(fx.provider.onPieceRequest(downloader, piece("blocks.bin.lz4", 0), serving(), synced()).status, PieceStatus::Ok);
+    fx.now += 50ms;
+    EXPECT_TRUE(fx.provider.onManifestRequest(idle, serving(), synced()));
+    // 63 made-up keys fill the table to 65 entries
+    for (uint8_t i = 1; i < cs::SnapshotProvider::kMaxPeers; ++i) {
+        fx.now += 50ms;
         EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(i), serving(), synced()));
     }
-    // peer 0 was the oldest of 65: forgotten, so answered again within its 5 s
-    EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(0), serving(), synced()));
+    // the downloader is still known (its 5 s are not over), the idle key was the one pushed out
+    fx.now += 50ms;
+    EXPECT_FALSE(fx.provider.onManifestRequest(downloader, serving(), synced()));
+    fx.now += 50ms;
+    EXPECT_TRUE(fx.provider.onManifestRequest(idle, serving(), synced()));
 }
 
 TEST(SnapshotProvider, CompletedPeerAndSummary) {
@@ -316,7 +328,14 @@ TEST(SnapshotProvider, CompletedPeerAndSummary) {
         EXPECT_EQ(seq, 200u);
         ++completed;
     };
-    for (const auto& f : fx.manifest().files) {
+    const auto files = fx.manifest().files;
+    // the same chunk again and again does not make a whole snapshot
+    for (int i = 0; i < 100; ++i) {
+        fx.now += 1s;
+        ASSERT_EQ(fx.provider.onPieceRequest(peerKey(1), piece(files.front().name, 0), serving(), synced()).status, PieceStatus::Ok);
+    }
+    EXPECT_EQ(completed, 0);
+    for (const auto& f : files) {
         for (uint32_t c = 0; c < f.chunks.size(); ++c) {
             fx.now += 1s;
             ASSERT_EQ(fx.provider.onPieceRequest(peerKey(1), piece(f.name, c), serving(), synced()).status, PieceStatus::Ok);

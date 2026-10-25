@@ -67,8 +67,12 @@ void SnapshotService::stop() {
 
 void SnapshotService::onCheckpointSaved(cs::Sequence sequence) {
     (void)sequence;
-    failedBuilds_ = 0;
-    buildPending_ = true;
+    {
+        // under the lock: the service thread cannot miss it between its check and its wait
+        std::lock_guard<std::mutex> lock(m_);
+        failedBuilds_ = 0;
+        buildPending_ = true;
+    }
     cv_.notify_all();
 }
 
@@ -96,7 +100,7 @@ void SnapshotService::run() {
             buildLatest();
         }
         std::unique_lock<std::mutex> lock(m_);
-        cv_.wait_for(lock, kPeriod, [this]() { return stop_.load(); });
+        cv_.wait_for(lock, kPeriod, [this]() { return stop_.load() || (serving_ && buildPending_.load()); });
     }
 }
 
@@ -174,7 +178,15 @@ void SnapshotService::loadNewest() {
     std::string error;
     const auto dir = root_ / std::to_string(best);
     if (!provider_.load(dir, &error)) {
-        cswarning() << "SNAPSHOT: " << dir.string() << " is not served: " << error;
+        // a snapshot of this node's own builder (it has snapshot.json): removed, so that the next
+        // round builds it again while its checkpoint is kept
+        const bool retry = ++failedBuilds_ < kMaxBuildAttempts;
+        cswarning() << "SNAPSHOT: " << dir.string() << " is not served: " << error << "; removed"
+                    << (retry ? ", to be built again in a minute" : "");
+        fs::remove_all(dir, ec);
+        if (retry) {
+            retryAt_ = std::chrono::steady_clock::now() + std::chrono::minutes(1);
+        }
         return;
     }
     uint64_t bytes = 0;

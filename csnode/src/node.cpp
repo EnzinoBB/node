@@ -275,6 +275,7 @@ bool Node::init() {
             }
         }
         snapshotProvider_ = std::make_unique<cs::SnapshotProvider>();
+        snapshotSummaryAt_ = std::chrono::steady_clock::now();
         snapshotProvider_->onPeerCompleted = [](const cs::PublicKey& key, cs::Sequence seq, uint64_t bytes, std::chrono::seconds took) {
             cslog() << "SNAPSHOT: served block " << seq << " to " << EncodeBase58(key.data(), key.data() + key.size()) << ", "
                     << bytes / (1u << 20) << " MB in " << took.count() << " s";

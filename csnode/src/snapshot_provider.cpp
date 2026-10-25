@@ -39,12 +39,14 @@ struct SnapshotProvider::Loaded {
         int fd = -1;
         uint64_t size = 0;
         uint64_t chunks = 0;
+        uint64_t firstChunk = 0;   // index of its first chunk among all files, in manifest order
     };
 
     SnapshotManifest manifest;
     std::string json;
     std::map<std::string, File> files;
     uint64_t totalBytes = 0;
+    uint64_t totalChunks = 0;
 
     ~Loaded() {
         for (auto& [name, f] : files) {
@@ -129,8 +131,12 @@ bool SnapshotProvider::load(const fs::path& dir, std::string* error) {
         if (::fstat(entry.fd, &st) != 0 || static_cast<uint64_t>(st.st_size) != f.size) {
             return fail(error, path.string() + " does not have the size of the manifest");
         }
+        // pieces are read on the thread that handles consensus messages: keep the files in the page cache
+        ::posix_fadvise(entry.fd, 0, 0, POSIX_FADV_WILLNEED);
         loaded->files[f.name].size = f.size;
         loaded->files[f.name].chunks = f.chunks.size();
+        loaded->files[f.name].firstChunk = loaded->totalChunks;
+        loaded->totalChunks += f.chunks.size();
         loaded->totalBytes += f.size;
     }
     loaded->manifest = std::move(*manifest);
@@ -158,8 +164,13 @@ SnapshotProvider::Peer& SnapshotProvider::peer(const cs::PublicKey& key, SteadyC
     auto it = peers_.find(key);
     if (it == peers_.end()) {
         if (peers_.size() >= kMaxPeers) {
-            auto oldest = std::min_element(peers_.begin(), peers_.end(),
-                                           [](const auto& a, const auto& b) { return a.second.lastSeen < b.second.lastSeen; });
+            // a peer downloading now goes last: new keys (free to make up) must not push it out
+            auto downloading = [&](const Peer& p) { return p.lastPiece != SteadyClock::time_point{} && now - p.lastPiece < kPeerWindow; };
+            auto oldest = std::min_element(peers_.begin(), peers_.end(), [&](const auto& a, const auto& b) {
+                const bool da = downloading(a.second);
+                const bool db = downloading(b.second);
+                return da != db ? !da : a.second.lastSeen < b.second.lastSeen;
+            });
             peers_.erase(oldest);
         }
         it = peers_.emplace(key, Peer{}).first;
@@ -204,8 +215,13 @@ std::optional<snapshot_p2p::ManifestReply> SnapshotProvider::onManifestRequest(c
         return reply;
     }
 
-    // the manifest is the large reply to a small request: once per peer every 5 s, and paid for
+    // the manifest is the large reply to a small request: once per peer every 5 s, one to anyone
+    // every 50 ms, and paid for
     const auto now = clock_();
+    if (lastManifestAny_ != SteadyClock::time_point{} && now - lastManifestAny_ < kManifestGap) {
+        ++busyAnswers_;
+        return std::nullopt;
+    }
     auto& p = peer(sender, now);
     if (p.manifestSent && now - p.lastManifest < kManifestInterval) {
         return std::nullopt;
@@ -225,6 +241,7 @@ std::optional<snapshot_p2p::ManifestReply> SnapshotProvider::onManifestRequest(c
     }
     p.manifestSent = true;
     p.lastManifest = now;
+    lastManifestAny_ = now;
     ++manifestsServed_;
     reply.status = ManifestStatus::Ready;
     reply.manifestJson = loaded->json;
@@ -321,10 +338,15 @@ snapshot_p2p::PieceReply SnapshotProvider::onPieceRequest(const cs::PublicKey& s
     if (p.seq != loaded->manifest.seq) {
         p.seq = loaded->manifest.seq;
         p.bytes = 0;
+        p.chunksSeen.assign(static_cast<size_t>(loaded->totalChunks), false);
         p.completed = false;
         p.firstPiece = now;
     }
-    p.bytes += length;
+    const size_t index = static_cast<size_t>(file->second.firstChunk + request.chunk);
+    if (index < p.chunksSeen.size() && !p.chunksSeen[index]) {
+        p.chunksSeen[index] = true;
+        p.bytes += length;
+    }
     ++piecesServed_;
     bytesServed_ += length;
     if (!p.completed && p.bytes >= loaded->totalBytes) {
@@ -350,7 +372,7 @@ std::string SnapshotProvider::takeSummary() {
     }
     std::ostringstream out;
     out << recent << " peers, " << manifestsServed_ << " manifests, " << piecesServed_ << " pieces, " << bytesServed_ / (1u << 20)
-        << " MB, " << busyAnswers_ << " busy answers";
+        << " MiB, " << busyAnswers_ << " busy answers";
     piecesServed_ = bytesServed_ = busyAnswers_ = manifestsServed_ = 0;
     return out.str();
 }

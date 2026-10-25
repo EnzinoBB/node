@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <csnode/snapshot_manifest.hpp>
 #include <csnode/snapshot_messages.hpp>
@@ -47,6 +48,9 @@ public:
     static constexpr auto kPieceWindow = std::chrono::milliseconds(100);
     static constexpr size_t kPiecesPerWindow = 2;
     static constexpr auto kManifestInterval = std::chrono::seconds(5);
+    // between two manifest replies to anyone: peer keys cost nothing, so the per-key limit alone
+    // does not bound them
+    static constexpr auto kManifestGap = std::chrono::milliseconds(50);
     static constexpr uint64_t kBurstBytes = 4ull << 20;
     static constexpr uint32_t kMaxRetryMs = 5000;
 
@@ -92,6 +96,7 @@ private:
         bool bucketStarted = false;
         cs::Sequence seq = 0;
         uint64_t bytes = 0;      // of seq
+        std::vector<bool> chunksSeen;   // of seq, over all files in manifest order: re-requests do not count
         bool completed = false;
     };
 
@@ -106,6 +111,7 @@ private:
     std::map<cs::PublicKey, Peer> peers_;
     Bucket global_;
     bool globalStarted_ = false;
+    std::chrono::steady_clock::time_point lastManifestAny_{};
     uint64_t piecesServed_ = 0;
     uint64_t bytesServed_ = 0;
     uint64_t busyAnswers_ = 0;
