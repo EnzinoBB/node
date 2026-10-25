@@ -1,5 +1,7 @@
+#include <algorithm>
 #include <iostream>
 #include <regex>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -1064,28 +1066,45 @@ SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config
         return result;
     }
     const boost::property_tree::ptree& data = config.get_child(BLOCK_NAME_SNAPSHOT);
-    readSnapshotNumber<uint16_t>(data, "serve_port", result.servePort, 0, 65535);
-    if (data.count("serve_bind")) {
-        result.serveBind = data.get<std::string>("serve_bind");
+    static const std::set<std::string> known = {
+        "serve", "serve_rate_kbps", "serve_max_peers", "snapshot_blocks", "fetch", "fetch_wait",
+        "fetch_fallback", "min_sources", "sources", "sources_file", "fetch_rate_kbps"};
+    for (const auto& [key, value] : data) {
+        if (!known.count(key)) {
+            cswarning() << "config: [snapshot] " << key << " is not a setting of this version, ignored";
+        }
     }
-    readSnapshotNumber<size_t>(data, "serve_max_connections", result.serveMaxConnections, 1, 1024);
+    readSnapshotBool(data, "serve", result.serve);
     readSnapshotNumber<size_t>(data, "serve_rate_kbps", result.serveRateKbps, 0, 10'000'000);
-    readSnapshotNumber<size_t>(data, "snapshot_blocks", result.snapshotBlocks, 1000, 10'000'000);
+    readSnapshotNumber<size_t>(data, "serve_max_peers", result.serveMaxPeers, 1, 64);
+    readSnapshotNumber<size_t>(data, "snapshot_blocks", result.snapshotBlocks, 1, 10'000'000);
     readSnapshotChoice(data, "fetch", result.fetch, {"auto", "off"});
-    // empty values are meaningful here: no extra sources, no sources file, no GitHub source
+    readSnapshotNumber<size_t>(data, "fetch_wait", result.fetchWait, 0, 86'400);
+    readSnapshotChoice(data, "fetch_fallback", result.fetchFallback, {"sync", "wait"});
+    readSnapshotNumber<size_t>(data, "min_sources", result.minSources, 1, 20);
     if (data.count("sources")) {
-        result.sources = data.get<std::string>("sources");
+        std::vector<std::string> keys;
+        boost::split(keys, data.get<std::string>("sources"), boost::is_any_of(", \t"), boost::token_compress_on);
+        for (const auto& key : keys) {
+            if (key.empty()) {
+                continue;
+            }
+            std::vector<uint8_t> bytes;
+            if (!DecodeBase58(key, bytes) || bytes.size() != cscrypto::kPublicKeySize) {
+                cswarning() << "config: [snapshot] sources: " << key << " is not a node key, ignored";
+                continue;
+            }
+            cs::PublicKey publicKey;
+            std::copy(bytes.begin(), bytes.end(), publicKey.begin());
+            if (std::find(result.sources.begin(), result.sources.end(), publicKey) == result.sources.end()) {
+                result.sources.push_back(publicKey);
+            }
+        }
     }
+    // an empty value is meaningful here: no sources file
     if (data.count("sources_file")) {
         result.sourcesFile = data.get<std::string>("sources_file");
     }
-    readSnapshotBool(data, "probe_known_hosts", result.probeKnownHosts);
-    if (data.count("github_manifest")) {
-        result.githubManifest = data.get<std::string>("github_manifest");
-    }
-    readSnapshotNumber<size_t>(data, "min_sources", result.minSources, 1, 20);
-    readSnapshotChoice(data, "fallback", result.fallback, {"github", "none"});
-    readSnapshotNumber<size_t>(data, "fetch_connections", result.fetchConnections, 1, 16);
     readSnapshotNumber<size_t>(data, "fetch_rate_kbps", result.fetchRateKbps, 0, 10'000'000);
     return result;
 }
@@ -1265,19 +1284,16 @@ bool operator!=(const ApiData& lhs, const ApiData& rhs) {
 }
 
 bool operator==(const SnapshotData& lhs, const SnapshotData& rhs) {
-    return lhs.servePort == rhs.servePort &&
-           lhs.serveBind == rhs.serveBind &&
-           lhs.serveMaxConnections == rhs.serveMaxConnections &&
+    return lhs.serve == rhs.serve &&
            lhs.serveRateKbps == rhs.serveRateKbps &&
+           lhs.serveMaxPeers == rhs.serveMaxPeers &&
            lhs.snapshotBlocks == rhs.snapshotBlocks &&
            lhs.fetch == rhs.fetch &&
+           lhs.fetchWait == rhs.fetchWait &&
+           lhs.fetchFallback == rhs.fetchFallback &&
+           lhs.minSources == rhs.minSources &&
            lhs.sources == rhs.sources &&
            lhs.sourcesFile == rhs.sourcesFile &&
-           lhs.probeKnownHosts == rhs.probeKnownHosts &&
-           lhs.githubManifest == rhs.githubManifest &&
-           lhs.minSources == rhs.minSources &&
-           lhs.fallback == rhs.fallback &&
-           lhs.fetchConnections == rhs.fetchConnections &&
            lhs.fetchRateKbps == rhs.fetchRateKbps;
 }
 
