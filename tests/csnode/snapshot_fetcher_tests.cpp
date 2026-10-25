@@ -49,9 +49,9 @@ void putU16(std::ofstream& f, uint16_t v) {
 // Snapshots of block 200 built by buildSnapshot from one generated chain, each signed by its
 // own key, with 64 KiB chunks: A1, A2 and A3-A10 from the same checkpoint files (identical bytes), B and
 // E with one and two trailing bytes in walletscache.dat (same digest, another sha256 for that
-// file), D with another state digest. Built once for all tests.
+// file), D with another state digest, F with 1.6 MB more in walletscache.dat. Built once for all tests.
 struct Snapshots {
-    enum { A1, A2, B, D, E, A3, A4, A5, A6, A7, A8, A9, A10, Count };
+    enum { A1, A2, B, D, E, A3, A4, A5, A6, A7, A8, A9, A10, F, Count };
 
     struct Source {
         cs::PrivateKey priv;
@@ -86,7 +86,7 @@ struct Snapshots {
             c = static_cast<char>(rng());
         }
 
-        auto checkpoint = [&](const std::string& name, size_t extra, uint8_t digestFill) {
+        auto checkpoint = [&](const std::string& name, size_t extra, uint8_t digestFill, size_t moreNoise = 0) {
             const auto qs = root / ("qs-" + name) / "200";
             fs::create_directories(qs);
             {
@@ -99,7 +99,11 @@ struct Snapshots {
                 f.write(reinterpret_cast<const char*>(head.data()), static_cast<std::streamsize>(head.size()));
                 putU16(f, 0);
             }
-            std::ofstream(qs / "walletscache.dat", std::ios::binary) << noise << std::string(extra, 'x');
+            std::string more(moreNoise, '\0');
+            for (auto& c : more) {
+                c = static_cast<char>(rng());
+            }
+            std::ofstream(qs / "walletscache.dat", std::ios::binary) << noise << more << std::string(extra, 'x');
             std::ofstream(qs / "blockchain.dat", std::ios::binary) << "settings";
             cs::CheckpointDigest d;
             d.digest.fill(digestFill);
@@ -112,7 +116,8 @@ struct Snapshots {
         const auto qsB = checkpoint("b", 1, 7);
         const auto qsD = checkpoint("d", 0, 8);
         const auto qsE = checkpoint("e", 2, 7);
-        const std::array<fs::path, Count> qsOf{qsA, qsA, qsB, qsD, qsE, qsA, qsA, qsA, qsA, qsA, qsA, qsA, qsA};
+        const auto qsF = checkpoint("f", 0, 7, 1'600'000);   // a larger snapshot, about 2.6 MB
+        const std::array<fs::path, Count> qsOf{qsA, qsA, qsB, qsD, qsE, qsA, qsA, qsA, qsA, qsA, qsA, qsA, qsA, qsF};
 
         for (size_t i = 0; i < Count; ++i) {
             auto& s = src[i];
@@ -1141,8 +1146,83 @@ TEST(SnapshotFetcher, BootstrapCapWithSync) {
     const uint64_t start = net.nowMs;
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 20000));
     EXPECT_GE(net.nowMs - start, 31 * 60'000u);
-    EXPECT_TRUE(net.logged("(fetch_wait + 30 min): syncing from block 0"));
+    EXPECT_TRUE(net.logged("(fetch_wait + 30 min + the download time): syncing from block 0"));
     EXPECT_FALSE(net.logged("(failed fetch"));
+}
+
+// an honest join limited by fetch_rate_kbps: the cap makes room for the download at that rate
+TEST(SnapshotFetcher, BootstrapCapAllowsTheConfiguredRate) {
+    TmpDir tmp("bootcaprate");
+    Net net;
+    net.add(Snapshots::F);
+    auto cfg = fetchConfig(1);
+    cfg.fetchWait = 60;
+    cfg.fetchRateKbps = 1;   // 1000 bytes/s: about 2.6 MB takes about 44 min, more than 30
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    const uint64_t start = net.nowMs;
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import || fetcher.phase() == Phase::Fallback; }, 40000));
+    EXPECT_EQ(fetcher.phase(), Phase::Import);
+    EXPECT_GT(net.nowMs - start, 31 * 60'000u);
+    expectFilesOf(tmp.path, fetcher.result()->first);
+}
+
+// with fetch_fallback=wait refused imports do not end the bootstrap: other sources are looked for
+TEST(SnapshotFetcher, RefusedImportsWithWaitKeepTrying) {
+    TmpDir tmp("importwait");
+    Net net;
+    net.add(Snapshots::A1);
+    net.add(Snapshots::A2);
+    net.add(Snapshots::B);
+    net.add(Snapshots::E);
+    auto cfg = fetchConfig(1);
+    cfg.fetchFallback = "wait";
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    for (int attempt = 1; attempt <= 3; ++attempt) {
+        ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; })) << attempt;
+        fetcher.onImportFailed(kWallets);
+        EXPECT_EQ(fetcher.phase(), Phase::Collect);
+    }
+    EXPECT_TRUE(net.logged("(refused import 3, fetch_fallback=wait)"));
+    // every source that declared a refused file is banned; another one turns up
+    net.add(Snapshots::F);
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+    EXPECT_EQ(fetcher.result()->first.nodeKey, snapshots().src[Snapshots::F].manifest.nodeKey);
+}
+
+// a slow source and a fast one: pieces taken from the slow one by timeout are fetched once, its
+// late replies do not get the fast one blamed, everything is on disk at the end
+TEST(SnapshotFetcher, ReassignmentRace) {
+    TmpDir tmp("race");
+    Net net;
+    net.add(Snapshots::A1).linkBytesPerSecond = 3'000;
+    net.add(Snapshots::A2);
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }, 20000));
+    EXPECT_EQ(fetcher.bytesDone(), fetcher.bytesTotal());
+    EXPECT_FALSE(net.logged(base58(net.key(Snapshots::A2)) + " did not answer"));
+    const auto& m = snapshots().src[Snapshots::A1].manifest;
+    size_t pieces = 0;
+    for (const auto& f : m.files) {
+        pieces += f.chunks.size();
+    }
+    EXPECT_LT(net.sent.size(), pieces + pieces / 2);
+    expectFilesOf(tmp.path, fetcher.result()->first);
+}
+
+// a symbolic link where a downloaded file goes: the file is not opened, the node syncs from block 0
+TEST(SnapshotFetcher, SymlinkInTmpDirIsRefused) {
+    TmpDir tmp("symlink");
+    fs::create_directories(tmp.path);
+    const auto target = tmp.path / "elsewhere";
+    std::ofstream(target) << "do not touch";
+    fs::create_symlink(target, tmp.path / kWallets);
+    Net net;
+    net.add(Snapshots::A1);
+    net.add(Snapshots::A2);
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 50));
+    EXPECT_TRUE(net.logged("cannot write"));
+    EXPECT_EQ(fileText(target), "do not touch");
 }
 
 // two groups as strong as each other: the 30-s line says conflict

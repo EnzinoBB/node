@@ -288,9 +288,9 @@ void SnapshotFetcher::tick(const Peers& peers) {
     }
     neighbours_ = peers.neighbours;
     // fetch_fallback=sync: the whole bootstrap is bounded whatever the counters say
-    if (!dryRun_ && cfg_.fetchFallback != "wait" && t - startedAt_ >= uint64_t(cfg_.fetchWait) * 1000 + kBootstrapCapMs) {
+    if (!dryRun_ && cfg_.fetchFallback != "wait" && t - startedAt_ >= capMs()) {
         log("SNAPSHOT: no snapshot after " + duration((t - startedAt_) / 1000 / 60 * 60) +
-                " (fetch_wait + 30 min): syncing from block 0. To start from the published snapshot instead: stop the node and run"
+                " (fetch_wait + 30 min + the download time): syncing from block 0. To start from the published snapshot instead: stop the node and run"
                 "  ./node --download-snapshot  in this folder (Docker: CREDITS_SNAPSHOT=github), then start it again.",
             true);
         clearInFlight();
@@ -595,8 +595,21 @@ bool SnapshotFetcher::everUsable(const Source& s) const {
     return !s.banned;
 }
 
-bool SnapshotFetcher::usable(const Source& s, uint64_t t) const {
-    return !s.banned && s.markedUntil <= t && s.busyUntil <= t && s.outstanding < s.budget;
+uint64_t SnapshotFetcher::capMs() const {
+    return uint64_t(cfg_.fetchWait) * 1000 + kBootstrapCapMs + capExtensionMs_;
+}
+
+size_t SnapshotFetcher::lateOnTheWay(const cs::PublicKey& key, uint64_t t) const {
+    size_t n = 0;
+    for (const auto& [piece, late] : late_) {
+        n += late.source == key && t - late.expiredAt < late.timeout;
+    }
+    return n;
+}
+
+bool SnapshotFetcher::usable(const cs::PublicKey& key, const Source& s, uint64_t t) const {
+    // pieces that timed out but are probably still on their way take the source's link too
+    return !s.banned && s.markedUntil <= t && s.busyUntil <= t && s.outstanding + lateOnTheWay(key, t) < s.budget;
 }
 
 bool SnapshotFetcher::startFetch(uint64_t t) {
@@ -614,6 +627,17 @@ bool SnapshotFetcher::startFetch(uint64_t t) {
     logGroups(false);
     log("SNAPSHOT: fetching block " + std::to_string(target_->seq) + ": " + megabytes(bytesTotal()) + " MB in " +
         std::to_string(files_.size()) + " files from " + std::to_string(agreedSources_.size()) + " sources");
+    // the bootstrap cap (fetch_fallback=sync) makes room for the download: at the rate the operator
+    // chose, or at 64 KB/s for at most 2 h, since the size comes from a manifest
+    const uint64_t remaining = bytesTotal() - std::min(bytesTotal(), bytesDone());
+    const uint64_t expected = cfg_.fetchRateKbps != 0 ? remaining / cfg_.fetchRateKbps : remaining * 1000 / kTimeoutBytesPerSecond;
+    capExtensionMs_ = std::max(capExtensionMs_, cfg_.fetchRateKbps != 0 ? expected : std::min(expected, kMaxCapExtensionMs));
+    if (cfg_.fetchFallback != "wait" && t - startedAt_ + expected > capMs()) {
+        log("SNAPSHOT: fetching block " + std::to_string(target_->seq) + " may take about " + duration(expected / 60'000 * 60) +
+                ", more than the " + duration((capMs() - std::min(capMs(), t - startedAt_)) / 60'000 * 60) +
+                " left before the node syncs from block 0",
+            true);
+    }
     fill(t);
     return true;
 }
@@ -802,7 +826,7 @@ void SnapshotFetcher::fill(uint64_t t) {
         for (size_t n = 0; n < keys.size() && total < kPiecesTotal; ++n) {
             const auto& key = keys[(first + n) % keys.size()];
             auto* s = findSource(key);
-            if (s == nullptr || !usable(*s, t) || neighbours_.count(key) == 0) {
+            if (s == nullptr || !usable(key, *s, t) || neighbours_.count(key) == 0) {
                 continue;
             }
             FileState* pick = nullptr;
@@ -812,9 +836,22 @@ void SnapshotFetcher::fill(uint64_t t) {
                     std::find(f.sources.begin(), f.sources.end(), key) == f.sources.end()) {
                     continue;
                 }
+                // a free chunk, not one this source is probably still sending late unless nothing else is free
                 uint32_t chunk = 0;
-                while (chunk < f.have.size() && (f.have[chunk] || f.inFlight.count(chunk) != 0)) {
-                    ++chunk;
+                uint32_t fallback = static_cast<uint32_t>(f.have.size());
+                for (; chunk < f.have.size(); ++chunk) {
+                    if (f.have[chunk] || f.inFlight.count(chunk) != 0) {
+                        continue;
+                    }
+                    auto l = late_.find({f.file.name, chunk});
+                    if (l != late_.end() && l->second.source == key) {
+                        fallback = std::min(fallback, chunk);
+                        continue;
+                    }
+                    break;
+                }
+                if (chunk >= f.have.size()) {
+                    chunk = fallback;
                 }
                 if (chunk < f.have.size()) {
                     pick = &f;
@@ -867,7 +904,7 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
         // the reply to a piece that timed out on a slow link: still taken while the piece is missing,
         // so that the bytes already on their way are not asked for twice
         auto l = late_.find({reply.name, reply.chunk});
-        if (l == late_.end() || l->second != sender || reply.chunk >= f.have.size() || f.have[reply.chunk] ||
+        if (l == late_.end() || l->second.source != sender || reply.chunk >= f.have.size() || f.have[reply.chunk] ||
             reply.status != snapshot_p2p::PieceStatus::Ok) {
             ++dropped_;
             return;
@@ -970,7 +1007,7 @@ void SnapshotFetcher::releaseSource(const cs::PublicKey& key) {
 
 void SnapshotFetcher::forgetLate(const cs::PublicKey& key) {
     for (auto it = late_.begin(); it != late_.end();) {
-        it = it->second == key ? late_.erase(it) : std::next(it);
+        it = it->second.source == key ? late_.erase(it) : std::next(it);
     }
 }
 
@@ -1046,15 +1083,24 @@ void SnapshotFetcher::expire(uint64_t t) {
     for (auto& f : files_) {
         for (auto it = f.inFlight.begin(); it != f.inFlight.end();) {
             const uint64_t timeout = kPieceTimeoutMs + bytesTo[it->second.source] * 1000 / kTimeoutBytesPerSecond;
-            if (t - it->second.sentAt >= timeout) {
+            if (f.have[it->first]) {
+                // filled meanwhile by another source's late reply: nothing to wait for, nobody to blame
+                if (auto* s = findSource(it->second.source); s != nullptr && s->outstanding != 0) {
+                    --s->outstanding;
+                }
+                it = f.inFlight.erase(it);
+            }
+            else if (t - it->second.sentAt >= timeout) {
                 lateSources.insert(it->second.source);
                 if (auto* s = findSource(it->second.source); s != nullptr && s->outstanding != 0) {
                     --s->outstanding;
                 }
                 if (late_.size() >= kMaxLate) {
-                    late_.erase(late_.begin());
+                    auto oldest = std::min_element(late_.begin(), late_.end(),
+                                                   [](const auto& a, const auto& b) { return a.second.sentAt < b.second.sentAt; });
+                    late_.erase(oldest);
                 }
-                late_[{f.file.name, it->first}] = it->second.source;
+                late_[{f.file.name, it->first}] = Late{it->second.source, it->second.sentAt, t, timeout};
                 it = f.inFlight.erase(it);
             }
             else {
@@ -1279,9 +1325,16 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
             std::to_string(importFailures_) + " of " + std::to_string(kMaxAttempts) + ")",
         true);
     if (importFailures_ >= kMaxAttempts) {
-        log("SNAPSHOT: " + std::to_string(kMaxAttempts) + " imports failed: syncing from block 0", true);
-        phase_ = Phase::Fallback;
-        return;
+        if (cfg_.fetchFallback == "wait") {
+            // the sources that declared the refused bytes are banned already: look for others
+            log("SNAPSHOT: looking at the sources again (refused import " + std::to_string(importFailures_) + ", fetch_fallback=wait)",
+                true);
+        }
+        else {
+            log("SNAPSHOT: " + std::to_string(kMaxAttempts) + " imports failed: syncing from block 0", true);
+            phase_ = Phase::Fallback;
+            return;
+        }
     }
     target_.reset();
     agreedSources_.clear();

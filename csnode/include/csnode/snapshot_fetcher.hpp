@@ -79,7 +79,10 @@ public:
     static constexpr size_t kMaxAttempts = 3;        // refused imports, and with fetch_fallback=sync failed
                                                      // fetches without a proven bad source: then Fallback
     static constexpr size_t kMaxExcusedAborts = 10;  // fetches ended by a proven bad source (fetch_fallback=sync)
-    static constexpr uint64_t kBootstrapCapMs = 30 * 60'000;   // fetch_fallback=sync: Fallback after fetch_wait + this
+    static constexpr uint64_t kBootstrapCapMs = 30 * 60'000;   // fetch_fallback=sync: Fallback after fetch_wait + this,
+                                                               // plus the time the agreed snapshot takes to download:
+                                                               // at fetch_rate_kbps when set, else at 64 KB/s for at most
+    static constexpr uint64_t kMaxCapExtensionMs = 2 * 3'600'000;   // this (a manifest may declare gigabytes)
     static constexpr uint64_t kHashBytesPerTick = 64ull << 20;   // whole-file SHA-256 per tick
     static constexpr size_t kMaxSourcesFileKeys = 64;
 
@@ -189,7 +192,9 @@ private:
     std::string seenText() const;
     void checkWait(uint64_t t);
 
-    bool usable(const Source& s, uint64_t t) const;
+    bool usable(const cs::PublicKey& key, const Source& s, uint64_t t) const;
+    size_t lateOnTheWay(const cs::PublicKey& key, uint64_t t) const;
+    uint64_t capMs() const;
     bool everUsable(const Source& s) const;
     bool startFetch(uint64_t t);
     bool chooseTarget(uint64_t t);
@@ -230,8 +235,16 @@ private:
     size_t fetchFailures_ = 0;     // fetches that ended without a snapshot and without a misbehaving source
     size_t excusedAborts_ = 0;     // fetches that ended with a source banned for a proven fault
     bool misbehaviour_ = false;    // a source was banned for a proven fault (a hash against the signed manifest) in this fetch
-    // pieces that timed out, (file, chunk) -> the source asked: its late reply is still taken
-    std::map<std::pair<std::string, uint32_t>, cs::PublicKey> late_;
+    // pieces that timed out, (file, chunk) -> the source asked: its late reply is still taken, and
+    // for one more timeout the piece still counts as on its way from that source
+    struct Late {
+        cs::PublicKey source{};
+        uint64_t sentAt = 0;
+        uint64_t expiredAt = 0;
+        uint64_t timeout = 0;
+    };
+    std::map<std::pair<std::string, uint32_t>, Late> late_;
+    uint64_t capExtensionMs_ = 0;   // the bootstrap cap grows by the download time of the agreed snapshot
     bool dirty_ = true;            // the input of the agreement changed since it was computed
     uint64_t lastByteAt_ = 0;
     uint64_t lastSendAt_ = 0;
