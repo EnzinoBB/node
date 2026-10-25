@@ -1487,7 +1487,9 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
         s=$(seq_of "$i"); s=${s:-0}
         if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
     done
-    (cd "$HERE" && python3 blockhashes.py --head "$head" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
+    # pruned nodes, and a node that joined from a snapshot, lack the oldest blocks
+    partial=$(for i in $PRUNED_NODES $({ [ "$JOIN_FETCH" = p2p ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo "$JOIN_NODE"); do echo "$i"; done | sort -u | paste -sd, -)
+    (cd "$HERE" && python3 blockhashes.py --head "$head" --partial "$partial" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
 fi
 
 # two blocks of one sequence: a node kept its own block while the round went on on the writer's
