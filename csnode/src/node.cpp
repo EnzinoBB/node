@@ -13,6 +13,7 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
+#include <csnode/snapshot_fetcher.hpp>
 #include <csnode/snapshot_messages.hpp>
 #include <csnode/snapshot_provider.hpp>
 #include <csnode/snapshot_service.hpp>
@@ -2247,7 +2248,9 @@ void Node::getSnapshotManifestReply(const uint8_t* data, const size_t size, cons
     if (!cs::snapshot_p2p::decode(data, size, reply)) {
         return logSnapshotDrop(snapshotMessagesDropped_, "a malformed manifest reply", sender);
     }
-    // nothing asked for it yet
+    if (snapshotFetcher_) {
+        return snapshotFetcher_->onManifestReply(sender, reply);
+    }
     logSnapshotDrop(snapshotMessagesDropped_, "an unexpected manifest reply", sender);
 }
 
@@ -2270,6 +2273,9 @@ void Node::getSnapshotPieceReply(const uint8_t* data, const size_t size, const c
     cs::snapshot_p2p::PieceReply reply;
     if (!cs::snapshot_p2p::decode(data, size, reply)) {
         return logSnapshotDrop(snapshotMessagesDropped_, "a malformed piece reply", sender);
+    }
+    if (snapshotFetcher_) {
+        return snapshotFetcher_->onPieceReply(sender, std::move(reply));
     }
     logSnapshotDrop(snapshotMessagesDropped_, "an unexpected piece reply", sender);
 }

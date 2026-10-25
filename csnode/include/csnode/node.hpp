@@ -28,6 +28,7 @@
 class Transport;
 
 namespace cs {
+class SnapshotFetcher;
 class SnapshotProvider;
 class SnapshotService;
 struct SnapshotNodeState;
@@ -510,6 +511,8 @@ private:
     // snapshots served to p2p neighbours ([snapshot] serve)
     std::unique_ptr<cs::SnapshotProvider> snapshotProvider_;
     std::unique_ptr<cs::SnapshotService> snapshotService_;
+    // snapshot fetched from p2p neighbours at a start on an empty database (constructed in bootstrap mode only)
+    std::unique_ptr<cs::SnapshotFetcher> snapshotFetcher_;
     std::chrono::steady_clock::time_point snapshotSummaryAt_{};
 
     uint32_t startPacketRequestPoint_ = 0;
