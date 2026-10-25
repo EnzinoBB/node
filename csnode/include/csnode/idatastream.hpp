@@ -58,7 +58,7 @@ public:
     /// @return Returns state of available bytes.
     ///
     bool isAvailable(std::size_t size) {
-        return (index_ + size) <= dataSize_;
+        return index_ <= dataSize_ && size <= dataSize_ - index_;
     }
 
     ///
