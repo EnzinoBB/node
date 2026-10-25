@@ -80,7 +80,15 @@
 #        SNAPSHOT_SERVE_NODES (optional, comma separated): those nodes run with [snapshot] serve=on
 #        and a checkpoint every 1'000 blocks; each must build the snapshot of a checkpoint and serve
 #        it; at the end one other node of this build is stopped and its known_peers.json must list
-#        each of them with the snapshot capability, and no other node with it
+#        each of them with the snapshot capability, and no other node with it. Every node gets
+#        [snapshot] fetch=off (a network that starts from block 0 has no snapshot to fetch), except
+#        the joining node with JOIN_FETCH=p2p
+#        JOIN_FETCH=p2p (needs JOIN_PRUNED_AT): the joining node starts on an empty database with
+#        [snapshot] fetch=auto and gets its snapshot from the serving nodes over p2p: min_sources
+#        JOIN_MIN_SOURCES (default 3), fetch_wait JOIN_WAIT (default 300), fetch_fallback
+#        JOIN_FALLBACK (default sync). Every node then listens on its own loopback /24 (127.0.<i>.1,
+#        NODE_NETS=1), so that the sources count as independent. It must agree, fetch, import, verify
+#        the digest of the snapshot at its quick start and reach the target
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -98,7 +106,8 @@
 #        databases yet. It must rebuild them from its blocks and log no database failure afterwards
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
-#        with pruned storage like PRUNE_NODE and must end with the same state digest
+#        with pruned storage like PRUNE_NODE and must end with the same state digest (JOIN_FETCH=p2p:
+#        it starts from a snapshot fetched from its neighbours instead)
 #        DB_BACKEND (default empty = the node's default, berkeleydb): db_backend of every node, or
 #        "mixed" for berkeleydb, lmdb and rocksdb in turn; pruned nodes use lmdb unless it names one
 #        CRASH_NODE (default 0 = off): that node is killed with SIGKILL CRASH_TIMES times (default 6)
@@ -223,6 +232,25 @@ if [ -n "$BIN_ALT" ]; then
         [ $((i % 2)) -eq 1 ] || { echo "FAIL: SNAPSHOT_SERVE_NODES names n$i, an even node, which runs BIN_ALT"; exit 1; }
     done
 fi
+JOIN_FETCH=${JOIN_FETCH:-}
+JOIN_MIN_SOURCES=${JOIN_MIN_SOURCES:-3}
+JOIN_WAIT=${JOIN_WAIT:-300}
+JOIN_FALLBACK=${JOIN_FALLBACK:-sync}
+# JOIN_EXPECT=fallback: too few sources on purpose; the joiner must give up after fetch_wait and sync from block 0
+JOIN_EXPECT=${JOIN_EXPECT:-snapshot}
+case "$JOIN_EXPECT" in snapshot|fallback) ;; *) echo "JOIN_EXPECT must be snapshot or fallback, got '$JOIN_EXPECT'"; exit 1 ;; esac
+case "$JOIN_FETCH" in ""|p2p) ;; *) echo "JOIN_FETCH must be p2p or empty, got '$JOIN_FETCH'"; exit 1 ;; esac
+case "$JOIN_FALLBACK" in sync|wait) ;; *) echo "JOIN_FALLBACK must be sync or wait, got '$JOIN_FALLBACK'"; exit 1 ;; esac
+if [ "$JOIN_FETCH" = p2p ]; then
+    [ "$JOIN_PRUNED_AT" -gt 0 ] && [ "${SNAPSHOT_AT:-0}" -eq 0 ] \
+        || { echo "JOIN_FETCH=p2p needs JOIN_PRUNED_AT and no SNAPSHOT_AT"; exit 1; }
+fi
+# one loopback /24 per node (127.0.<i>.1): the agreement counts sources by /24. The p2p library
+# binds its UDP socket to every interface whatever [host_input] ip says, so a datagram to another
+# node leaves from 127.0.0.1: node_nets_on rewrites its source to the sender's address (SNAT by the
+# sender's p2p port, needs sudo), which is the address the receiver's routing table records
+NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && echo 1 || echo 0)}
+node_ip() { if [ "$NODE_NETS" = 1 ]; then echo "127.0.$1.1"; else echo 127.0.0.1; fi; }
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
@@ -288,6 +316,7 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     refuse() { echo "FAIL: $1 needs a feature the official node lacks (BIN_ALT_OFFICIAL=1: the even nodes are official)"; exit 1; }
     for p in $PRUNED_NODES; do ! official_node "$p" || refuse "pruned storage on n$p"; done
     [ "$JOIN_NODE" -eq 0 ] || [ "$SNAPSHOT_AT" -eq 0 ] || ! official_node "$JOIN_NODE" || refuse "a snapshot import into n$JOIN_NODE"
+    [ "$JOIN_FETCH" != p2p ] || ! official_node "$JOIN_NODE" || refuse "a p2p snapshot join into n$JOIN_NODE"
     [ "$SNAPSHOT_AT" -eq 0 ] || [ "$PRUNE_NODE" -eq 0 ] || ! official_node "$PRUNE_NODE" || refuse "a snapshot export from n$PRUNE_NODE"
     [ "$STORAGE_SWITCH_AT" -eq 0 ] || refuse "STORAGE_SWITCH_AT"
     [ "$CONVERT_AT" -eq 0 ] || refuse "CONVERT_AT"
@@ -413,6 +442,11 @@ storage_section() {
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
     fi
+    if [ "$JOIN_FETCH" = p2p ] && [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]]; then
+        # a joiner needs JOIN_MIN_SOURCES sources on one block: a serving node builds its snapshots
+        # from the checkpoints every 1'000 blocks only, not from the minute ones of a pruned node
+        lines=${lines//checkpoint_every_minutes=1\\n/}
+    fi
     if [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && [[ "$lines" != *checkpoint_every=* ]]; then
         # a serving node builds its snapshots from the periodic checkpoints
         lines="${lines}checkpoint_every=1000\ncheckpoint_keep=2\n"
@@ -422,13 +456,29 @@ storage_section() {
     return 0
 }
 
+# the [snapshot] section of node i: no fetch at a start on an empty database (every node of this
+# network starts on one), but the joining node's with JOIN_FETCH=p2p; serve=on on the serving nodes.
+# The official nodes have no such section
+snapshot_section() {
+    local i=$1
+    official_node "$i" && return 0
+    printf "\n[snapshot]\n"
+    if [ "$JOIN_FETCH" = p2p ] && [ "$i" -eq "$JOIN_NODE" ]; then
+        printf "fetch=auto\nmin_sources=%s\nfetch_wait=%s\nfetch_fallback=%s\n" "$JOIN_MIN_SOURCES" "$JOIN_WAIT" "$JOIN_FALLBACK"
+    else
+        printf "fetch=off\n"
+    fi
+    if [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]]; then printf "serve=on\n"; fi
+    return 0
+}
+
 for i in $(seq 1 "$ALL_NODES"); do
     dir="$WORK/n$i"
     : > "$dir/hosts.txt"
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
         [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
-        [ "$j" -ne "$i" ] && echo "127.0.0.1:$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
+        [ "$j" -ne "$i" ] && echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
 [params]
@@ -442,7 +492,7 @@ sync_contract_execution=$([ "$SYNC_CONTRACT_EXECUTION" = 0 ] && echo false || ec
 round_elapse_time=$ROUND_ELAPSE_MS
 
 [host_input]
-ip=127.0.0.1
+ip=$(node_ip "$i")
 port=$((BASE_PORT + i))
 
 [api]
@@ -450,7 +500,7 @@ $(api_settings "$i")
 ajax_port=0
 diag_port=0
 $(storage_section "$i")
-$([[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && printf "\n[snapshot]\nserve=on\n")
+$(snapshot_section "$i")
 
 [Core]
 Filter="%Severity% >= info"
@@ -507,6 +557,16 @@ net_fault_off() {
     sudo tc qdisc del dev lo root 2>/dev/null || true
     sudo iptables -t mangle -F OUTPUT 2>/dev/null || true
 }
+node_nets_on() {
+    for i in $(seq 1 "$ALL_NODES"); do
+        sudo iptables -t nat -A POSTROUTING -o lo -p udp --sport $((BASE_PORT + i)) -j SNAT --to-source "$(node_ip "$i")" \
+            || { echo "FAIL: cannot give n$i the source address $(node_ip "$i")"; exit 1; }
+    done
+    echo "node nets: n1..n$ALL_NODES send their p2p datagrams from 127.0.<i>.1"
+}
+node_nets_off() {
+    sudo iptables -t nat -F POSTROUTING 2>/dev/null || true
+}
 net_fault_stats() {
     sudo tc -s qdisc show dev lo 2>/dev/null | grep -A1 netem | tail -1 | sed 's/^ *//'
 }
@@ -538,6 +598,7 @@ stop_all() {
         echo "net fault: until the end ($(net_fault_stats))"
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
+    [ "$NODE_NETS" != 1 ] || node_nets_off
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
@@ -612,6 +673,9 @@ if [ "$DISK_FULL_NODE" -gt 0 ]; then
     echo "disk-full test: n$DISK_FULL_NODE block DB on a ${DISK_TMPFS_MB} MB tmpfs"
 fi
 
+if [ "$NODE_NETS" = 1 ]; then
+    node_nets_on
+fi
 for i in $(seq 1 "$NODES"); do start_node "$i"; done
 echo "started $NODES nodes in $WORK"
 SAMPLER_PID=
@@ -678,8 +742,19 @@ while :; do
     echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
 
     if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
-        echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
+        if [ "$JOIN_FETCH" = p2p ]; then
+            echo "join test: n$JOIN_NODE starts on an empty database at sequence $min and fetches a snapshot from its neighbours"
+        else
+            echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
+        fi
         start_node "$JOIN_NODE"
+    fi
+    # a p2p join that stops (a refused snapshot: exit code 4, a failed bootstrap: 1) fails at once
+    if [ "$JOIN_FETCH" = p2p ] && [ -n "${PIDS[$JOIN_NODE]:-}" ] && ! kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null; then
+        status=0; wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || status=$?
+        echo "FAIL: n$JOIN_NODE exited with status $status while joining"
+        { grep -a 'SNAPSHOT' "$WORK/n$JOIN_NODE/node.log" || true; } | tail -40
+        exit 1
     fi
 
     # repeated SIGKILL of one node: odd kills right after it saves a checkpoint, even ones at any moment
@@ -1246,6 +1321,78 @@ if [ "$SNAPSHOT_AT" -gt 0 ]; then
         echo "snapshot test: n$JOIN_NODE started from the snapshot at block $snap_seq with its digest $got"
     fi
 fi
+if [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" = fallback ]; then
+    jdir="$WORK/n$JOIN_NODE"
+    jlog="$jdir/node.log"
+    fail_join() {
+        echo "FAIL: n$JOIN_NODE $1"
+        { grep -a 'SNAPSHOT' "$jlog" || true; } | tail -40
+        exit 1
+    }
+    # the fallback: no agreement in fetch_wait, the line naming the manual ways out, then block 0
+    grep -aq 'SNAPSHOT: started with an empty database after' "$jlog" || fail_join "did not fall back to syncing from block 0"
+    grep -aq -- '--download-snapshot' "$jlog" || fail_join "never logged the manual way out (--download-snapshot)"
+    ! grep -aq 'SNAPSHOT: started from block ' "$jlog" || fail_join "started from a snapshot although too few sources served one"
+    for f in snapshot.json snapshot.verified snapshot.mismatch snapshot-tmp db/.importing; do
+        [ ! -e "$jdir/$f" ] || fail_join "has $f after the fallback"
+    done
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: started with an empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+elif [ "$JOIN_FETCH" = p2p ]; then
+    jdir="$WORK/n$JOIN_NODE"
+    jlog="$jdir/node.log"
+    fail_join() {
+        echo "FAIL: n$JOIN_NODE $1"
+        { grep -a 'SNAPSHOT' "$jlog" || true; } | tail -40
+        exit 1
+    }
+    S=$({ grep -a -m1 'SNAPSHOT: started from block ' "$jlog" || true; } | sed -E 's/.*started from block ([0-9]+).*/\1/')
+    [ -n "$S" ] || fail_join "did not start from a snapshot fetched from its neighbours"
+    # the agreed group: "SNAPSHOT: block S hash … digest … : N sources (keys …)", without a reason
+    agreed=$({ grep -a -E "SNAPSHOT: block $S hash [0-9a-f.]+ digest [0-9a-f.]+ : [0-9]+ sources \(keys[^)]*\)$" "$jlog" || true; } | tail -1)
+    agreed_n=$(sed -E 's/.* : ([0-9]+) sources.*/\1/' <<<"$agreed")
+    [ "${agreed_n:-0}" -ge "$JOIN_MIN_SOURCES" ] || fail_join "agreed on block $S with ${agreed_n:-no} sources, $JOIN_MIN_SOURCES needed"
+    for line in "SNAPSHOT: fetched block $S" "SNAPSHOT: importing block $S" "SNAPSHOT: imported block $S" \
+                "Caches for QUICK START loaded successfully" "SNAPSHOT: snapshot.json verified at block $S"; do
+        grep -aqF "$line" "$jlog" || fail_join "never logged '$line'"
+    done
+    grep -aqE "STATE DIGEST #$S [0-9A-Fa-f]+ wallets [0-9]+ checkpoint loaded" "$jlog" || fail_join "did not quick-start from qs/$S"
+    for f in snapshot.verified snapshot.sources.json snapshot.json; do [ -f "$jdir/$f" ] || fail_join "has no $f"; done
+    for f in snapshot-tmp db/.importing snapshot.mismatch; do [ ! -e "$jdir/$f" ] || fail_join "still has $f"; done
+    # the digest of the agreed snapshot is the joiner's at its quick start
+    read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' "$jdir/snapshot.json")
+    [ "$snap_seq" = "$S" ] || fail_join "snapshot.json is for block $snap_seq, not $S"
+    got=$(grep -a -m1 -E "STATE DIGEST #$S " "$jlog" | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' || true)
+    [ "${got,,}" = "${snap_digest,,}" ] || fail_join "start-up digest ${got:-none} differs from the snapshot's $snap_digest"
+    # only nodes that announce snapshots are asked, and every source had a known address
+    serving_keys=""
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do serving_keys="$serving_keys ${KEYS[$((i - 1))]}"; done
+    for k in $({ grep -a -oE 'SNAPSHOT: asking [1-9A-HJ-NP-Za-km-z]+ for its manifest' "$jlog" || true; } | awk '{print $3}' | sort -u); do
+        [[ " $serving_keys " == *" $k "* ]] || fail_join "asked $k, which does not serve, for a manifest"
+    done
+    unknown=$({ grep -a -oE '[0-9]+ not counted: address unknown' "$jlog" || true; } | awk '$1 > 0' | wc -l)
+    [ "$unknown" -eq 0 ] || fail_join "counted no address for some sources ($unknown lines)"
+    sources=$(python3 -c 'import json,sys; print(" ".join(s["key"] + "@" + s["address"] for s in json.load(open(sys.argv[1]))))' "$jdir/snapshot.sources.json")
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE agreed: $(sed 's/.*SNAPSHOT: //' <<<"$agreed")"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 "SNAPSHOT: fetched block $S" "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 "SNAPSHOT: imported block $S" "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 -E "STATE DIGEST #$S .* checkpoint loaded" "$jlog" | sed 's/.*STATE DIGEST/STATE DIGEST/')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: snapshot.json verified' "$jlog" | sed 's/.*SNAPSHOT: //'); $(cat "$jdir/snapshot.verified")"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: started from block' "$jlog" | sed 's/.*SNAPSHOT: //'); sources: $sources"
+    joiner_key=${KEYS[$((JOIN_NODE - 1))]}
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        served=$({ grep -a "SNAPSHOT: served block $S to $joiner_key" "$WORK/n$i/node.log" || true; } | tail -1 | sed 's/.*SNAPSHOT: //')
+        echo "p2p join: n$i ${served:-served part of the snapshot or nothing (a source logs only a complete download)}"
+    done
+    if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+        # the official nodes never see the snapshot messages: the joiner asks only nodes that announce them
+        for i in $(seq 2 2 "$NODES"); do
+            ! grep -aqiE 'unknown message type|unknown.*type (40|41|42|43)\b' "$WORK/n$i"/*.log \
+                || fail_join "sent n$i (official) a message it does not know"
+        done
+    fi
+fi
 if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
     # no "tail | grep -q" under pipefail: grep -q stops at the first match and tail fails on SIGPIPE
     after5=$(tail -n +"$((switch_lines5 + 1))" "$WORK/n5/node.log")
@@ -1320,12 +1467,13 @@ done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$SNAPSHOT_AT" "$BIN_ALT_OFFICIAL" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$({ [ "$SNAPSHOT_AT" -gt 0 ] || [ "$JOIN_FETCH" = p2p ]; } && echo 1 || echo 0)" "$BIN_ALT_OFFICIAL" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
 # official nodes (the even ones with BIN_ALT_OFFICIAL) log no digest: their blocks are compared below
 official = {i for i in range(2, nodes + 1, 2)} if sys.argv[6] == "1" else set()
-# a node that joins from a snapshot starts past block 1000: only the initial nodes log it
+# a node that joins from a snapshot (imported or fetched over p2p) starts past block 1000: only the
+# initial nodes log it
 initial = int(sys.argv[4]) if int(sys.argv[5]) > 0 else nodes
 initial -= len([i for i in official if i <= initial])
 seen = collections.defaultdict(dict)
@@ -1359,7 +1507,9 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
         s=$(seq_of "$i"); s=${s:-0}
         if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
     done
-    (cd "$HERE" && python3 blockhashes.py --head "$head" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
+    # pruned nodes, and a node that joined from a snapshot, lack the oldest blocks
+    partial=$(for i in $PRUNED_NODES $({ [ "$JOIN_FETCH" = p2p ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo "$JOIN_NODE"); do echo "$i"; done | sort -u | paste -sd, -)
+    (cd "$HERE" && python3 blockhashes.py --head "$head" --partial "$partial" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
 fi
 
 # two blocks of one sequence: a node kept its own block while the round went on on the writer's

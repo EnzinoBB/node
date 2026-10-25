@@ -447,6 +447,7 @@ void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
         cs::PeerData peerData;
         auto ptr = reinterpret_cast<const uint8_t*>(p.id.GetPtr());
         peerData.id = EncodeBase58(ptr, ptr + p.id.size());
+        peerData.key = toPublicKey(p.id);
         peerData.ip = p.address.to_string();
         peerData.port = p.udp_port;
         if (p.user_data) {

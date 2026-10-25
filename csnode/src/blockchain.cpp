@@ -1,6 +1,7 @@
 #include <base58.h>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
 #include <fstream>
 #include <stdexcept>
 #include <csdb/currency.hpp>
@@ -52,6 +53,22 @@ BlockChain::BlockChain(csdb::Address genesisAddress, csdb::Address startAddress,
 }
 
 BlockChain::~BlockChain() {}
+
+void BlockChain::releaseHashDbs() {
+    if (blockHashes_) {
+        blockHashes_->close();
+        blockHashes_.reset();
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(std::filesystem::path(cachesPath) / "hashdb", ec);
+    std::filesystem::remove_all(std::filesystem::path(cachesPath) / "seqdb", ec);
+}
+
+void BlockChain::reopenHashDbs() {
+    if (!blockHashes_) {
+        blockHashes_ = std::make_unique<cs::BlockHashes>(cachesPath);
+    }
+}
 
 void BlockChain::subscribeToSignals() {
     // the order of two following calls matters
@@ -1359,6 +1376,16 @@ void BlockChain::tryFlushDeferredBlock() {
 }
 
 void BlockChain::close() {
+    if (!storage_.isOpen()) {
+        // never opened (a node stopped in its bootstrap mode, before init): no block to flush and no
+        // state to save as a checkpoint
+        stop_ = true;
+        if (blockHashes_) {
+            blockHashes_->close();
+        }
+        trxIndex_->close();
+        return;
+    }
     stop_ = true;
     tryFlushDeferredBlock();
 

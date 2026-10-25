@@ -57,11 +57,30 @@ quick-starts after a conversion.
   round before, and the hash chain to the declared block; the checkpoint must declare the
   manifest's state digest. Anything wrong leaves nothing behind. The node then quick-starts from
   that checkpoint.
-- The `[snapshot]` section of `config.ini` holds the settings of the coming p2p snapshot
-  sharing (snapshots served by community nodes to their neighbours and fetched from them at a
-  first start: `serve`, `serve_rate_kbps`, `serve_max_peers`, `snapshot_blocks`, `fetch`,
-  `fetch_wait`, `fetch_fallback`, `min_sources`, `sources`, `sources_file`, `fetch_rate_kbps`);
-  it does nothing yet. A key that is not one of these is logged and ignored.
+- The `[snapshot]` section of `config.ini` holds the settings of p2p snapshot sharing
+  (snapshots served by community nodes to their neighbours and fetched from them at a first
+  start: `serve`, `serve_rate_kbps`, `serve_max_peers`, `snapshot_blocks`, `fetch`,
+  `fetch_wait`, `fetch_fallback`, `min_sources`, `sources`, `sources_file`, `fetch_rate_kbps`).
+  A key that is not one of these is logged and ignored.
+- **A first start fetches a snapshot from the network.** A node whose `db/` holds no database,
+  with no checkpoint in `qs/`, `db_backend` `lmdb` or `rocksdb` and `fetch=auto` (the default),
+  starts its p2p transport without opening the chain and looks for neighbours that serve
+  snapshots (`SNAPSHOT: empty database: looking for snapshots on the network`). Once
+  `min_sources` sources in different /24 (or /48) networks, or keys listed in `sources`, agree
+  on a snapshot, it downloads it, imports it and quick-starts from it; meanwhile it processes no
+  other message. Without agreement within `fetch_wait` seconds it syncs from block 0
+  (`fetch_fallback=sync`) or keeps waiting (`wait`); the log line names `--download-snapshot` as
+  the faster way. A BerkeleyDB node never fetches. The sources used are listed in
+  `snapshot.sources.json`.
+- **Private and genesis networks set `fetch=off`.** Every node of a network that starts from
+  block 0 starts on an empty database: with `fetch=auto`, LMDB and RocksDB nodes would wait
+  `fetch_wait` for snapshots nobody has.
+- **The restored state is checked at start.** When `snapshot.json` is present (written by
+  `--import-snapshot` or by the fetch) and `snapshot.verified` is not, the node compares the
+  digest of the state its quick start loaded with the manifest's. It writes `snapshot.verified`,
+  or `snapshot.mismatch` and stops with exit code 4; it refuses to start while
+  `snapshot.mismatch` exists. An import interrupted by a kill leaves `db/.importing`; the next
+  start removes what that import wrote before it looks at `db/`.
 
 ## Start-up behaviour
 

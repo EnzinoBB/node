@@ -184,6 +184,12 @@ public:
     // storage adaptor
     void close();
     void requestStop() { stop_ = true; }
+    // a node that starts on an empty database and imports a snapshot (Node's bootstrap mode, before
+    // init): the importer writes caches/hashdb and caches/seqdb itself and refuses to run while they
+    // exist, so the empty ones the constructor opened are closed and removed first, and opened again
+    // after it. Called while nothing reads the block hashes (the chain is not open)
+    void releaseHashDbs();
+    void reopenHashDbs();
     // init() failed because the quick-start checkpoint it loaded continues after the last block on
     // disk: that checkpoint cannot be used with this database
     bool checkpointAheadOfBlocks() const { return checkpointAheadOfBlocks_; }

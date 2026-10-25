@@ -12,6 +12,7 @@
 
 #include <csdb/database.hpp>
 #include <csdb/storage_backend.hpp>
+#include <csnode/snapshot_bootstrap.hpp>
 #include <csnode/snapshot_builder.hpp>
 #include <csnode/snapshot_importer.hpp>
 #include <csnode/snapshot_manifest.hpp>
@@ -172,7 +173,21 @@ int runImport(const Config& config, const std::string& manifestFile) {
     const auto backend = config.getStorageSettings().dbBackend;
     sayImport() << "block " << manifest->seq << " (blocks " << manifest->firstBlock << ".." << manifest->seq << "), state digest "
                 << manifest->stateDigest << ", signed by " << manifest->nodeKey << ", into a new " << backend << " database" << std::endl;
+    // a kill during the import leaves db/.importing: the next start removes what it wrote (main.cpp).
+    // Only into an empty folder: the marker must never name a database or a checkpoint of the node's own
+    {
+        std::error_code ec;
+        if (!csdb::backend::detect(dbPath, true).empty() || fs::exists(fs::path("qs") / std::to_string(manifest->seq), ec)) {
+            sayImport() << "not restored: " << dbPath << " already holds a database, or qs/" << manifest->seq << " exists" << std::endl;
+            return 2;
+        }
+    }
+    if (!cs::snapshot_bootstrap::writeImportMarker(dbPath, backend, manifest->seq)) {
+        sayImport() << "not restored: cannot write " << dbPath << "/" << cs::snapshot_bootstrap::kImportingFile << std::endl;
+        return 2;
+    }
     const auto r = cs::importSnapshot(fs::path(manifestFile).parent_path(), *manifest, fs::current_path(), dbPath, backend);
+    cs::snapshot_bootstrap::removeImportMarker(dbPath);
     if (!r.ok) {
         sayImport() << "not restored: " << r.error << (r.fileAtFault.empty() ? "" : " (" + r.fileAtFault + ")") << std::endl;
         return 2;

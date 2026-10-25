@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <csignal>
+#include <filesystem>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -13,7 +14,9 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
+#include <csnode/snapshot_bootstrap.hpp>
 #include <csnode/snapshot_fetcher.hpp>
+#include <csnode/snapshot_importer.hpp>
 #include <csnode/snapshot_messages.hpp>
 #include <csnode/snapshot_provider.hpp>
 #include <csnode/snapshot_service.hpp>
@@ -124,6 +127,22 @@ Node::Node(cs::config::Observer& observer)
     setupNextMessageBehaviour();
     setupPoolSynchronizerBehaviour();
 
+    // connected here, before the transport runs, not in init(): cs::Signal emits without a lock, and
+    // the processor thread already emits while a node in bootstrap mode fetches its snapshot. Until
+    // the chain is up they are inert (checkPing only counts; processTimer needs sendingTimer_, started
+    // in a round; packetFlushed needs the conveyer's rounds; sendRequest needs a sync) or gated
+    // (onPingChecked)
+    cs::Connector::connect(&transport_->pingReceived, &stat_, &cs::RoundStat::checkPing);
+    cs::Connector::connect(&stat_.pingChecked, this, &Node::onPingChecked);
+
+    cs::Connector::connect(&sendingTimer_.timeOut, this, &Node::processTimer);
+    cs::Connector::connect(&cs::Conveyer::instance().packetFlushed, this, &Node::onTransactionsPacketFlushed);
+    cs::Connector::connect(&poolSynchronizer_->sendRequest, this, &Node::sendBlockRequest);
+    cs::Connector::connect(&snapshotTickTimer_.timeOut, this, &Node::onSnapshotTick);
+
+    globalPublicKey_.fill(0);
+    globalPublicKey_.at(31) = 7U;
+
     good_ = init();
 }
 
@@ -131,6 +150,14 @@ Node::~Node() {
     std::cout << "Destructor called\n";
 
     sendingTimer_.stop();
+    bootstrapStop_ = true;
+    stopSnapshotTimer();
+    {
+        std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+        if (bootstrapThread_.joinable()) {
+            bootstrapThread_.join();
+        }
+    }
 
     delete solver_;
     delete transport_;
@@ -144,10 +171,39 @@ void Node::dumpKnownPeersToFile() {
 }
 
 bool Node::init() {
+    // a state restored from a snapshot that did not match its digest (verifyAtStart): never started on
+    if (std::error_code ec; std::filesystem::exists(cs::snapshot_bootstrap::kMismatchFile, ec)) {
+        cserror() << "SNAPSHOT: " << cs::snapshot_bootstrap::kMismatchFile << " is present: the state restored from a snapshot did not "
+                  << "match its digest; remove db/, caches/, qs/, snapshot.json and the file to start again";
+        exitCode_ = 4;
+        return false;
+    }
+    if (!initCommon()) {
+        return false;
+    }
+    // an empty database: the chain opens once a snapshot is fetched from the neighbours (or after the fallback)
+    if (startBootstrap()) {
+        return true;
+    }
+    const auto chain = initChain();
+    if (chain == ChainInit::Failed) {
+        return false;
+    }
+    if (chain == ChainInit::StopAfterInit) {
+        return true;
+    }
+    if (!verifyAtStart()) {
+        return false;
+    }
+    return initRunning();
+}
+
+bool Node::initCommon() {
     auto& initConfidants = cs::ConfigHolder::instance().config()->getInitialConfidants();
     initialConfidants_ = decltype(initialConfidants_)(initConfidants.begin(), initConfidants.end());
     if (initialConfidants_.find(solver_->getPublicKey()) != initialConfidants_.end()) {
         transport_->setPermanentNeighbours(initialConfidants_);
+        permanentAtStart_ = initialConfidants_;
     }
 
 #ifdef NODE_API
@@ -169,7 +225,10 @@ bool Node::init() {
     solver_->init(nodeIdKey_, nodeIdPrivate_, cachesSerializationManager_);
     solver_->startDefault();
     cachesSerializationManager_.bind(stat_);
+    return true;
+}
 
+Node::ChainInit Node::initChain() {
     if (cs::ConfigHolder::instance().config()->newBlockchainTop()) {
         if (!blockChain_.init(
                 cs::ConfigHolder::instance().config()->getPathToDB(),
@@ -197,7 +256,7 @@ bool Node::init() {
             } else {
                 removeFailedQuickStartData();
             }
-            return false;
+            return ChainInit::Failed;
         }
         Consensus::TimeMinStage1 = blockChain_.getTimeMinStage1();
         Consensus::stakingOn = blockChain_.getStakingOn();
@@ -217,7 +276,7 @@ bool Node::init() {
             solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
             solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
         }
-        return true;
+        return ChainInit::StopAfterInit;
     }
     if (!blockChain_.init(
             cs::ConfigHolder::instance().config()->getPathToDB(),
@@ -243,7 +302,7 @@ bool Node::init() {
         } else {
             removeFailedQuickStartData();
         }
-        return false;
+        return ChainInit::Failed;
     }
 
     if (initialConfidants_.size() < Consensus::MinTrustedNodes) {
@@ -254,7 +313,41 @@ bool Node::init() {
         solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
         solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
     }
+    return ChainInit::Ready;
+}
 
+bool Node::verifyAtStart() {
+    namespace sb = cs::snapshot_bootstrap;
+    sb::StartupReport report;
+    switch (sb::startupCheck(".", blockChain_.getLastSeq(), blockChain_.checkpointDigest(), report)) {
+        case sb::StartupCheck::NoManifest:
+        case sb::StartupCheck::AlreadyVerified:
+            return true;
+        case sb::StartupCheck::NotFormat2:
+            cslog() << "SNAPSHOT: snapshot.json is not a format-2 manifest (a restore by the Docker image): not compared here";
+            return true;
+        case sb::StartupCheck::Verified:
+            cslog() << "SNAPSHOT: snapshot.json verified at block " << report.seq;
+            return true;
+        case sb::StartupCheck::Skipped:
+            cswarning() << "SNAPSHOT: block " << report.seq << " of snapshot.json is behind the chain (last block "
+                        << blockChain_.getLastSeq() << "): digest not compared";
+            return true;
+        case sb::StartupCheck::Mismatch:
+            break;
+    }
+    if (!report.detail.empty()) {
+        cserror() << "SNAPSHOT DIGEST MISMATCH: " << report.detail << "; stopping (exit code 4)";
+    }
+    else {
+        cserror() << "SNAPSHOT DIGEST MISMATCH at block " << report.seq << ": snapshot " << report.snapshot << ", node " << report.node
+                  << "; stopping (exit code 4)";
+    }
+    exitCode_ = 4;
+    return false;
+}
+
+bool Node::initRunning() {
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
     // full digest once here, before taking part in the network; incremental from now on
     logStateDigest(blockChain_.getLastSeq());
@@ -301,13 +394,6 @@ bool Node::init() {
     cs::Conveyer::instance().setPrivateKey(solver_->getPrivateKey());
     std::cout << "Initialization finished\n";
 
-    cs::Connector::connect(&transport_->pingReceived, &stat_, &cs::RoundStat::checkPing);
-    cs::Connector::connect(&stat_.pingChecked, this, &Node::onPingChecked);
-
-    cs::Connector::connect(&sendingTimer_.timeOut, this, &Node::processTimer);
-    cs::Connector::connect(&cs::Conveyer::instance().packetFlushed, this, &Node::onTransactionsPacketFlushed);
-    cs::Connector::connect(&poolSynchronizer_->sendRequest, this, &Node::sendBlockRequest);
-
     
     if (!getBlockChain().getIncorrectBlockNumbers()->empty()) {
         tryResolveHashProblems();
@@ -315,8 +401,6 @@ bool Node::init() {
  
     initBootstrapRP(initialConfidants_);
     EventReport::sendRunningStatus(*this, Running::Status::Run);
-    globalPublicKey_.fill(0);
-    globalPublicKey_.at(31) = 7U;
     return true;
 }
 
@@ -351,6 +435,277 @@ void Node::run() {
     transport_->run();
 }
 
+bool Node::startBootstrap() {
+    namespace sb = cs::snapshot_bootstrap;
+    const auto& config = *cs::ConfigHolder::instance().config();
+    // copied: the config observer may replace the configuration while the fetch runs
+    const SnapshotData cfg = config.getSnapshotSettings();
+    const std::string dbPath = config.getPathToDB();
+    const std::string backend = config.getStorageSettings().dbBackend;
+    bool removedTmp = false;
+    if (const auto skip = sb::notNeeded(cfg, ".", dbPath, backend, config.newBlockchainTop(), &removedTmp)) {
+        if (skip->why == sb::Skip::Backend) {
+            cswarning() << "SNAPSHOT: " << skip->text << ": syncing from block 0";
+        }
+        else if (skip->why == sb::Skip::Checkpoint) {
+            csinfo() << "SNAPSHOT: not fetching: " << skip->text;
+        }
+        else {
+            csdebug() << "SNAPSHOT: not fetching: " << skip->text;
+        }
+        return false;
+    }
+    if (removedTmp) {
+        cslog() << "SNAPSHOT: removed " << sb::kTmpDir << "/ left by an interrupted fetch";
+    }
+    if (!transport_->isGood()) {
+        return false;
+    }
+    bootstrapDbPath_ = dbPath;
+    bootstrapBackend_ = backend;
+    bootstrapPermanent_ = permanentAtStart_;
+
+    cs::SnapshotFetcher::Hooks hooks;
+    hooks.sendManifestRequest = [this](const cs::PublicKey& to, const cs::snapshot_p2p::ManifestRequest& request) {
+        sendSnapshotMessage(to, MsgTypes::SnapshotManifestRequest, cs::snapshot_p2p::encode(request));
+    };
+    hooks.sendPieceRequest = [this](const cs::PublicKey& to, const cs::snapshot_p2p::PieceRequest& request) {
+        sendSnapshotMessage(to, MsgTypes::SnapshotPieceRequest, cs::snapshot_p2p::encode(request));
+    };
+    hooks.addNeighbours = [this](const std::set<cs::PublicKey>& keys) {
+        // permanent before the VersionRequest: the flag is read when the reply comes
+        // (neighbourhood.cpp), and a source must get past the neighbour limit (design 4.3)
+        bootstrapPermanent_.insert(keys.begin(), keys.end());
+        transport_->setPermanentNeighbours(bootstrapPermanent_);
+        transport_->addToNeighbours(keys);
+    };
+    hooks.addressOf = [this](const cs::PublicKey& key) {
+        const auto it = peerAddresses_.find(key);
+        return it == peerAddresses_.end() ? std::string() : it->second;
+    };
+    snapshotFetcher_ = std::make_unique<cs::SnapshotFetcher>(cfg, sb::kTmpDir, std::move(hooks));
+    bootstrapping_ = true;
+    bootstrapStartedAt_ = std::chrono::steady_clock::now();
+    cslog() << "SNAPSHOT: empty database: looking for snapshots on the network (fetch=" << cfg.fetch << ", min_sources=" << cfg.minSources
+            << ", fetch_wait=" << cfg.fetchWait << " s, fetch_fallback=" << cfg.fetchFallback << ")";
+    // ticks are queued to the processor thread, which starts with Node::run()
+    snapshotTickTimer_.start(500, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+    return true;
+}
+
+void Node::onSnapshotTick() {
+    // a tick queued before the hand-over or the stop, or the worker runs
+    if (!snapshotFetcher_ || bootstrapStop_ || bootstrapWorking_) {
+        return;
+    }
+    cs::SnapshotFetcher::Peers peers;
+    if (bootstrapTicks_++ % 2 == 0) {
+        // the routing table once a second
+        std::vector<cs::PeerData> known;
+        transport_->getKnownPeers(known);
+        lastKnown_.clear();
+        for (const auto& p : known) {
+            lastKnown_.emplace_back(p.key, p.capabilities);
+            if (!p.ip.empty()) {
+                peerAddresses_[p.key] = p.ip;
+            }
+        }
+    }
+    peers.known = lastKnown_;
+    transport_->forEachNeighbour([&peers](const cs::PublicKey& key, cs::Sequence, cs::RoundNumber) { peers.neighbours.insert(key); });
+    snapshotFetcher_->tick(peers);
+    switch (snapshotFetcher_->phase()) {
+        case cs::SnapshotFetcher::Phase::Import:
+            if (!snapshotFetcher_->result()) {
+                failBootstrap(1, "the fetch ended without a snapshot to import");
+                break;
+            }
+            startBootstrapWorker(true);
+            break;
+        case cs::SnapshotFetcher::Phase::Fallback:
+            // the fetcher logged why, and the manual way out
+            startBootstrapWorker(false);
+            break;
+        default:
+            break;
+    }
+}
+
+void Node::startBootstrapWorker(bool import) {
+    std::optional<std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>> snapshot;
+    if (import) {
+        // read here: the fetcher is not touched from the worker
+        snapshot = snapshotFetcher_->result();
+        if (!snapshot) {
+            return;
+        }
+        bootstrapSeq_ = snapshot->first.seq;
+        bootstrapSources_ = snapshot->second.size();
+    }
+    else {
+        bootstrapSeq_ = 0;
+        bootstrapSources_ = 0;
+    }
+    std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+    if (bootstrapStop_) {
+        return;
+    }
+    bootstrapWorking_ = true;
+    bootstrapThread_ = std::thread([this, snapshot = std::move(snapshot)] {
+        // the import and the chain's opening may throw (storage engines, caches): a failed bootstrap,
+        // not a terminate
+        std::string what;
+        try {
+            bootstrapWork(snapshot ? &*snapshot : nullptr);
+            return;
+        }
+        catch (const std::exception& e) {
+            what = e.what();
+        }
+        catch (...) {
+            what = "unknown exception";
+        }
+        CallsQueue::instance().insert([this, what] {
+            joinWorker();
+            failBootstrap(1, "the bootstrap failed: " + what);
+        });
+    });
+}
+
+void Node::bootstrapWork(const std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>* snapshot) {
+    namespace sb = cs::snapshot_bootstrap;
+    std::error_code ec;
+    if (snapshot) {
+        const auto& m = snapshot->first;
+        uint64_t bytes = 0;
+        for (const auto& f : m.files) {
+            bytes += f.size;
+        }
+        cslog() << "SNAPSHOT: importing block " << m.seq << " (" << bytes / (1u << 20) << " MB) from " << sb::kTmpDir << "/";
+        const auto started = std::chrono::steady_clock::now();
+        // a kill from here on leaves a partial database: main.cpp removes it at the next start
+        cs::SnapshotImportResult r;
+        if (!sb::writeImportMarker(bootstrapDbPath_, bootstrapBackend_, m.seq)) {
+            r.error = "cannot write " + bootstrapDbPath_ + "/" + sb::kImportingFile;
+        }
+        else {
+            blockChain_.releaseHashDbs();
+            r = cs::importSnapshot(sb::kTmpDir, m, ".", bootstrapDbPath_, bootstrapBackend_, &bootstrapStop_);
+            blockChain_.reopenHashDbs();
+            if (!r.ok) {
+                // the importer removed what it wrote
+                sb::removeImportMarker(bootstrapDbPath_);
+            }
+        }
+        if (!r.ok) {
+            if (bootstrapStop_) {
+                return;
+            }
+            cswarning() << "SNAPSHOT: the import of block " << m.seq << " failed: " << r.error
+                        << (r.fileAtFault.empty() ? "" : " (" + r.fileAtFault + ")");
+            CallsQueue::instance().insert([this, file = r.fileAtFault] {
+                joinWorker();
+                if (snapshotFetcher_ && !bootstrapStop_) {
+                    // Collect again, or the fallback after the last attempt: the next tick sees it
+                    snapshotFetcher_->onImportFailed(file);
+                }
+            });
+            return;
+        }
+        if (!sb::writeSources(".", snapshot->second)) {
+            cswarning() << "SNAPSHOT: cannot write " << sb::kSourcesFile;
+        }
+        std::filesystem::remove_all(sb::kTmpDir, ec);
+        sb::removeImportMarker(bootstrapDbPath_);
+        cslog() << "SNAPSHOT: imported block " << m.seq << " in "
+                << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count() << " s";
+    }
+    else {
+        std::filesystem::remove_all(sb::kTmpDir, ec);
+        cslog() << "SNAPSHOT: opening an empty database: the node syncs from block 0";
+    }
+    if (bootstrapStop_) {
+        return;
+    }
+
+    // the chain opens on this thread while the processor thread drops every message: the quick start
+    // finds qs/<S>, or the empty database gets its genesis block
+    const auto chain = initChain();
+    if (bootstrapStop_ || isStopRequested()) {
+        return;
+    }
+    if (chain != ChainInit::Ready) {
+        CallsQueue::instance().insert([this] {
+            joinWorker();
+            failBootstrap(1, bootstrapSeq_ != 0 ? "the blockchain could not be opened after the import"
+                                                : "the blockchain could not be opened");
+        });
+        return;
+    }
+    if (!verifyAtStart()) {
+        CallsQueue::instance().insert([this] {
+            joinWorker();
+            failBootstrap(4, "the state restored from the snapshot does not match its digest");
+        });
+        return;
+    }
+    CallsQueue::instance().insert([this] {
+        joinWorker();
+        finishBootstrap();
+    });
+}
+
+void Node::stopSnapshotTimer() {
+    std::lock_guard<std::mutex> lock(snapshotTimerMutex_);
+    snapshotTickTimer_.stop();
+}
+
+void Node::joinWorker() {
+    {
+        std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+        // the worker queued this as its last statement: the join is immediate
+        if (bootstrapThread_.joinable()) {
+            bootstrapThread_.join();
+        }
+    }
+    bootstrapWorking_ = false;
+}
+
+void Node::finishBootstrap() {
+    if (bootstrapStop_) {
+        return;
+    }
+    if (!initRunning()) {
+        failBootstrap(1, "the node could not start after opening the blockchain");
+        return;
+    }
+    // from the next message on, the node processes everything: initRunning() is complete
+    bootstrapping_ = false;
+    stopSnapshotTimer();
+    snapshotFetcher_.reset();
+    transport_->setPermanentNeighbours(permanentAtStart_);
+    bootstrapPermanent_.clear();
+    peerAddresses_.clear();
+    lastKnown_.clear();
+    const auto took = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - bootstrapStartedAt_).count();
+    if (bootstrapSeq_ != 0) {
+        cslog() << "SNAPSHOT: started from block " << bootstrapSeq_ << " fetched from " << bootstrapSources_ << " sources in " << took << " s";
+    }
+    else {
+        cslog() << "SNAPSHOT: started with an empty database after " << took << " s without a snapshot";
+    }
+}
+
+void Node::failBootstrap(int code, const std::string& why) {
+    if (bootstrapStop_) {
+        return;
+    }
+    cserror() << "SNAPSHOT: " << why << "; stopping (exit code " << code << ")";
+    exitCode_ = code;
+    good_ = false;
+    Node::stopOnError();
+}
+
 void Node::removeFailedQuickStartData() {
     const auto loaded = cachesSerializationManager_.getLoadedVersion();
     if (blockChain_.checkpointAheadOfBlocks() && loaded.has_value()) {
@@ -370,6 +725,22 @@ void Node::stop() {
     EventReport::sendRunningStatus(*this, Running::Status::Stop);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+    // bootstrap mode: the importer stops between two blocks, BlockChain::init at its stop request
+    // (onStopRequested); the thread is taken out under the lock and joined outside it, never by itself
+    bootstrapStop_ = true;
+    stopSnapshotTimer();
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+        if (bootstrapThread_.joinable() && bootstrapThread_.get_id() != std::this_thread::get_id()) {
+            worker = std::move(bootstrapThread_);
+        }
+        // on the worker itself the thread stays where it is: ~Node joins it once it has returned
+    }
+    if (worker.joinable()) {
+        worker.join();
+    }
+
     if (poolSynchronizer_) {
         poolSynchronizer_->stop();
     }
@@ -382,8 +753,10 @@ void Node::stop() {
 void Node::destroy() {
     good_ = false;
 
-    api_->stop();
-    cswarning() << "[API STOPPED]";
+    if (api_) {
+        api_->stop();
+        cswarning() << "[API STOPPED]";
+    }
 
     if (snapshotService_) {
         snapshotService_->stop();
@@ -417,6 +790,11 @@ void Node::initBootstrapRP(const std::set<cs::PublicKey>& confidants) {
 void Node::onNeighbourAdded(const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber lastRound) {
     cslog() << "NODE: new neighbour added " << EncodeBase58(neighbour.data(), neighbour.data() + neighbour.size())
         << " last seq " << lastSeq << " last round " << lastRound;
+
+    // bootstrap mode: no round to ask for yet (initRunning() and the pings bring it after the hand-over)
+    if (bootstrapping_) {
+        return;
+    }
 
     if (lastRound > cs::Conveyer::instance().currentRoundNumber()) {
         roundPackRequest(neighbour, lastRound);
@@ -2165,6 +2543,9 @@ void Node::onTransactionsPacketFlushed(const cs::TransactionsPacket& packet) {
 }
 
 void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
+    if (bootstrapping_) {
+        return;
+    }
     auto lastSequence = blockChain_.getLastSeq();
 
     if (lastSequence < sequence) {
@@ -2305,6 +2686,12 @@ void Node::sendBlockRequestToConfidants(cs::Sequence sequence) {
 Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const MsgTypes type, const cs::PublicKey sender) {
     if (!good_) {
         return MessageActions::Drop;
+    }
+
+    // bootstrap mode: the two snapshot replies reach the fetcher, everything else, the snapshot
+    // requests too (nothing is served yet), is dropped without a word
+    if (bootstrapping_) {
+        return cs::snapshot_bootstrap::processWhileBootstrapping(type) ? MessageActions::Process : MessageActions::Drop;
     }
 
     // always process this types
@@ -4749,6 +5136,10 @@ void Node::deepBlockValidation(const csdb::Pool& block, bool* check_failed) {//c
 }
 
 void Node::onRoundTimeElapsed() {
+    // bootstrap mode: no chain to start a round from
+    if (bootstrapping_) {
+        return;
+    }
     solver_->resetGrayList();
     const cs::PublicKey& own_key = solver_->getPublicKey();
     if (initialConfidants_.find(own_key) == initialConfidants_.end()) {

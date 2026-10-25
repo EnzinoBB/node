@@ -50,6 +50,8 @@ constexpr static int8_t OS_UNSPECIFIED = int8_t(-1);
 struct PeerData {
     // encoded to base58 NodeId
     std::string id;
+    // the same NodeId, the node's public key
+    PublicKey key{};
     // p2p public address
     std::string ip;
     // p2p port

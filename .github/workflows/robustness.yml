@@ -311,6 +311,21 @@ jobs:
           - name: snapshot-join-format1
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_FORMAT=1 TARGET_SEQ=3100
+          # a node joining from a snapshot fetched from its p2p neighbours: n3 (pruned LMDB), n5 (full
+          # RocksDB) and n7 (full LMDB) serve, n9 starts on an empty database (pruned LMDB, then full
+          # RocksDB), agrees on the snapshot of 3 sources in 3 loopback /24s, fetches it, imports it and
+          # quick-starts from it. The even nodes run BerkeleyDB and never serve nor are asked, so the rows
+          # also run with node_alt_ref=official
+          - name: snapshot-p2p-join
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          - name: snapshot-p2p-join-full
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # one serving node for a joiner that needs two: it waits fetch_wait (60 s), then syncs from block 0
+          - name: snapshot-p2p-fallback
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb SNAPSHOT_SERVE_NODES=3 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=2 JOIN_WAIT=60 JOIN_FALLBACK=sync JOIN_EXPECT=fallback TARGET_SEQ=3300
+            fixed: true
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
           - name: storage-switch
             official: 'no'   # needs a feature of this fork on an even node
