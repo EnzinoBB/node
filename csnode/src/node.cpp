@@ -732,15 +732,13 @@ void Node::stop() {
     std::thread worker;
     {
         std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
-        worker = std::move(bootstrapThread_);
+        if (bootstrapThread_.joinable() && bootstrapThread_.get_id() != std::this_thread::get_id()) {
+            worker = std::move(bootstrapThread_);
+        }
+        // on the worker itself the thread stays where it is: ~Node joins it once it has returned
     }
     if (worker.joinable()) {
-        if (worker.get_id() != std::this_thread::get_id()) {
-            worker.join();
-        }
-        else {
-            worker.detach();
-        }
+        worker.join();
     }
 
     if (poolSynchronizer_) {
