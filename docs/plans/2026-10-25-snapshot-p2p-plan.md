@@ -230,84 +230,529 @@ requested per simulated second.
 
 **Pass.** Unit tests green; no behaviour change on the network (nothing constructs the fetcher).
 
-## Step P5. Bootstrap mode of `Node`, start-up, scenarios (medium-large; the delicate one)
+## Step P5. Bootstrap mode of `Node`, start-up, scenarios (large; the delicate one: three PRs)
 
-**Files.** `csnode/include/csnode/node.hpp`, `csnode/src/node.cpp` (`init` 141-293 split;
-constructor 102-121; `onNeighbourAdded` 384-392; `onPingChecked` 2134-2145; `chooseMessageAction`
-2169-2172; `stop` 340-352; `destroy` 354-368), `csnode/src/blockchain.cpp:1350` (`close()` guard),
-`client/src/main.cpp` (nothing: the hook is inside `Node`; the `--import-snapshot` path at 203-206
-stays), `packaging/docker/entrypoint.sh` (only the `snapshot.mismatch` and digest-wait parts, the
-rest in P6), `ci/testnet/run.sh`, `.github/workflows/robustness.yml`, `docs/snapshots.md`,
-`docs/differences.md`, `docs/CHANGES.md`; a test-build hook (`CREDITS_TESTNET`) for the forged
-scenario in `snapshot_builder.cpp` (alter one balance in the copied `walletscache.dat` before
-hashing when `./testnet-forge-snapshot` exists) and in `SnapshotProvider` (flip one byte of a
-piece when `./testnet-corrupt-pieces` exists).
+Planned 2026-10-25 against `origin/master` 0be88cbf (P0 #99, P1 #100, P2 #101, P3 #102, P4 #104
+merged; CRLF files, same line numbers) and PR #103 (`origin/ci/official-nodes`: official 4.2.532
+nodes on the even positions of CI networks, `node_alt_ref=official`, `BIN_ALT_OFFICIAL=1` in
+`run.sh`, a scenario that needs a fork-only feature on an even node is refused). File:line
+references below are on 0be88cbf unless marked `[#103]`.
 
-**Change.**
+Split into **P5a** (the node: bootstrap mode, hand-over, verification; two CI rows), **P5b** (the
+harness: faults, forged and corrupt sources, the late server, official variants, docs) and **P5c**
+(optional: the p2p fork's connection-endpoint accessor, only if CI or mainnet show unknown
+addresses). P5a is the only one that changes a running node; P5b and P5c are reviewable alone.
 
-- `Node::init` → `initCommon()` (142-166), `initChain()` (168-255, both branches), `initRunning()`
-  (257-292); the five connections at 276-281 move to the constructor after 117. `init()` runs
-  `initCommon()`, then if `needsSnapshot()` (design 6.2) constructs `fetcher_` with the hooks
-  (`sendDirect` of the two requests; `addNeighbours` = `transport_->addToNeighbours` +
-  `setPermanentNeighbours(keys ∪ initialConfidants_)`; `addressOf` from `getKnownPeers`), starts
-  `fetchTimer_` (500 ms, `CallQueuePolicy`) whose slot builds `Peers` (`getKnownPeers` once per
-  second, `forEachNeighbour`) and calls `tick`, sets `bootstrapping_ = true`, logs
-  `SNAPSHOT: empty database: looking for snapshots on the network (fetch=auto, min_sources=N)`,
-  and returns `true`; otherwise `initChain()` and `initRunning()` as today.
-- Gates: `chooseMessageAction` after 2170-2172: `if (bootstrapping_) return (type ==
-  SnapshotManifestReply || type == SnapshotPieceReply) ? Process : Drop;`; `onNeighbourAdded`
-  and `onPingChecked`: `if (bootstrapping_) return;`.
-- Hand-over: when `fetcher_->phase() == Import`, the tick starts `bootstrapThread_`: write the
-  `sources` into the manifest copy for `snapshot.json`, `importSnapshot(...)`; on failure
-  `fetcher_->onImportFailed(file)` queued back to the processor thread; on success
-  `initChain()` on the worker (if it fails: log, `Node::requestStop()`, exit 1 as a failed init
-  does today through `Peer`), then `CallsQueue::instance().insert([this] { initRunning();
-  verifySnapshotAtStart(); bootstrapping_ = false; fetchTimer_.stop(); fetcher_.reset();
-  transport_->setPermanentNeighbours(initialConfidants_ if I am one, else {}); log SNAPSHOT:
-  started from block S fetched from N sources in T s })`.
-- Fallback: `phase() == Fallback`: on the processor thread, log the 6.4 line, then the same
-  hand-over without an import (`initChain()` writes the genesis and the node syncs from 0) — on
-  the worker thread as well, so that the processor thread is never blocked for minutes.
-- `verifySnapshotAtStart()` (design 6.8): `snapshot.json` present and `snapshot.verified` absent:
-  compare `blockChain_.checkpointDigest()` (`blockchain.cpp:124`) with the manifest's; write
-  `snapshot.verified`, or `snapshot.mismatch` + `SNAPSHOT DIGEST MISMATCH …` + stop with exit
-  code 4 (a new exit path through `Peer`: `Node::exitCode()` read by `Peer::onRun`,
-  `peer.cpp:130-147`); `snapshot.mismatch` present at `init` → refuse with the same code. This
-  also covers directories restored by `--import-snapshot` and `--download-snapshot`.
-- `Node::stop`: `if (fetcher_) fetcher_->stop(); if (bootstrapThread_.joinable()) join;` before
-  `poolSynchronizer_->stop()`. `BlockChain::close()`: `if (!storage_.isOpen()) { stop_ = true;
-  return; }` first (and the same guard where `destroy()` touches the chain). `snapshot-tmp/`
-  removed in `needsSnapshot()` before the fetch and after a fallback.
-- `run.sh`: `SNAPSHOT_SERVE_NODES=4,6,7` (each gets `serve=on`, `serve_rate_kbps=0`,
-  `checkpoint_every=1000`, `checkpoint_keep=3`); `JOIN_FETCH=p2p` (needs `JOIN_AT`): the joining
-  node `NODES + 1` is started at sequence `JOIN_AT` with an empty directory, `fetch=auto`,
-  `min_sources=$JOIN_MIN_SOURCES` (3), `fetch_wait=$JOIN_WAIT` (300), `fetch_fallback=$JOIN_FALLBACK`
-  (sync), the network's `hosts.txt`, API open; `JOIN_KILL_DURING_FETCH=1` kills it once on the
-  first `SNAPSHOT: fetching block` line and once on `SNAPSHOT: importing`; `FORGE_NODE=7` and
-  `CORRUPT_NODE=7` create the test-build hook files in that node's directory. End checks: the
-  joining node's log has `SNAPSHOT: block S hash … : N sources`, `started from block S fetched
-  from`, `Caches for QUICK START loaded successfully`, `snapshot.verified` exists, the digest at
-  `S` or `S+1` equals the manifest's (the check of `run.sh:1163-1170` reused), the serving nodes
-  logged `served block S to`; for `-few`: the waiting line, the manual-import line, `SLOW START`,
-  the target reached; `-dropped`: `snapshot-tmp` absent after the restart and the join completes;
-  `-forged`: `minority` logged for n7's digest, `rejected piece from` for n7, completion;
-  `-mixed`: no `Unknown message type` in the even nodes' logs and no request sent to them (the
-  joining node logs `asking <key>` lines; none is an even node's key).
-- `robustness.yml` rows: `snapshot-p2p-join`, `-few`, `-wait` (the serving node switched on by a
-  `sed` on its `config.ini` after 90 s; the observer period is 5 min: the scenario waits up to
-  7 min once, acceptable, or the test network sets a shorter observer period if the config has
-  one), `-dropped`, `-forged`, `-mixed` (`node_alt_ref` = the last master before P1).
-- `docs/snapshots.md`: the operator view: what `fetch=auto` does, the waiting line, the manual
-  way (`--download-snapshot`, `--import-snapshot`), `serve=on`, the keys, what the network sees.
+### What the code on master already settles
 
-**Tests.** Unit: `needsSnapshot()` on temporary directories (empty, lmdb present, `qs/0` only,
-`qs/1000` present, berkeleydb backend, `fetch=off`); the gates (a `Node` cannot be constructed in
-a unit test: the gate logic is a free function `snapshotBootstrapAction(type, bootstrapping)`
-tested alone). The rest is the private network.
+- `Node::init` (`node.cpp:146-321`) is one function: the pre-chain part (`147-171`: initial
+  confidants and permanent neighbours `147-151`, the API object and its five connections
+  `153-166`, `solver_->init` and `startDefault` `169-170`, `cachesSerializationManager_.bind(stat_)`
+  `171`) **already runs before the chain opens**, so `initCommon()` in bootstrap mode is exactly
+  today's code; what is new is the time gap after it and the transport running during that gap.
+  The chain part is `173-256` (the `--set-bc-top` branch `173-220` returns early at `219` without
+  running the API or the snapshot service; the normal branch `222-256`), then `258-260` (the ready
+  line and the full digest), `263` (`api_->run()`), `262-287` (the P3 snapshot service),
+  `289-301` (transport and solver checks, the conveyer key), `304-309` (five connections),
+  `311-321` (`tryResolveHashProblems`, `initBootstrapRP`, `sendRunningStatus`, `globalPublicKey_`).
+- `snapshotFetcher_` is a member already (`node.hpp:515`) and the two reply handlers forward to it
+  (`node.cpp:2246-2255`, `2272-2282`); nothing constructs it. `sendSnapshotMessage`
+  (`node.cpp:2180-2187`) sends `BaseFlags::Clear` packets through `transport_->sendDirect`.
+- `chooseMessageAction` (`node.cpp:2305-2422`) returns `Process` for the four snapshot types in its
+  always-process list (`2332-2336`) after the `good_` check (`2306-2308`).
+- The transport reads two atomics of an un-opened `BlockChain`: `uuid()` (`blockchain.cpp:384-386`,
+  `uuid_` is `std::atomic<uint64_t>`, `blockchain.hpp:570`) in `Neighbourhood::sendVersionReply`
+  (`neighbourhood.cpp:62-71`) and `isCompatible` (`125-135`: `myUuid == 0` matches anyone), and
+  `getLastSeq()` (`blockchain.cpp:2495-2497`, `lastSequence_` is `std::atomic<cs::Sequence>`,
+  `blockchain.hpp:571`, value-initialised to 0 and set to 0 again at `init`, `:153`) in
+  `sendVersionReply`, `sendPong` (`76-86`) and `PoolSynchronizer::onPingReceived`
+  (`poolsynchronizer.cpp:288-295`, harmless: it records peers ahead of 0). `RoundStat::onPingReceived`
+  (`roundstat.cpp`) touches no chain. Nothing else on the transport's threads reaches the chain.
+- Slots reached from the transport that must be gated (all run on the processor thread through
+  `CallsQueue`, `transport.cpp:276-279`): `Node::onNeighbourAdded` (`node.cpp:417-425`: a
+  `RoundPackRequest` when the neighbour's round is ahead), `Node::onPingChecked` (`2167-2178`, from
+  `RoundStat::checkPing`, connected at `304-305`), **`Node::onRoundTimeElapsed`** (connected in the
+  constructor through `setupNextMessageBehaviour`, `329-332`; reached from `Transport::run`'s
+  `mainThreadIterated` every 2 s → `RoundStat::checkRoundElapse` → queued emit every
+  `round_elapse_time`: an initial confidant would gather a bootstrap table from block 0; a plain
+  node only logs `Waiting for next round...` and calls `initBootstrapRP`), and `chooseMessageAction`.
+  `RoundStat::checkStoreBlockElapse` → `PoolSynchronizer::onStoreBlockTimeElapsed` is inert (no
+  sync started). `Node::processTimer` runs only once `sendingTimer_` starts inside a round.
+- `BlockChain`'s constructor (`blockchain.cpp:39-52`) creates and opens `caches/hashdb` and
+  `caches/seqdb` (`BlockHashes::initialization`, `blockhashes.cpp:191-206`; `cs::Lmdb`'s
+  constructor creates the folder, `lmdbxx/lmdb.cpp:8-18`) and `caches/indexdb` (`TransactionsIndex`,
+  `transactionsindex.cpp:40-60`). **The importer refuses to run when `caches/hashdb` or `caches/seqdb`
+  exists** (`snapshot_importer.cpp:187-189`) and opens its own `BlockHashes` on that path
+  (`:199-200`); two LMDB environments on one path in one process are not allowed. So the bootstrap
+  must close and remove the two empty hash databases before the import and reopen them after
+  (`releaseHashDbs()` / `reopenHashDbs()` below). `caches/indexdb` is not touched by the importer and
+  stays open (the quick start rebuilds it, `blockchain.cpp:273-280`).
+- `BlockChain::close()` (`blockchain.cpp:1361-1415`) on a storage that was never opened:
+  `tryFlushDeferredBlock` is a no-op, `getHashBySequence` through `blockHashes_` returns empty,
+  `storage_.flush()` returns false (`storage.cpp:685-686`: `!d->db`), `storage_.close()` is safe
+  (`:702-713`), then `blockHashes_->close()` and `trxIndex_->close()`, then it returns at
+  `blocksOnDisk == false` with the warning `block 0 is not in the database, no caches saved`. It
+  would not crash, but it logs a misleading warning and touches `qs/`: the guard of the design's
+  6.9 goes in anyway, before anything else.
+- The importer's own cleanup runs in process only (`snapshot_importer.cpp:98-115`): after a kill in
+  the middle of an import, `db/` holds a partial database, `caches/hashdb` is half written and
+  `qs/<S>.tmp` exists. The next start's `csdb::backend::detect` would call that a database and
+  `needsSnapshot()` would be false: the node would open a chain that starts at `F > 0` without a
+  checkpoint. P5a writes a marker before the import and cleans up at the next start, **before
+  `dbcheck::check`** (`main.cpp:193-201`), which would otherwise inspect the partial database.
+- `dbcheck::check` takes `db/.lock` only when `db/` exists (`dbcheck.cpp:53-62`): on a first start
+  nothing is locked for the whole bootstrap, and a second `node` in the same folder would bootstrap
+  too. `runImport` creates `db/` first for this reason (`snapshot_export.cpp`, `runImport`).
+- The capability bit is fixed for the life of the process (`transport.cpp:37-45`): a node switched
+  to `serve=on` by a config edit announces nothing until it restarts. The design's `-wait` row (a
+  config edit seen by the observer) cannot work by discovery; the late server is restarted, or
+  listed in the joiner's `sources_file` (configured keys are asked whatever they announce,
+  `snapshot_fetcher.cpp:359-391`).
+- `SnapshotFetcher::Hooks::addressOf` is called at discovery (`snapshot_fetcher.cpp:151`) and again
+  when a manifest arrives (`:435`); an empty string makes the source "not counted: address unknown"
+  in the 30-s line (`:520-561`). `Transport::getKnownPeers` (`transport.cpp:440-472`) reads the
+  routing table only (`Host::GetKnownNodes` → `RoutingTable::GetKnownNodes`); a passive TCP
+  connection does not enter the routing table by itself (`p2p/src/network.cc:254-272`) and a
+  k-bucket can drop an entry while the connection lives. `Host::connections_` is private
+  (`p2p/src/host.h:107`); `Connection::GetEndpoint()` exists (`connection.h:48`). P5a keeps a
+  last-seen address per key on the `Node`; P5c adds the accessor to the fork if needed.
+- Every node of a private network starts on an empty database, and `fetch=auto` is the default
+  (`config.hpp:81`): with `db_backend=lmdb` or `rocksdb` every node of `run.sh` would enter
+  bootstrap mode and wait `fetch_wait` for snapshots that nobody has. **The harness writes
+  `fetch=off` for every node but the joiner.** The same applies to any genesis network
+  (`docs/differences.md` says so). A BerkeleyDB node (the official default) never bootstraps.
+- `netPrefix` collapses every CI node into the one /24 of 127.0.0.1: the p2p scenarios give each
+  node its own loopback /24 (`[host_input] ip=127.0.<i>.1`, the same address in every `hosts.txt`
+  line; Linux routes all of 127/8 to `lo`), or use `sources=` keys (counted by key).
+- `CallsQueue::insert` (`structures.hpp:327-345`) is lock-free and called from any thread today
+  (`Transport::onPingReceived`, `transport.cpp:193-197`); `callAll` runs on the processor thread
+  only (`Transport::process`, `transport.cpp:276-279`), which also drains it during the bootstrap,
+  since `Transport::run` (`transport.cpp:126-147`) starts the processor thread as today.
+- `cs::Timer::start(msec, Type::Standard, RunPolicy::CallQueuePolicy)` (`timer.hpp`) queues each
+  tick to `CallsQueue`, as `PoolSynchronizer` uses it (`poolsynchronizer.cpp:101-105`); `stop()`
+  joins the timer thread and may be called from a slot (`poolsynchronizer.cpp:429`, `440`).
+- `Node::stopOnError()` (`node.cpp:4315-4318`) stops the node from inside as a signal does;
+  `onStopRequested` (`4320+`) runs on the thread that emits, calls `stop()` and `stop()` is called
+  again by `Peer::onRun` (`peer.cpp:130-147`). `main.cpp:232-234` returns `peer.executeProtocol()`
+  (0 or -1); there is no exit code of the node's own yet.
+- `csconnector::connector`'s constructor (`csconnector.cpp:38-55`) starts the executor API thread
+  (`BINARY_TCP_EXECAPI`) at construction, before the chain opens, today as in bootstrap mode; the
+  public API starts in `run()` only. A contract executor started by the node could call the
+  executor API during the bootstrap: nothing runs a contract without a chain, but the handlers
+  read `blockchain_` without a guard (a risk below, covered by the contracts row).
+- The manifest has no `sources` field (`snapshot_manifest.hpp:25-66`) and `snapshot.json` is the
+  signed manifest as the importer writes it (`snapshot_importer.cpp:332-339`): the sources used
+  go to a sibling file `snapshot.sources.json` (design 6.7 said "appended": a sibling keeps the
+  manifest byte-identical and `fromJson` untouched; P8 reads the sibling).
 
-**Pass.** Unit tests green; the six scenarios green twice in a row; `testnet.yml`, `all-storage`,
-`snapshot-join*`, `storage-switch` unchanged (a node with a database never enters bootstrap mode);
-the Docker smoke test unchanged (format 1 restore still in place until P6).
+### P5a. The node: bootstrap mode, hand-over, verification (large)
+
+**Files.** `csnode/include/csnode/node.hpp`, `csnode/src/node.cpp` (`init` split, constructor
+`67-128`, `stop` `368-380`, `destroy` `382-401`, `onNeighbourAdded` `417-425`, `onRoundTimeElapsed`,
+`onPingChecked` `2167-2178`, `chooseMessageAction` `2305-2308`), `csnode/include/csnode/blockchain.hpp`
+and `csnode/src/blockchain.cpp` (`close()` guard at `1361`, `releaseHashDbs`/`reopenHashDbs`),
+new `csnode/include/csnode/snapshot_bootstrap.hpp` + `csnode/src/snapshot_bootstrap.cpp` (free
+functions, testable without a `Node`, as `csnode/bootstrapgate.hpp` does for the bootstrap table),
+`client/src/main.cpp` (the interrupted-import cleanup and `db/` before `dbcheck::check`
+`193-201`; the exit code after `232-234`), `lib/include/lib/system/common.hpp` (`PeerData::key`,
+the 32 bytes next to the base58 `id`, filled in `transport.cpp:440-472`), `ci/testnet/run.sh`
+(`fetch=off` for every node, `JOIN_FETCH=p2p` and its end checks, one loopback /24 per node),
+`.github/workflows/robustness.yml` (two rows), `docs/CHANGES.md`, `docs/differences.md` (private
+networks set `fetch=off`), `tests/csnode/snapshot_bootstrap_tests.cpp`.
+
+**Step 1. `snapshot_bootstrap.hpp`: the pure parts.** Written and unit-tested first.
+
+```cpp
+namespace cs::snapshot_bootstrap {
+// why this start does not fetch a snapshot; nullopt: it does (design 6.2). Pure over the file system.
+std::optional<std::string> notNeeded(const SnapshotData& cfg, const std::filesystem::path& nodeDir,
+                                     const std::string& dbPath, const std::string& backend, bool setBcTop);
+// the action for a message while bootstrapping: the two replies are processed, all else dropped
+Node::MessageActions action(MsgTypes type, bool bootstrapping, Node::MessageActions otherwise);
+// snapshot.json present and snapshot.verified absent: compare the digest the quick start computed
+enum class StartupCheck { NoManifest, AlreadyVerified, Verified, Skipped, Mismatch };
+StartupCheck startupCheck(const std::filesystem::path& nodeDir, cs::Sequence lastSeq,
+                          const CheckpointDigest& computed, std::string& detail);   // writes .verified / .mismatch
+// db/.importing: what an interrupted in-process import left; removed before dbcheck
+bool cleanupInterruptedImport(const std::filesystem::path& nodeDir, const std::string& dbPath, std::string& what);
+bool writeSources(const std::filesystem::path& nodeDir, const std::vector<SourceManifest>& used);   // snapshot.sources.json
+}
+```
+
+- `notNeeded` returns the reason, in this order: `fetch=off`; `--set-bc-top`; `db_backend` is not
+  `lmdb`/`rocksdb` (`a <backend> database cannot start above block 0`: the conversion rule,
+  `storage_convert.cpp:328-334`); `csdb::backend::detect(dbPath, false)` not empty (`storage_backend.hpp`;
+  `false`: the engine is not opened, the lock is ours anyway); a `qs/<digits>` directory exists
+  (`0` included: a previous run's checkpoint means a previous run; the log says to remove `qs/` to
+  fetch); `snapshot.mismatch` present is **not** a reason here, it is a refusal (step 4). It also
+  removes `snapshot-tmp/` when it returns nullopt and logs `SNAPSHOT: removed snapshot-tmp/ left by
+  an interrupted fetch`.
+- `action`: `bootstrapping ? (type == SnapshotManifestReply || type == SnapshotPieceReply ? Process : Drop) : otherwise`.
+- `startupCheck`: no `snapshot.json` → `NoManifest`; `snapshot.verified` → `AlreadyVerified`;
+  `fromJson` fails → `Mismatch` with the detail (a manifest that does not parse is not one the
+  importer wrote); `lastSeq != seq` → `Skipped`, `snapshot.verified` written with
+  `skipped: chain at <lastSeq>` (the chain moved past the snapshot before a start verified it:
+  the digest at `S` is gone); else `state_digest`, `wallets` and `settings_digest` compared with
+  `computed` → `Verified` (file written, content `verified at block S`) or `Mismatch`
+  (`snapshot.mismatch` written with both digests). Only the imported head is compared: the
+  importer's database ends at `S` and the quick start sets `lastSequence_ = S`, so a restored
+  node's first start always has `lastSeq == S` (the `S + 1` label of a shutdown checkpoint,
+  `blockchain.cpp:128-134`, concerns live checkpoints of earlier builds, not imports).
+- `cleanupInterruptedImport`: when `<dbPath>/.importing` exists: remove the backend files of the
+  marker's backend (`csdb::backend::files`, as the importer's `failWith` does, `snapshot_importer.cpp:104-108`),
+  `.backend`, `caches/hashdb`, `caches/seqdb`, `caches/blockhashes.rebuild`, every `qs/<digits>.tmp`,
+  `snapshot.json`, `snapshot.sources.json`, then the marker; `what` lists what was removed. The
+  marker's content is the backend name; `db/.lock` is never removed.
+- `writeSources`: `[{"key": base58, "address": "ip"}]` of the agreed sources, 0600 like the
+  fetcher's files.
+
+**Tests** (`snapshot_bootstrap_tests.cpp`, temporary directories): `notNeeded` for each reason and
+for the fetching case (empty folder, `snapshot-tmp/` removed), `qs/0` and `qs/2000` present,
+`detect` on an LMDB folder made by `csdb::backend::open`; `action` for every `MsgTypes` value of
+the snapshot family and two others, with and without the flag; `startupCheck` in each of the five
+outcomes and the files it writes; `cleanupInterruptedImport` on a folder laid out as a killed
+import (an LMDB `db/`, `caches/hashdb`, `qs/2000.tmp`, `snapshot.json`) leaves `db/.lock` and
+`caches/indexdb`; `writeSources` round trip through a JSON parse.
+
+**Step 2. `Node::init` split (no behaviour change yet).** `init()` becomes:
+
+```cpp
+bool Node::init() {
+    if (!initCommon()) return false;                 // node.cpp:147-171 as they are
+    if (startBootstrap()) return true;               // step 3; false today
+    if (!initChain()) return false;                  // 173-256: both branches, the failure handling of both
+    if (!verifyAtStart()) return false;              // step 4
+    return initRunning();                            // 258-321 minus the five connections
+}
+```
+
+- The five connections at `304-309` move to the constructor after `117` (`checkPing`, `pingChecked →
+  onPingChecked`, `sendingTimer_.timeOut → processTimer`, `packetFlushed →
+  onTransactionsPacketFlushed`, `poolSynchronizer_->sendRequest → sendBlockRequest`), with the
+  reason in a comment: `cs::Signal` emits without a lock (`signals.hpp:70-77`) and the processor
+  thread is emitting during a bootstrap. They are inert until the chain is up: `checkPing` only
+  counts; `onPingChecked` is gated; `processTimer` needs `sendingTimer_`; `packetFlushed` needs
+  the conveyer's rounds; `sendRequest` needs `sync()`. `globalPublicKey_` (`318-319`) moves to the
+  constructor too.
+- `initChain()` keeps the `--set-bc-top` branch's early `return true` by returning an enum
+  `{Failed, Ready, StopAfterInit}`; `init()` returns true at `StopAfterInit` without `initRunning()`,
+  as today (`219`).
+- `initRunning()` = `258-321` in that order, without the moved lines; it also keeps the P3
+  service block (`262-287`): **a bootstrapping node has no `snapshotProvider_` and no
+  `snapshotService_` until `initRunning()`**, so a request during the bootstrap is dropped by the
+  gate before the handler (and the handler's `if (!snapshotProvider_) return;`, `2235-2237`,
+  covers the rest). Its bit 24 may be announced meanwhile when `serve=on` (fixed at start): a
+  requester sees silence, which the fetcher treats as "not ready" (design 5.3a).
+- Check: `testnet.yml` green, `snapshot-join`, `all-storage`, `storage-switch`, `checkpoint-ahead`
+  (`--set-bc-top` path) unchanged. This step can be its own commit, reviewed as a pure move.
+
+**Step 3. Bootstrap mode.** New members: `std::atomic<bool> bootstrapping_{false}`,
+`cs::Timer snapshotTickTimer_` (its `timeOut` connected to `Node::onSnapshotTick` in the
+constructor), `std::thread bootstrapThread_`, `std::atomic<bool> bootstrapStop_{false}`,
+`std::set<cs::PublicKey> bootstrapPermanent_`, `std::unordered_map<cs::PublicKey, std::string>
+peerAddresses_` (processor thread only), `std::chrono::steady_clock::time_point bootstrapStartedAt_`,
+`size_t bootstrapTicks_ = 0`, `std::unique_ptr<cs::SnapshotFetcher> snapshotFetcher_` (exists),
+`static std::atomic<int> exitCode_`.
+
+`bool Node::startBootstrap()`:
+
+```cpp
+const auto& cfg = ConfigHolder::config()->getSnapshotSettings();
+if (auto why = snapshot_bootstrap::notNeeded(cfg, ".", dbPath, backend, newBlockchainTop())) {
+    if (cfg.fetch == "auto" && *why is the backend reason) cswarning() << "SNAPSHOT: " << *why << ": syncing from block 0";
+    else csdebug() << "SNAPSHOT: not fetching: " << *why;
+    return false;
+}
+if (!transport_->isGood()) return false;            // as initRunning would
+SnapshotFetcher::Hooks hooks;
+hooks.sendManifestRequest = [this](const PublicKey& to, const ManifestRequest& r) { sendSnapshotMessage(to, MsgTypes::SnapshotManifestRequest, snapshot_p2p::encode(r)); };
+hooks.sendPieceRequest    = [this](const PublicKey& to, const PieceRequest& r)    { sendSnapshotMessage(to, MsgTypes::SnapshotPieceRequest,    snapshot_p2p::encode(r)); };
+hooks.addNeighbours = [this](const std::set<PublicKey>& keys) {
+    bootstrapPermanent_.insert(keys.begin(), keys.end());
+    transport_->setPermanentNeighbours(bootstrapPermanent_);   // before the VersionRequest: PeerInfo::permanent is read at the reply (neighbourhood.cpp:95)
+    transport_->addToNeighbours(keys);                         // neighbourhood.cpp:220-226
+};
+hooks.addressOf = [this](const PublicKey& key) { auto it = peerAddresses_.find(key); return it == peerAddresses_.end() ? std::string() : it->second; };
+snapshotFetcher_ = std::make_unique<SnapshotFetcher>(cfg, "snapshot-tmp", std::move(hooks));
+bootstrapping_ = true;
+bootstrapStartedAt_ = now;
+cslog() << "SNAPSHOT: empty database: looking for snapshots on the network (fetch=auto, min_sources=" << cfg.minSources
+        << ", fetch_wait=" << cfg.fetchWait << " s, fetch_fallback=" << cfg.fetchFallback << ")";
+snapshotTickTimer_.start(500, Timer::Type::Standard, RunPolicy::CallQueuePolicy);
+return true;
+```
+
+The permanent set: `initCommon()` set it to `initialConfidants_` when this node is one
+(`147-151`); the hook adds the fetcher's keys to that (`bootstrapPermanent_` starts as the set
+`initCommon()` installed) so that sources bypass the 16-neighbour limit (`neighbourhood.cpp:147`,
+design 4.3); the fetcher bounds the keys (64 discovered + configured, `snapshot_fetcher.hpp`
+`kMaxSources`), and it re-adds a key every 60 s (`kNeighbourRetryMs`) until it is a neighbour.
+`finishBootstrap()` restores the set `initCommon()` installed.
+
+`void Node::onSnapshotTick()` (processor thread, every 500 ms):
+
+```cpp
+if (!snapshotFetcher_ || bootstrapThread_.joinable()) return;   // a tick queued after the hand-over, or the worker runs
+SnapshotFetcher::Peers peers;
+if (bootstrapTicks_++ % 2 == 0) {                                 // the routing table once a second
+    std::vector<PeerData> known; transport_->getKnownPeers(known);
+    for (auto& p : known) { peers.known.emplace_back(p.key, p.capabilities); if (!p.ip.empty()) peerAddresses_[p.key] = p.ip; }
+    lastKnown_ = peers.known;
+} else peers.known = lastKnown_;
+transport_->forEachNeighbour([&](const PublicKey& k, Sequence, RoundNumber) { peers.neighbours.insert(k); });
+snapshotFetcher_->tick(peers);
+switch (snapshotFetcher_->phase()) {
+    case Phase::Import:   startBootstrapWorker(true);  break;   // result() is set
+    case Phase::Fallback: startBootstrapWorker(false); break;   // the fetcher logged the 6.4 line
+    default: break;
+}
+```
+
+`peerAddresses_` is the fallback the task asks for: an address seen once in the routing table is
+kept for the key, so a k-bucket eviction during the download does not turn a counted source into
+an unknown one. A peer that was never in the routing table (an inbound connection only) stays
+unknown: the 30-s line counts them (`N not counted: address unknown`), the CI rows require 0
+(below), and P5c closes the gap if mainnet shows otherwise. `peerAddresses_` is bounded by the
+routing table's size (k-buckets); clear it in `finishBootstrap()`.
+
+`void Node::startBootstrapWorker(bool import)` (processor thread): `snapshotTickTimer_` keeps
+running (the tick returns at once while the worker runs); `bootstrapThread_ = std::thread([this, import] { bootstrapWork(import); })`.
+
+`void Node::bootstrapWork(bool import)` (the worker thread; it touches only the chain, the
+file system and `CallsQueue::insert`):
+
+1. With `import`: `const auto [manifest, sources] = *snapshotFetcher_->result();` (read before
+   the thread starts, captured by value: the fetcher is not touched from the worker);
+   `cslog() << "SNAPSHOT: importing block " << S << " (" << MB << " MB) from snapshot-tmp/"`;
+   write `<dbPath>/.importing` (content: the backend); `blockChain_.releaseHashDbs()`;
+   `const auto r = importSnapshot("snapshot-tmp", manifest, ".", dbPath, backend, &bootstrapStop_)`;
+   `blockChain_.reopenHashDbs()`; on `!r.ok`: remove the marker, `cswarning() << "SNAPSHOT: the import refused ... "` (the
+   fetcher logs its own line too), `CallsQueue::instance().insert([this, file = r.fileAtFault] { joinWorker(); if (snapshotFetcher_) snapshotFetcher_->onImportFailed(file); })`,
+   return (the tick resumes: Collect again, or Fallback after 3). On success: `writeSources`,
+   remove `snapshot-tmp/` and the marker, `cslog() << "SNAPSHOT: imported block " << S << " in " << t << " s"`.
+   `bootstrapStop_` set → the importer returns `stopped` → treated as a failure path that queues
+   nothing (`stop()` is in progress).
+2. Without `import` (fallback): remove `snapshot-tmp/`; `cslog() << "SNAPSHOT: opening an empty database: the node syncs from block 0"`.
+3. `const auto chain = initChain();` on this thread (the quick start finds `qs/<S>`:
+   `CachesSerializationManager::load` lists `qs/` at load time, `caches_serialization_manager.cpp:654+`;
+   `removeFailedQuickStartData` as today on failure). `Failed` → `CallsQueue::insert([this] { joinWorker(); failBootstrap(1, "the blockchain could not be opened after the snapshot"); })`, return.
+4. `verifyAtStart()` (step 4) → `Mismatch` → `CallsQueue::insert([this] { joinWorker(); failBootstrap(4, ...); })`, return.
+5. `CallsQueue::instance().insert([this] { joinWorker(); finishBootstrap(); })`.
+
+`void Node::joinWorker()`: `if (bootstrapThread_.joinable()) bootstrapThread_.join();` (the
+worker queued this as its last statement: the join is immediate).
+
+`void Node::finishBootstrap()` (processor thread): `initRunning()` (API, snapshot service,
+conveyer key, `initBootstrapRP`, `sendRunningStatus`); then `bootstrapping_ = false` (the first
+message processed sees a complete node); `snapshotTickTimer_.stop()`; `snapshotFetcher_.reset()`;
+`transport_->setPermanentNeighbours(initialConfidants_ contains me ? initialConfidants_ : {})`;
+`peerAddresses_.clear()`; `cslog() << "SNAPSHOT: started from block " << S << " fetched from " << N << " sources in " << T << " s"` (T since `bootstrapStartedAt_`), or after a fallback
+`"SNAPSHOT: started with an empty database after " << T << " s without a snapshot"`. The
+round-table and block requests that a node makes at start (`onNeighbourAdded`, `onPingChecked`)
+were suppressed during the bootstrap: `initRunning()`'s `initBootstrapRP` and the next pings
+(every 2 s) bring the round table as for any node that starts behind.
+
+`void Node::failBootstrap(int code, const std::string& why)` (processor thread): `cserror() <<
+"SNAPSHOT: " << why << "; stopping (exit code " << code << ")"`; `exitCode_ = code`; `good_ = false`;
+`Node::stopOnError()`. Never call `stop()` from the worker: `stop()` joins the worker.
+
+**Gates** (one line each, all on the processor thread):
+
+- `chooseMessageAction`, after `2306-2308`: `if (bootstrapping_) return snapshot_bootstrap::action(type, true, MessageActions::Drop);`
+  (requests are dropped too: a bootstrapping node does not serve; the drop is silent).
+- `onNeighbourAdded` (`417`), `onPingChecked` (`2167`), `onRoundTimeElapsed`: `if (bootstrapping_) return;`
+  at the top (`onNeighbourAdded` keeps its log line before the gate).
+
+**Stop and destroy.** `Node::stop()` (`368-380`), before `poolSynchronizer_->stop()`:
+`bootstrapStop_ = true; if (snapshotFetcher_) snapshotFetcher_->stop(); snapshotTickTimer_.stop();
+if (bootstrapThread_.joinable()) bootstrapThread_.join();` — `stop()` runs twice (`onStopRequested`
+and `Peer::onRun`), all of it idempotent. The worker inside `initChain()` sees
+`blockChain_.requestStop()` (set by `onStopRequested`, `4321`) and the importer sees
+`bootstrapStop_` between blocks (`snapshot_importer.cpp:208-210`); a join waits for the current
+block at most. `Node::destroy()` (`382-401`): `if (api_) api_->stop()`; the rest is guarded already.
+`BlockChain::close()` (`1361`): first line `if (!storage_.isOpen()) { stop_ = true; blockHashes_->close(); trxIndex_->close(); return; }`.
+`BlockChain::releaseHashDbs()`: `blockHashes_->close(); blockHashes_.reset(); remove_all(caches/hashdb, caches/seqdb)`;
+`reopenHashDbs()`: `blockHashes_ = std::make_unique<BlockHashes>(cachesPath)` (its `initialization`
+connects the LMDB `failed` signals on the worker thread; those signals are emitted by that LMDB
+only). Both are called on the worker while nothing reads `blockHashes_` (the chain is closed,
+messages are dropped, the public API is not running). `BlockChain::close()`'s early return above
+guards `blockHashes_` null with `if (blockHashes_)`.
+
+**Step 4. Verification at start (design 6.8) and the exit code.** `bool Node::verifyAtStart()`:
+`startupCheck(".", blockChain_.getLastSeq(), blockChain_.checkpointDigest(), detail)`
+(`blockchain.cpp:1078-1085`); `Verified` → `cslog() << "SNAPSHOT: snapshot.json verified at block " << S`;
+`Skipped` → `cswarning() << "SNAPSHOT: block S of snapshot.json is behind the chain (last block L): digest not compared"`;
+`Mismatch` → `cserror() << "SNAPSHOT DIGEST MISMATCH at block " << S << ": snapshot " << d1 << ", node " << d2 << "; stopping (exit code 4)"`,
+`exitCode_ = 4`, return false. Called from `init()` after `initChain()` (a directory restored by
+`--import-snapshot` today, or by `--download-snapshot` after P6) and from the worker after the
+in-process import. `init()` also refuses to start when `snapshot.mismatch` exists, before
+`initCommon()`: `cserror() << "SNAPSHOT: snapshot.mismatch is present: the state restored from a snapshot did not match its digest; remove db/, caches/, qs/, snapshot.json and the file to start again"`,
+`exitCode_ = 4`, return false. `main.cpp:233-234`: `int result = peer.executeProtocol(); if (Node::exitCode() != 0) result = Node::exitCode(); return result;`
+(a refused init returns -1 from `executeProtocol`; the node's code wins). The entrypoint's own
+digest wait (`entrypoint.sh:156-190`) stays until P6; the two agree (same file names, same code 4).
+
+**Step 5. `main.cpp`.** Before `dbcheck::check` (`193`): `fs::create_directories(dbPath)` (so
+that `check` takes `db/.lock` for the whole run, including a bootstrap, `dbcheck.cpp:218`; a
+missing `db/` meant "first start" only for the lock) and
+`if (snapshot_bootstrap::cleanupInterruptedImport(".", dbPath, what)) cslog() << "SNAPSHOT: removed the files of an interrupted import (" << what << ")"`.
+Both before `--import-snapshot` (`204-206`), which creates `db/` itself and would refuse on the
+partial database otherwise.
+
+**Step 6. `run.sh` (the minimum for two rows).**
+
+- The `[snapshot]` section of every node gets `fetch=off` (`run.sh:402`: the section is written for
+  serving nodes only today; now always, `serve=on` added for `SNAPSHOT_SERVE_NODES`).
+- `JOIN_FETCH=p2p` (with `JOIN_PRUNED_AT` as the start sequence and `JOIN_FULL` as today): the
+  joining node `NODES + 1` is written with `fetch=auto`, `min_sources=$JOIN_MIN_SOURCES` (default 3),
+  `fetch_wait=$JOIN_WAIT` (default 300), `fetch_fallback=$JOIN_FALLBACK` (default `sync`), no
+  `--import-snapshot`, and starts at `JOIN_PRUNED_AT` through the existing branch (`624-627`).
+  With `BIN_ALT_OFFICIAL=1` `[#103]`: `! official_node "$JOIN_NODE" || refuse "a p2p snapshot join into n$JOIN_NODE"`,
+  next to the import refusal.
+- Loopback /24 per node when `JOIN_FETCH=p2p` (`NODE_NETS=1`, implied): `node_ip i` = `127.0.$i.1`,
+  used in `[host_input] ip=` and in every `hosts.txt` line (`run.sh:380`, `392-393`);
+  `digest_offline` (`498-528`) rewrites the port only and keeps working; `net_fault_on` matches
+  ports; the API stays on 127.0.0.1 (it binds every interface). The official binary reads the same
+  keys.
+- End checks for `JOIN_FETCH=p2p` (next to `1174-1187`), on the joiner's log: `SNAPSHOT: block <S> hash` …
+  `: N sources` with `N >= JOIN_MIN_SOURCES`; `SNAPSHOT: fetched block <S>`; `SNAPSHOT: imported block <S>`;
+  `Caches for QUICK START loaded successfully`; `SNAPSHOT: snapshot.json verified at block <S>`;
+  `SNAPSHOT: started from block <S> fetched from`; `snapshot.verified` and `snapshot.sources.json`
+  exist, `snapshot-tmp/` and `db/.importing` do not; the digest check of `1181-1186` reused
+  (`STATE DIGEST #S` equals the manifest's); every `asking <key> for its manifest` line names a
+  key of `SNAPSHOT_SERVE_NODES` (never an even node's); every `peers serve snapshots` line, if any,
+  says `0 not counted: address unknown`; each serving node whose key is in the agreement line
+  logged `SNAPSHOT: served block <S> to <joiner key>`; with `BIN_ALT_OFFICIAL=1`, no even node's
+  log contains `Unknown message type` or `unknown` for types 40-43 (the official validator's
+  warning, `packetvalidator.cpp:146-149`); state digests equal at the end as for every scenario.
+
+**Step 7. Rows** (`robustness.yml`, next to `snapshot-join`, `275-290`; `fixed: true`; the even
+nodes BerkeleyDB so that the same rows run with `node_alt_ref=official`; `NODES=8 TRUSTED_NODES=7`
+so that the joiner is n9, odd, in every variant — `TRUSTED_NODES` odd 5-25 and `NODES` above it
+are allowed, `run.sh:5-11`):
+
+```yaml
+- name: snapshot-p2p-join
+  env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+  fixed: true
+- name: snapshot-p2p-join-full
+  env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+  fixed: true
+```
+
+n3 (pruned LMDB), n5 (full RocksDB) and n7 (full LMDB) serve; their `blocks.bin.lz4` fall in two
+`sha256` groups (n3's starts at its prune floor), the checkpoint `.dat` files in one group each:
+the fetch spreads over the three manifests' declarers as the fetcher does. No `official:` mark: the
+row runs with official even nodes as it is (the joiner and the sources are odd; the even nodes
+are neighbours that never serve and are never asked). Both rows twice in a row green before the
+merge, plus `testnet.yml`, `snapshot-join`, `all-storage`, `storage-switch`, `checkpoint-ahead`,
+`contracts-dice-join` unchanged, and one run of each row with `node_alt_ref=official`.
+
+**Docs.** `docs/CHANGES.md` (one line); `docs/differences.md` ("Snapshots" section: a node on
+an empty LMDB or RocksDB database with `fetch=auto` looks for snapshots on the network first;
+private and genesis networks set `fetch=off`; `snapshot.verified` / `snapshot.mismatch` and the
+exit code 4). The operator page `docs/snapshots.md` (not on master yet) comes with P5b.
+
+**Pass.** Unit tests green; the two rows green twice, once with official even nodes; the
+unchanged scenarios green; a node of the private network with `fetch=auto` and a database never
+logs `SNAPSHOT: empty database`.
+
+### P5b. Harness: faults, forged and corrupt sources, the late server, docs (medium)
+
+**Files.** `ci/testnet/run.sh`, `.github/workflows/robustness.yml`, `csnode/src/snapshot_builder.cpp`
+and `csnode/src/snapshot_provider.cpp` (two `CREDITS_TESTNET` hooks), `docs/snapshots.md` (new),
+`docs/differences.md`, `docs/CHANGES.md`.
+
+**Test-build hooks** (`#ifdef CREDITS_TESTNET`, read once at the first use, like
+`testnet-convert-kill`, `run.sh:787-799`): `./testnet-forge-snapshot` present → `buildSnapshot`
+signs a manifest whose `state_digest` has its last hex digit flipped (the files are untouched: the
+forged source is consistent with itself except for the declared digest, which is what the
+agreement compares); `./testnet-corrupt-pieces` present → `SnapshotProvider::onPieceRequest`
+flips one byte of every third piece it serves (the chunk hash in the manifest is right, the
+bytes are not: the fetcher's `rejected piece` path and the ban).
+
+**`run.sh` additions.**
+
+- `SNAPSHOT_LATE_SERVE_NODES=7`: the node gets the serving storage settings
+  (`checkpoint_every=1000`, `checkpoint_keep=2`) and `serve=off`; `JOIN_LATE_SERVE_AFTER` (default
+  90) seconds after the joiner started, the harness stops it, sets `serve=on` in its `config.ini`
+  and starts it again (`start_node`): the bit is fixed at start, a restart is what an operator does.
+  Its `SnapshotService` builds the snapshot of its latest checkpoint at start (`buildLatest`,
+  `snapshot_service.cpp:107+`) and serves within a minute.
+- `JOIN_SOURCES=keys`: the joiner's `[snapshot]` gets `sources=` with the keys of
+  `SNAPSHOT_SERVE_NODES` and every node stays on 127.0.0.1 (one /24: only the trusted-by-key count
+  can reach `min_sources`; the agreement line must say `(trusted)` for the chosen group).
+  `JOIN_SOURCES=file` writes them to the joiner's `snapshot_sources.txt` instead (`sources_file`,
+  not trusted: with one /24 the join must fall back; used with `-wait` to list the late server).
+- `JOIN_KILL_DURING_FETCH=1`: the main loop greps the joiner's log every 2 s; on the first
+  `SNAPSHOT: fetching block` line `kill -KILL`, `start_node` again; on the first
+  `SNAPSHOT: importing block` line the same, once each; the restart test (`RESTART_NODES`) never
+  names the joiner.
+- `FORGE_NODE=n`, `CORRUPT_NODE=m`: touch the hook files in those nodes' folders before they start
+  (odd nodes only; `refuse` with `BIN_ALT_OFFICIAL=1` otherwise).
+- Refusals `[#103]`: `FORGE_NODE`, `CORRUPT_NODE`, `SNAPSHOT_LATE_SERVE_NODES` on an even node.
+
+**Rows** (all `fixed: true`, `NODES=8 TRUSTED_NODES=7`, storage as `snapshot-p2p-join` unless said):
+
+| Row | Env (on top of the join row's) | Must show (on top of the join checks) |
+| --- | --- | --- |
+| `snapshot-p2p-few` | `SNAPSHOT_SERVE_NODES=3 JOIN_MIN_SOURCES=2 JOIN_WAIT=60 JOIN_FALLBACK=sync` | `1 source declares block S (need 2): waiting`; `no agreement of 2 community sources after 1 min` … `Syncing from block 0`; `SNAPSHOT: opening an empty database`; `SLOW START`; no `snapshot.json`; the target reached |
+| `snapshot-p2p-wait` | `SNAPSHOT_SERVE_NODES=3,5 SNAPSHOT_LATE_SERVE_NODES=7 JOIN_MIN_SOURCES=3 JOIN_WAIT=60 JOIN_FALLBACK=wait` | `Waiting for more sources (fetch_fallback=wait)` at least once; n7's `SNAPSHOT: serving block` after its restart; then the join checks with n7 among the `served block` lines |
+| `snapshot-p2p-wait-file` | as `-wait` with `JOIN_SOURCES=file` | the same, n7 asked from the start (`asking <n7>` before its restart) |
+| `snapshot-p2p-dropped` | `JOIN_KILL_DURING_FETCH=1` | two kills logged by the harness; `removed snapshot-tmp/ left by an interrupted fetch` once; `removed the files of an interrupted import` once (`main.cpp`, in `stdout.log`); the join checks |
+| `snapshot-p2p-forged` | `SNAPSHOT_SERVE_NODES=1,3,5,7 FORGE_NODE=7 CORRUPT_NODE=5 JOIN_MIN_SOURCES=3` | `minority:` line with n7's digest; `rejected piece` from n5 at least once and `source <n5> … not asked again`; n7 never in a `served block` line of the agreed group; the join checks with `N sources` ≥ 3 |
+| `snapshot-p2p-sources` | `JOIN_SOURCES=keys` | the agreement line's group is `(trusted)`; the join checks |
+| `snapshot-p2p-contracts` | `CONTRACTS=1 CONTRACTS_AFTER_AT=2400 TARGET_SEQ=2600`, `contracts: true` | the join checks; the contract states of the joiner equal the others' at the end (the harness's existing comparison); no executor-API error in the joiner's log during the bootstrap |
+
+The design's `-mixed` row is every row above run with `node_alt_ref=official` (the nightly
+second run of `testnet.yml` `[#103]` covers the join rows once they are in `robustness.yml`'s
+selection; `robustness.yml` is run by hand with `node_alt_ref=official` and `only=` the p2p rows
+before the merge), plus one manual run with `node_alt_ref=<the last master before #100>` to show
+that a community node of an earlier build drops the messages as the official one does.
+
+Known official behaviours `[#103]` and these rows: an official joiner diverges on a balance-reading
+contract (the joiner is community here); an official node killed while saving a checkpoint does
+not restart (no row kills an even node). `-dropped` kills the joiner only.
+
+**Docs.** `docs/snapshots.md`: what the operator sees (`fetch=auto`: the waiting lines, the
+fallback and `--download-snapshot` after P6; `serve=on`; the keys; `snapshot.verified`,
+`snapshot.mismatch`, exit code 4; `snapshot.sources.json`; private networks: `fetch=off`); a
+line in `differences.md` pointing to it; `CHANGES.md`.
+
+**Pass.** Every row green twice; the p2p rows green once with `node_alt_ref=official`.
+
+### P5c. p2p fork: the address of a connected peer (small; only if needed) [p2p submodule]
+
+If `peers serve snapshots … N not counted: address unknown` shows `N > 0` on the testnet or on
+mainnet: `bool Host::GetConnectionEndpoint(const NodeId&, std::string& address)` reading
+`connections_` under `conn_mux_` (`p2p/src/host.cc:328-347`, `Connection::GetEndpoint()` with the
+`error_code` overload of `remote_endpoint`), `Transport::peerAddress(key, out)` trying the routing
+table first (`RoutingTable::HasNode`) and the connection second, and `addressOf` using it before
+`peerAddresses_`. Submodule pointer bump, `docs/differences.md`. Not needed for CI (every peer of a
+private network is in every routing table).
+
+### Risks and how each is tested
+
+| Risk | Where | Mitigation | Test |
+| --- | --- | --- | --- |
+| The flag switch races a message in flight | `finishBootstrap` sets `bootstrapping_ = false` | the switch happens on the processor thread, between two messages; `initRunning()` completes before it | the join rows: no crash, no `Unknown`/`dropped` line after `started from block` for a message the node should process; `-dropped` restarts land on both sides of the switch |
+| A signal connected while the processor thread emits | the five connections of `304-309` | moved to the constructor; nothing connects after `Transport::run` (the P3 service connects `checkpointSavedEvent` in `initRunning()`: that signal is emitted by the chain's thread only, which is the same processor thread at that point, so it is a same-thread connect; move it to the constructor too, guarded by `if (snapshotService_)` in the slot, if the reviewer prefers) | TSAN build of the unit tests; a grep in review for `Connector::connect` outside constructors |
+| The worker and the processor thread touch the chain together | `initChain()` on the worker while messages are dropped | the gate drops everything but the two replies, which touch only the fetcher; `forEachNeighbour`, `getKnownPeers` take their own mutexes; `getLastSeq`/`uuid` are atomics | the join rows under `CONTRACTS=1` (`-contracts`), `-dropped` (kills during `initChain`) |
+| `Node::stop()` from the worker (deadlock) | `failBootstrap` | the worker only queues; `stopOnError` runs on the processor thread | the forced mismatch: a unit test of `startupCheck`; `-few` (fallback path through the worker and `finishBootstrap`) |
+| A tick after the fetcher is gone | timer ticks queued before `stop()` | `onSnapshotTick` checks `snapshotFetcher_` first; `finishBootstrap` stops the timer before resetting the fetcher | every row (the hand-over) |
+| The importer refuses: hash databases present | `BlockChain`'s constructor | `releaseHashDbs()` before, `reopenHashDbs()` after; `close()` guards null | the join rows (the import runs in process); `snapshot_import_tests` unchanged |
+| A kill during the import leaves a partial database the next start opens | `db/`, `caches/hashdb`, `qs/<S>.tmp` | `db/.importing` marker + `cleanupInterruptedImport` before `dbcheck::check` | `-dropped` (second kill), the unit test on a laid-out folder |
+| A BerkeleyDB node | the official default backend | `notNeeded` returns the backend reason; the node syncs from 0 as today, with one warning when `fetch=auto` | unit test; `all-storage` rows unchanged (their BerkeleyDB nodes start empty) |
+| Every node of a genesis network bootstraps | `fetch=auto` default | `run.sh` writes `fetch=off` for all but the joiner; `differences.md` says so; the Docker entrypoint restores before the start (a failed restore then bootstraps by design) | `testnet.yml` green; a private network with `fetch=auto` on every node is **not** supported, by documentation |
+| The config observer swaps the config during a bootstrap | `ConfigHolder::config()` raw pointer (design 5.3a) | the fetcher copies `SnapshotData` at construction; `notNeeded` reads once; `startBootstrap` reads once; no new reader on another thread | `-wait` (the observer runs on every node; nothing of the bootstrap re-reads) |
+| API objects touch the chain before `initChain` | `csconnector` constructor starts the executor API thread at construction (`csconnector.cpp:55+`); `api_->run()` only in `initRunning` | as today before the chain opens, now for minutes; nothing calls the executor API without a contract to run; `getKnownPeers` of the diag API reads the transport only | `-contracts`: the joiner's executor starts with the node; the joiner's log has no executor-API error before `started from block` |
+| The P3 `SnapshotService` on a bootstrapping node | `serve=on` with an empty database | not constructed until `initRunning()`; requests dropped by the gate; bit 24 announced meanwhile means silence to requesters (treated as not ready) | a join row variant by hand with the joiner's `serve=on`: no `SNAPSHOT: built`/`serving` line before `started from block`, and a `serving block` line after its first checkpoint |
+| `onRoundTimeElapsed` on an initial confidant starting empty | an initial confidant with `fetch=auto` | gated; initial confidants of a private network have `fetch=off` anyway | no unit test (a `Node` cannot be built in a test): the gate is one reviewed line; a manual run of a join as an initial confidant (`TRUSTED_NODES` including the joiner) once |
+| The permanent set left extended | `setPermanentNeighbours` during the bootstrap | restored in `finishBootstrap`; the serving sources stay ordinary neighbours until evicted | `-forged`: n5 banned by the fetcher is still a neighbour (no harm) and leaves the permanent set at the end: a `showNeighbours` dump is not needed, the join rows pass |
+| The routing table lies about an address (keys unauthenticated) | `peerAddresses_` | nothing new: the design's independence by address holds for the routing table's own view; `sources=` is the trusted path | `-sources` |
+| The pruned mainnet package waits `fetch_wait` on its first start until servers exist | `fetch=auto` default on LMDB | a release note (P11); the Docker image restores from GitHub first; `fetch=off` or `--download-snapshot` (P6) for an operator in a hurry | the mainnet step of P11 |
+
+**Sizes.** P5a large (about 700 lines with tests, half of it a move), P5b medium (harness and
+two hooks), P5c small.
 
 ## Step P6. `--download-snapshot`, the workflow on format 2, Docker (medium; client side and YAML, can run in parallel with P3-P5 after P0)
 
@@ -510,7 +955,7 @@ and backfills to its floor.
 | P2 | capability byte, `known_peers.json` | S | P0 | protocol (`host_data`) |
 | P3 | service from #98, provider, builder chunk 512 KiB | M | P0, P1, P2 | — |
 | P4 | agreement, fetcher (unit-tested, not wired) | L | P1 | — |
-| P5 | bootstrap mode, hand-over, verification, 6 scenarios | M-L | P3, P4 | — |
+| P5 | bootstrap mode, hand-over, verification, scenarios (P5a node, P5b harness, P5c p2p if needed) | L | P3, P4 | P5c: p2p submodule |
 | P6 | `--download-snapshot`, workflow format 2, Docker | M | P0 (P5 for the smoke test) | — |
 | P7 | trusted/limits/stress scenarios, scale runs | M | P5 | — |
 | P8 | survey, weekly job | S | P5 | — |
