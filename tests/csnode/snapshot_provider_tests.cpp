@@ -168,13 +168,9 @@ TEST(SnapshotProvider, ManifestStatuses) {
     EXPECT_TRUE(parsed->verify());
     EXPECT_EQ(parsed->seq, 200u);
 
-    // once per peer every 5 s, one to anyone every 50 ms
-    fx.now += 50ms;
+    // once per peer every 5 s
     EXPECT_FALSE(fx.provider.onManifestRequest(a, serving(), synced()));
     EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(2), serving(), synced()));
-    EXPECT_FALSE(fx.provider.onManifestRequest(peerKey(3), serving(), synced()));
-    fx.now += 50ms;
-    EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(3), serving(), synced()));
     fx.now += 5s;
     EXPECT_TRUE(fx.provider.onManifestRequest(a, serving(), synced()));
 
@@ -299,6 +295,29 @@ TEST(SnapshotProvider, MaxPeers) {
     EXPECT_EQ(fx.provider.onPieceRequest(peerKey(2), piece("blocks.bin.lz4", 0), serving(0, 1), synced()).status, PieceStatus::Ok);
 }
 
+TEST(SnapshotProvider, ManyKeysDoNotStarveADownloader) {
+    Fixture fx("snapshot_provider_manifests");
+    ASSERT_TRUE(fx.provider.load(fx.dir));
+    const auto downloader = peerKey(200);
+    EXPECT_TRUE(fx.provider.onManifestRequest(downloader, serving(), synced()));
+    EXPECT_EQ(fx.provider.onPieceRequest(downloader, piece("blocks.bin.lz4", 0), serving(), synced()).status, PieceStatus::Ok);
+    // made-up keys get a burst of 8 (the downloader took one), then 20 a second
+    size_t answered = 0;
+    for (uint8_t i = 1; i <= 40; ++i) {
+        answered += fx.provider.onManifestRequest(peerKey(i), serving(), synced()) ? 1 : 0;
+    }
+    EXPECT_EQ(answered, 7u);
+    fx.now += 1s;
+    answered = 0;
+    for (uint8_t i = 41; i <= 80; ++i) {
+        answered += fx.provider.onManifestRequest(peerKey(i), serving(), synced()) ? 1 : 0;
+    }
+    EXPECT_EQ(answered, 8u);
+    // the downloader is answered after its 5 s whatever the others did
+    fx.now += 4s;
+    EXPECT_TRUE(fx.provider.onManifestRequest(downloader, serving(), synced()));
+}
+
 TEST(SnapshotProvider, NewKeysDoNotEvictADownloader) {
     Fixture fx("snapshot_provider_table");
     ASSERT_TRUE(fx.provider.load(fx.dir));
@@ -310,7 +329,7 @@ TEST(SnapshotProvider, NewKeysDoNotEvictADownloader) {
     EXPECT_TRUE(fx.provider.onManifestRequest(idle, serving(), synced()));
     // 63 made-up keys fill the table to 65 entries
     for (uint8_t i = 1; i < cs::SnapshotProvider::kMaxPeers; ++i) {
-        fx.now += 50ms;
+        fx.now += 50ms;   // within 20 a second
         EXPECT_TRUE(fx.provider.onManifestRequest(peerKey(i), serving(), synced()));
     }
     // the downloader is still known (its 5 s are not over), the idle key was the one pushed out

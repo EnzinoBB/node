@@ -215,17 +215,27 @@ std::optional<snapshot_p2p::ManifestReply> SnapshotProvider::onManifestRequest(c
         return reply;
     }
 
-    // the manifest is the large reply to a small request: once per peer every 5 s, one to anyone
-    // every 50 ms, and paid for
+    // the manifest is the large reply to a small request: once per peer every 5 s, paid for, and
+    // to keys that are not downloading at most 20 a second (bursts of 8)
     const auto now = clock_();
-    if (lastManifestAny_ != SteadyClock::time_point{} && now - lastManifestAny_ < kManifestGap) {
-        ++busyAnswers_;
+    const auto known = peers_.find(sender);
+    const bool downloading = known != peers_.end() && known->second.lastPiece != SteadyClock::time_point{} &&
+                             now - known->second.lastPiece < kPeerWindow;
+    if (known != peers_.end() && known->second.manifestSent && now - known->second.lastManifest < kManifestInterval) {
         return std::nullopt;
+    }
+    if (!downloading) {
+        if (!manifestsStarted_) {
+            manifests_ = Bucket{kManifestBurst, now};
+            manifestsStarted_ = true;
+        }
+        uint32_t retry = 0;
+        if (!manifests_.take(1, kManifestsPerSecond, kManifestBurst, now, retry)) {
+            ++busyAnswers_;
+            return std::nullopt;
+        }
     }
     auto& p = peer(sender, now);
-    if (p.manifestSent && now - p.lastManifest < kManifestInterval) {
-        return std::nullopt;
-    }
     if (settings.rateKBps != 0) {
         const double rate = settings.rateKBps * 1000.0 / (state.trusted ? 2 : 1);
         const double burst = static_cast<double>(kBurstBytes) / (state.trusted ? 2 : 1);
@@ -241,7 +251,6 @@ std::optional<snapshot_p2p::ManifestReply> SnapshotProvider::onManifestRequest(c
     }
     p.manifestSent = true;
     p.lastManifest = now;
-    lastManifestAny_ = now;
     ++manifestsServed_;
     reply.status = ManifestStatus::Ready;
     reply.manifestJson = loaded->json;

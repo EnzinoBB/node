@@ -48,9 +48,10 @@ public:
     static constexpr auto kPieceWindow = std::chrono::milliseconds(100);
     static constexpr size_t kPiecesPerWindow = 2;
     static constexpr auto kManifestInterval = std::chrono::seconds(5);
-    // between two manifest replies to anyone: peer keys cost nothing, so the per-key limit alone
-    // does not bound them
-    static constexpr auto kManifestGap = std::chrono::milliseconds(50);
+    // manifest replies to keys that are not downloading: peer keys cost nothing, so the per-key
+    // limit alone does not bound them; a peer downloading now is not held up by them
+    static constexpr double kManifestsPerSecond = 20;
+    static constexpr double kManifestBurst = 8;
     static constexpr uint64_t kBurstBytes = 4ull << 20;
     static constexpr uint32_t kMaxRetryMs = 5000;
 
@@ -111,7 +112,8 @@ private:
     std::map<cs::PublicKey, Peer> peers_;
     Bucket global_;
     bool globalStarted_ = false;
-    std::chrono::steady_clock::time_point lastManifestAny_{};
+    Bucket manifests_;
+    bool manifestsStarted_ = false;
     uint64_t piecesServed_ = 0;
     uint64_t bytesServed_ = 0;
     uint64_t busyAnswers_ = 0;
