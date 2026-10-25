@@ -680,10 +680,15 @@ bool SnapshotFetcher::openFile(FileState& f, bool truncate) {
     if (f.fd >= 0) {
         return true;
     }
+    // the name comes from a manifest fromJson accepted, so it is one of the snapshot's fixed file
+    // names; checked again here, where it becomes a path
+    if (!SnapshotManifest::isKnownFileName(f.file.name) || fs::path(f.file.name).filename() != f.file.name) {
+        return false;
+    }
     std::error_code ec;
     fs::create_directories(tmpDir_, ec);
     const auto path = tmpDir_ / f.file.name;
-    f.fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | (truncate ? O_TRUNC : 0), 0644);
+    f.fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | (truncate ? O_TRUNC : 0), 0600);
     if (f.fd < 0) {
         return false;
     }
