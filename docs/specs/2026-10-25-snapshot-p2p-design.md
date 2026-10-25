@@ -668,13 +668,14 @@ network's hosts file and the given `JOIN_MIN_SOURCES`, `JOIN_WAIT`, `JOIN_FALLBA
 | `snapshot-p2p-dropped` | n8 killed in the middle of the fetch, and once during the import, then started again | `snapshot-tmp/` removed, nothing in `db/`, the fetch redone, n8 completes |
 | `snapshot-p2p-trusted` | the serving nodes are initial confidants; two joins in sequence under contract load (`contracts-*` harness) | block rate within 10 % of the run without joins; round time p95 within 20 %; no fork, no stage timeouts attributable to the serving nodes |
 | `snapshot-p2p-limits` | n6 alone, `serve_rate_kbps=1000`, `serve_max_peers=1`; n8 and n9 join | the rate measured at n8 is within 20 % of the cap; n9 logs busy answers and completes after n8 |
+| `snapshot-p2p-stress` | all initial confidants serve (`serve=on`, half budget while trusted); four joiners n8-n11 start together under contract load, each with a different fault: n8 clean, n9 with `rate 2mbit` (netem on everything it sends and receives), n10 with `loss 5% delay 150ms`, n11 killed every 40-90 s during the fetch and the import and started again; one serving confidant with `rate 4mbit` on its own traffic and one with `serve_rate_kbps=500`; a test client (`snapshot_flood`) asks pieces from every serving node without honouring `busy`/`retry_ms`, drops connections in the middle of replies and sends malformed requests; compared with a baseline run with the same faults and no joiners or flood client | consensus unaffected: block rate within 10 % and round time p95 within 20 % of the baseline, no fork, no stage timeout or writer change attributable to the serving nodes, consensus messages to the slow confidant within the 10-s deadline; the flood client throttled (busy answers, its bucket logged); each serving node at most 64 MiB of resident memory above its idle level; n8-n11 complete (or n9 falls back to `sync` after `fetch_wait` with the logged line); digests equal |
 | `snapshot-p2p-mixed` | even nodes on the official binary (`BIN_ALT`); serving nodes odd; n8 joins | n8 never asks an even node; the even nodes' logs have no `Unknown message type`; n8 completes; the blocks below `S` (when state-only) come partly from even nodes |
 | `snapshot-p2p-state-only` (after backward sync) | `snapshot_blocks=1` on the serving nodes; n8 pruned joins; n9 full joins | both restore a 1-block snapshot and reach the head; n8 backfills to its floor and stops; n9 backfills to 0; histories equal n1's at the end (backward sync's `compare_histories.py`) |
 | `snapshot-download` | a `python3 -m http.server` serving the layout of the release (`snapshot.json`, `s<seq>-<name>`); n8 runs `--download-snapshot http://…` then starts | restored, verified; a tampered file fails with exit 2 and nothing in `db/` |
 | `snapshot-join` (existing) | as today, `--export-snapshot` / `--import-snapshot` | unchanged |
 
 **Scale** (`scale.yml`, `scenario` input, `.github/workflows/scale.yml:34-35`, `216-226`): the
-`snapshot-p2p-join` and `-trusted` variables on 33 and 51 nodes (`scale-t7-n51_33-d200-l10`),
+`snapshot-p2p-join`, `-trusted` and `-stress` variables (`-stress` with eight joiners on 51) on 33 and 51 nodes (`scale-t7-n51_33-d200-l10`),
 with the serving nodes among the low-stake and among the trusted ones; recorded: join time, bytes
 per source, round time percentiles with and without joins.
 
@@ -698,16 +699,15 @@ package default `serve=on` ships after that.
   decision).
 - Export time and lz4 sizes per file (still not recorded in the 2026-10-24 design's section 12).
 
-## 15. Open questions for the user
+## 15. Decisions on the open questions (user, 2026-10-25)
 
-1. **`min_sources` default**: 2 now, 3 later (6.4), or 3 from the start and accept that the
-   automatic path fails on mainnet until three serving nodes exist?
-2. **`fetch_fallback` default**: `sync` (the node is useful after 35 hours whatever happens) or
-   `wait` (an operator sees the waiting line and acts)? Docker images with the GitHub download
-   first are not affected much by either.
-3. **The p2p frame cap** (4.4, plan P9): add it in our fork of the submodule at 256 MiB, or leave
-   the library untouched and keep the node-level limits only?
-4. **Trusted nodes serving** (5.3, 8): keep serving at half budget, or stop serving while a
-   confidant, if the `snapshot-p2p-trusted` numbers show an effect?
-5. **`MINOR_NODE_VERSION` in `host_data` bits 32-47** (4.1): useful for the weekly job and
-   visible to everyone; include it?
+1. **`min_sources`**: 2 now; 3 once the weekly job (section 10) shows at least five serving
+   sources on mainnet. The change is a default in the packages, not a protocol change.
+2. **`fetch_fallback`**: `sync` after `fetch_wait=600` s. Before the slow start the node logs
+   one line naming `--download-snapshot` (and the Docker variable) as the faster way.
+3. **p2p frame cap**: added in our fork of the p2p submodule at 256 MiB (plan P9); a frame that
+   announces more is dropped and the connection closed, before any allocation.
+4. **Trusted nodes serving**: they keep serving, at half budget, while they are confidants.
+   The `snapshot-p2p-trusted` and `snapshot-p2p-stress` numbers decide whether this holds; if
+   they fail, the knobs of section 8 are tried and the question comes back to the user.
+5. **`MINOR_NODE_VERSION` in `host_data` bits 32-47**: included (plan P2).

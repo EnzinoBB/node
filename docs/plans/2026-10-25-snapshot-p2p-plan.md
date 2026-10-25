@@ -363,23 +363,48 @@ from it.
 scheduled `snapshot.yml` publishes both formats once; `packaging/docker/test/test-snapshot.sh`
 adapted or retired with the scripts.
 
-## Step P7. Load, limits and scale (medium, CI only)
+## Step P7. Load, limits, stress and scale (medium, CI only)
 
-**Files.** `ci/testnet/run.sh` (`JOIN_SEQUENCE=2` for two joins in a row; the rate measurement
-from the joining node's progress lines; the round-time extraction from the logs), `ci/testnet/sampler`
-(#68) use, `.github/workflows/robustness.yml` (`snapshot-p2p-trusted`, `-limits`),
-`.github/workflows/scale.yml` (documentation of the `scenario` values; no YAML change needed:
-`SNAPSHOT_SERVE_NODES=… JOIN_FETCH=p2p JOIN_AT=…` pass through `inputs.scenario`,
-`scale.yml:216-226`, whose regex `^[A-Z_]+=[a-z0-9,:]+$` already admits them).
+**Files.** `ci/testnet/run.sh` (`JOIN_SEQUENCE=2` for two joins in a row; `JOIN_PARALLEL=4` for
+joiners started together; `JOIN_FAULTS` per joiner and `SERVE_FAULTS` per serving node, on top of
+the existing `NET_FAULT` cgroup/netem band (`run.sh:411-430`), one netem band per fault value;
+`JOIN_KILL=n11:40-90` kills and restarts a joiner at random intervals during the fetch and the
+import; the rate measurement from the joining nodes' progress lines; the round-time extraction
+from the logs; resident memory sampled per node), `ci/testnet/sampler` (#68) use,
+`tests/tools/snapshot_flood` (a small test-only binary built with the tests: connects as a peer,
+asks manifests and pieces from every serving node as fast as it can without honouring
+`busy`/`retry_ms`, drops connections in the middle of replies, sends truncated and out-of-range
+requests), `.github/workflows/robustness.yml` (`snapshot-p2p-trusted`, `-limits`, `-stress`),
+`.github/workflows/scale.yml` (documentation of the `scenario` values: `SNAPSHOT_SERVE_NODES=…
+JOIN_FETCH=p2p JOIN_AT=…` pass through `inputs.scenario`, `scale.yml:216-226`, whose regex
+`^[A-Z_]+=[a-z0-9,:]+$` already admits them; the faults are given as short aliases,
+`JOIN_FAULTS=n9:slow,n10:lossy`, mapped to netem values in `run.sh`, so the regex stays as is).
 
-**Change.** The two scenarios of the design's section 13 with their pass numbers (block rate
-within 10 %, round p95 within 20 %, measured rate within 20 % of the cap, busy answers logged);
-two scale runs by hand (`scale-t7-n33` and `-n51` with the serving nodes among the low-stake and
-among the trusted ones) recorded in the design's section 14.
+**Change.** The three scenarios of the design's section 13 with their pass numbers:
 
-**Pass.** Both scenarios green twice; the scale numbers recorded; if `-trusted` fails its
-thresholds, the design's section 8 knobs are tried in this order: 256 KiB chunks (P3's default),
-`serving_trusted` sources last, no serving while trusted (a question to the user).
+- `-trusted`: block rate within 10 %, round p95 within 20 %, no fork.
+- `-limits`: measured rate within 20 % of the cap, busy answers logged.
+- `-stress`, the ad hoc test for the nodes in consensus: every initial confidant serves; four
+  joiners start together under contract load, one clean, one on a slow link, one with loss and
+  delay, one killed and restarted repeatedly; one serving confidant itself on a slow link and one
+  with a low `serve_rate_kbps`; the flood client running throughout. A baseline run with the same
+  faults and no joiners or flood client is made in the same job and the two compared. Must show:
+  block rate within 10 % and round p95 within 20 % of the baseline; no fork; no stage timeout or
+  writer change caused by a serving node (stage logs checked against the serve lines'
+  timestamps); consensus messages to the slow confidant within the 10-s deadline. The single FIFO
+  queue per peer is the risk here: a piece queued before a round message delays it, so the piece
+  size and the outstanding pieces per peer must keep that delay under about 1 s at 4 Mbit/s.
+  Also: the flood client throttled and its bucket logged; each serving node at most 64 MiB of
+  resident memory above its idle level; the joiners complete, or the slow one falls back to
+  `sync` after `fetch_wait` with the logged line; state digests equal at the end.
+
+Scale runs by hand: `scale-t7-n33` and `-n51` with the serving nodes among the low-stake and among
+the trusted ones, and `-stress` on 51 nodes with eight joiners; recorded in the design's section 14.
+
+**Pass.** All three scenarios green twice; the scale numbers recorded. If `-trusted` or `-stress`
+fails its thresholds, the design's section 8 knobs are tried in this order: 256 KiB pieces, fewer
+outstanding pieces per peer while trusted, `serving_trusted` sources last, no serving while
+trusted (a question to the user, design 15.4).
 
 ## Step P8. Weekly job: serving nodes and groups (small, Python and YAML; after P5)
 
@@ -483,7 +508,7 @@ and backfills to its floor.
 | P4 | agreement, fetcher (unit-tested, not wired) | L | P1 | — |
 | P5 | bootstrap mode, hand-over, verification, 6 scenarios | M-L | P3, P4 | — |
 | P6 | `--download-snapshot`, workflow format 2, Docker | M | P0 (P5 for the smoke test) | — |
-| P7 | trusted/limits scenarios, scale runs | M | P5 | — |
+| P7 | trusted/limits/stress scenarios, scale runs | M | P5 | — |
 | P8 | survey, weekly job | S | P5 | — |
 | P9 | p2p frame cap | S | — | p2p submodule, question 3 |
 | BS1, BS2 | backward sync storage and index | S, M | — | — |
