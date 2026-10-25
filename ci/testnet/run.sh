@@ -48,7 +48,14 @@
 #        that differs from BIN's shows up as a diverging state
 #        BIN_ALT_OFFICIAL=1: BIN_ALT is the official node (ci/official/testnet-hooks.patch), which logs
 #        no state digest: every node opens its API and the even nodes must hold the same blocks as n1
-#        (hash at every 100th sequence up to the lowest head); the digests are compared among the others
+#        (hash at every 100th sequence up to the lowest head); the digests are compared among the others.
+#        The official node runs BerkeleyDB whatever DB_BACKEND says, and a scenario that needs on an
+#        even node a feature only this fork has (pruning, snapshots, conversion, damage and failure
+#        injection, NODE_STORAGE other than berkeleydb, SYNC_CONTRACT_EXECUTION=0) is refused at once.
+#        A fork of an official node shows only as a block hash that differs (it logs no fork line), and
+#        an official node restarted after DPOS_AT goes back to StartingDPOS 10000 (it does not keep
+#        order 9 across a quick start): official behaviour, so restarts after DPOS_AT are refused for
+#        even nodes
 #        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
@@ -268,6 +275,34 @@ BASE_PORT=6000
 
 declare -a PIDS KEYS REPORTED_DOWN
 
+# official even nodes: refuse what they cannot take part in (see BIN_ALT_OFFICIAL above)
+official_node() { [ "$BIN_ALT_OFFICIAL" = 1 ] && [ $(( $1 % 2 )) -eq 0 ]; }
+if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+    refuse() { echo "FAIL: $1 needs a feature the official node lacks (BIN_ALT_OFFICIAL=1: the even nodes are official)"; exit 1; }
+    for p in $PRUNED_NODES; do ! official_node "$p" || refuse "pruned storage on n$p"; done
+    [ "$JOIN_NODE" -eq 0 ] || [ "$SNAPSHOT_AT" -eq 0 ] || ! official_node "$JOIN_NODE" || refuse "a snapshot import into n$JOIN_NODE"
+    [ "$SNAPSHOT_AT" -eq 0 ] || [ "$PRUNE_NODE" -eq 0 ] || ! official_node "$PRUNE_NODE" || refuse "a snapshot export from n$PRUNE_NODE"
+    [ "$STORAGE_SWITCH_AT" -eq 0 ] || refuse "STORAGE_SWITCH_AT"
+    [ "$CONVERT_AT" -eq 0 ] || refuse "CONVERT_AT"
+    [ "$INDEX_LOSS_AT" -eq 0 ] || ! official_node "$INDEX_LOSS_NODE" || refuse "INDEX_LOSS on n$INDEX_LOSS_NODE"
+    [ "$HASHDB_DAMAGE_AT" -eq 0 ] || ! official_node "$HASHDB_DAMAGE_NODE" || refuse "HASHDB_DAMAGE on n$HASHDB_DAMAGE_NODE"
+    [ "$CHECKPOINT_AHEAD_AT" -eq 0 ] || ! official_node "$CHECKPOINT_AHEAD_NODE" || refuse "CHECKPOINT_AHEAD on n$CHECKPOINT_AHEAD_NODE"
+    [ "$APPLY_FAIL_AT" -eq 0 ] || ! official_node "$APPLY_FAIL_NODE" || refuse "APPLY_FAIL on n$APPLY_FAIL_NODE"
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do ! official_node "$i" || refuse "snapshot serving on n$i"; done
+    [ "$SYNC_CONTRACT_EXECUTION" != 0 ] || refuse "SYNC_CONTRACT_EXECUTION=0"
+    if [ -n "$NODE_STORAGE" ]; then
+        for i in $(seq 1 "$ALL_NODES"); do
+            ! official_node "$i" || [ "${STORE_BACKEND[$i]}" = berkeleydb ] || refuse "NODE_STORAGE ${STORE_BACKEND[$i]} on n$i"
+        done
+    fi
+    if [ "$DPOS_AT" -gt 0 ]; then
+        restarted="$RESTART_NODES $CRASH_NODE $TERM_KILL_NODE"
+        [ "$CRASH_ALL_AT" -eq 0 ] || refuse "CRASH_ALL_AT with DPOS_AT (order 9 is not kept across a restart)"
+        for i in $restarted; do [ "$i" -eq 0 ] || ! official_node "$i" || refuse "a restart of n$i with DPOS_AT (order 9 is not kept across a restart)"; done
+    fi
+    [ -z "$DB_BACKEND" ] || echo "mixed nodes: the official nodes run BerkeleyDB whatever DB_BACKEND ($DB_BACKEND) says"
+fi
+
 mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
 
 if [ "$FUND" = "1" ]; then
@@ -299,6 +334,11 @@ fi
 
 # public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their
 # contract states) and its own executor, started by the node through executor.sh
+# the public API port of node i when it has one: 9090 for n1 with FUND or CONTRACTS, else 9100 + i
+api_port() {
+    if [ "$1" -eq 1 ] && { [ "$FUND" = "1" ] || [ "$CONTRACTS" = "1" ]; }; then echo 9090; else echo $((9100 + $1)); fi
+}
+
 api_settings() {
     local i=$1
     if [ "$CONTRACTS" != "1" ]; then
@@ -309,7 +349,7 @@ api_settings() {
         fi
         if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
             # every node answers block queries: the official ones are compared with n1 by block hash
-            echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))"
+            echo "port=$(api_port "$i")"
         else
             echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
         fi
@@ -412,6 +452,11 @@ Append=true
 Format="[%TimeStamp%] %Severity% %Message%"
 CFG
 done
+
+# the binary node i runs
+bin_of() {
+    if [ -n "$BIN_ALT" ] && [ $(($1 % 2)) -eq 0 ]; then echo "$BIN_ALT"; else echo "$BIN"; fi
+}
 
 start_node() {
     local i=$1
@@ -605,7 +650,7 @@ while :; do
                 for core in "$WORK"/core.*."${PIDS[$i]}"; do
                     [ -f "$core" ] || continue
                     echo "n$i core dump $core:"
-                    gdb -q -batch -ex "bt 60" -ex "thread apply all bt 6" "$BIN" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 200
+                    gdb -q -batch -ex "bt 60" -ex "thread apply all bt 6" "$(bin_of "$i")" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 200
                     mv "$core" "$core.traced"
                 done
             fi
@@ -1123,6 +1168,7 @@ fi
 if [ -n "$DB_BACKEND" ] || [ -n "$NODE_STORAGE" ]; then
     for i in $(seq 1 "$ALL_NODES"); do
         used=$(grep -ah 'block database: ' "$WORK/n$i"/*.log | tail -1 | sed 's/.*block database: //' || true)
+        if official_node "$i"; then used="berkeleydb (official node)"; fi
         echo "n$i block database: $used"
         if [ -n "$NODE_STORAGE" ] && [ "${used%% *}" != "${STORE_BACKEND[$i]}" ]; then
             echo "FAIL: n$i was to run on ${STORE_BACKEND[$i]}"; exit 1
@@ -1148,7 +1194,10 @@ fi
 for core in "$WORK"/core.* "$WORK"/n*/core*; do
     [ -f "$core" ] || continue
     echo "core dump $core:"
-    gdb -q -batch -ex "bt 40" "$BIN" "$core" 2>/dev/null | grep -E '^#' | head -n 40
+    # the binary of the node whose process left it (core.<name>.<pid>)
+    core_bin=$BIN
+    for i in $(seq 1 "$ALL_NODES"); do [ "${PIDS[$i]:-}" != "${core##*.}" ] || core_bin=$(bin_of "$i"); done
+    gdb -q -batch -ex "bt 40" "$core_bin" "$core" 2>/dev/null | grep -E '^#' | head -n 40
 done
 
 for p in $PRUNED_NODES; do
@@ -1295,7 +1344,7 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     ports=""
     head=""
     for i in $(seq 1 "$ALL_NODES"); do
-        ports="$ports $i:$({ [ "$FUND" = "1" ] || [ "$CONTRACTS" = "1" ]; } && [ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))"
+        ports="$ports $i:$(api_port "$i")"
         s=$(seq_of "$i"); s=${s:-0}
         if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
     done

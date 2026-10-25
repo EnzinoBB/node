@@ -42,6 +42,8 @@ def main():
             hashes = {seq: block_hash(client, seq) for seq in sequences}
         except Exception as e:  # a node that does not answer is a failure, with the reason
             print(f"n{node}: API on port {port} not answering: {e}")
+            if reference is None:
+                sys.exit(1)   # no reference to compare the others with
             failed = True
             continue
         if reference is None:
