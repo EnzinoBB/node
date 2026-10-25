@@ -1326,6 +1326,9 @@ if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
     [ "$observer" -gt 0 ] || { echo "FAIL: no node left to read the capabilities from"; exit 1; }
     kill -TERM "${PIDS[$observer]}" 2>/dev/null || true
     for _ in $(seq 1 60); do kill -0 "${PIDS[$observer]}" 2>/dev/null || break; sleep 1; done
+    kill -0 "${PIDS[$observer]}" 2>/dev/null && { echo "FAIL: n$observer did not stop in 60 s"; exit 1; }
+    wait "${PIDS[$observer]}" 2>/dev/null || true
+    [ -f "$WORK/n$observer/known_peers.json" ] || { echo "FAIL: n$observer wrote no known_peers.json"; exit 1; }
     serving=""
     for i in ${SNAPSHOT_SERVE_NODES//,/ }; do serving="$serving ${KEYS[$((i - 1))]}"; done
     python3 - "$WORK/n$observer/known_peers.json" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
