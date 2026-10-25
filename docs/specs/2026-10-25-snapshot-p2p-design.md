@@ -145,7 +145,13 @@ known nodes (`Host::GetKnownNodes`, `host.h:40`, `routing_table.cc:62-66`). Offi
 the value unchanged in their FindNode replies, so a joining node sees it for every community node
 in its routing table, not only for direct contacts.
 
-Limit: the value is fixed for the life of the process (`network.cc:199`). Switching `serve` in
+Limit: the value is fixed for the life of the process (`network.cc:199`), and peers do not
+refresh it either: `RoutingTable::UpdateKBuckets` only promotes an entry that exists
+(`routing_table.cc:179-180`), so a peer keeps (and relays) the bits it first saw until the entry is
+evicted (3 missed pings of 8 s); a quick restart with another `serve` value is not noticed. The
+official `version` field has the same staleness. The fetcher therefore treats the bit as a hint: a
+peer marked serving that answers `not serving` is skipped, and a fix in our p2p fork (refresh the
+entry on a direct datagram, `bucket.Update(node)`) is part of P9. Switching `serve` in
 `config.ini` at run time still starts or stops serving (the provider answers "not ready" when
 off), but a node that started with `serve=off` is not discovered until its next start. A
 `Network::SetHostData()` in the p2p submodule (refreshed by the next ping of each peer) is a small

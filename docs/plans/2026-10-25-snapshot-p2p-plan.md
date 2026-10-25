@@ -433,6 +433,10 @@ nodes and their group appear).
 **Files.** `p2p/src/connection.cc:91-97` (and `connection.h`), the submodule pointer in the
 node repository, `docs/differences.md`.
 
+**Also (P2 review).** In `RoutingTable::UpdateKBuckets`, when the sender of a direct datagram is
+already in its bucket, update the entry (`bucket.Update(node)`; `CheckEndpoint` already matched
+its address and port) so that a changed `host_data` is seen without waiting for an eviction.
+
 **Change.** `kMaxPacketSize = 256 MiB`; a header announcing more drops the connection with
 `kProtocolCorrupted` and a counted log line (`LOG(ERROR)` once a minute per peer). Chosen above
 every legitimate packet (the inbox discards the second-priority list above 512 MB in total, so no
