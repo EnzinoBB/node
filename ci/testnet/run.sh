@@ -46,6 +46,9 @@
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
+#        BIN_ALT_OFFICIAL=1: BIN_ALT is the official node (ci/official/testnet-hooks.patch), which logs
+#        no state digest: every node opens its API and the even nodes must hold the same blocks as n1
+#        (hash at every 100th sequence up to the lowest head); the digests are compared among the others
 #        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
 #        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
@@ -127,6 +130,9 @@ BIN=$(realpath "$1")
 # mixed nodes: the even nodes run BIN_ALT, built from another ref
 BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 [ -z "$BIN_ALT" ] || echo "mixed nodes: even nodes run $BIN_ALT"
+BIN_ALT_OFFICIAL=${BIN_ALT_OFFICIAL:-0}
+[ -n "$BIN_ALT" ] || BIN_ALT_OFFICIAL=0
+[ "$BIN_ALT_OFFICIAL" != 1 ] || echo "mixed nodes: the even nodes are official nodes"
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
@@ -301,7 +307,12 @@ api_settings() {
             echo "apiexec_port=0"
             return
         fi
-        echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
+        if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+            # every node answers block queries: the official ones are compared with n1 by block hash
+            echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))"
+        else
+            echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
+        fi
         echo "apiexec_port=0"
         return
     fi
@@ -1249,13 +1260,18 @@ done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$SNAPSHOT_AT" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$SNAPSHOT_AT" "$BIN_ALT_OFFICIAL" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
+# official nodes (the even ones with BIN_ALT_OFFICIAL) log no digest: their blocks are compared below
+official = {i for i in range(2, nodes + 1, 2)} if sys.argv[6] == "1" else set()
 # a node that joins from a snapshot starts past block 1000: only the initial nodes log it
 initial = int(sys.argv[4]) if int(sys.argv[5]) > 0 else nodes
+initial -= len([i for i in official if i <= initial])
 seen = collections.defaultdict(dict)
 for i in range(1, nodes + 1):
+    if i in official:
+        continue
     for path in glob.glob(f"{work}/n{i}/*.log"):
         for m in re.finditer(r"STATE DIGEST #(\d+) ([0-9a-fA-F]+) wallets (\d+)", open(path, errors="replace").read()):
             seen[int(m.group(1))][i] = (m.group(2).lower(), int(m.group(3)))
@@ -1274,6 +1290,18 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# official nodes: the same block hashes as n1 (every 100th sequence up to the lowest head)
+if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+    ports=""
+    head=""
+    for i in $(seq 1 "$ALL_NODES"); do
+        ports="$ports $i:$({ [ "$FUND" = "1" ] || [ "$CONTRACTS" = "1" ]; } && [ "$i" -eq 1 ] && echo 9090 || echo $((9100 + i)))"
+        s=$(seq_of "$i"); s=${s:-0}
+        if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
+    done
+    (cd "$HERE" && python3 blockhashes.py --head "$head" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
+fi
+
 # two blocks of one sequence: a node kept its own block while the round went on on the writer's
 # (csnode/src/blockchain.cpp updateLastBlock logs it), a fork that nothing reconciles
 forks=$(grep -al 'this node keeps its own (fork)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)

@@ -31,7 +31,7 @@ on:
         description: 'Minutes each scenario has to reach its target sequence'
         default: '75'
       node_alt_ref:
-        description: 'Branch or commit of this repository built and run by the even nodes (empty = all the same)'
+        description: 'Branch or commit of this repository built and run by the even nodes; "official" = the official 4.2.532 node with the CI test-network hooks (empty = all the same)'
         default: ''
 
 permissions:
@@ -130,8 +130,16 @@ jobs:
           CCACHE_BASEDIR: ${{ github.workspace }}
           NODE_ALT_REF: ${{ inputs.node_alt_ref }}
         run: |
-          git fetch -q --no-recurse-submodules origin -- "$NODE_ALT_REF"
+          # "official": the official 4.2.532 node (CREDITSCOM 4a95aaaf) with only the two hooks a CI
+          # test network needs (its starter key and genesis recipient, ci/official/testnet-hooks.patch)
+          ref=$NODE_ALT_REF
+          [ "$ref" != official ] || ref=4a95aaaf602daead3ad70ecba113da92374b14f4
+          git fetch -q --no-recurse-submodules origin -- "$ref"
           git worktree add -q node-alt FETCH_HEAD
+          if [ "$NODE_ALT_REF" = official ]; then
+            git -C node-alt apply --whitespace=nowarn "$PWD/ci/official/testnet-hooks.patch"
+            git -C node-alt diff --stat
+          fi
           # the submodules are copied from this run's checkout, which must point to the same commits
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
@@ -397,6 +405,7 @@ jobs:
           if [ -f build-alt/node ]; then
             chmod +x build-alt/node
             export BIN_ALT="$PWD/build-alt/node"
+            [ "${{ inputs.node_alt_ref }}" != official ] || export BIN_ALT_OFFICIAL=1
           fi
           # the scenario's variables come from the matrix above, NAME=value pairs only
           for kv in $SCENARIO; do
