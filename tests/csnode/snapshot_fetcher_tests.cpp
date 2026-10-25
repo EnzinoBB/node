@@ -46,12 +46,12 @@ void putU16(std::ofstream& f, uint16_t v) {
     f.write(reinterpret_cast<const char*>(&v), sizeof(v));
 }
 
-// Five snapshots of block 200 built by buildSnapshot from one generated chain, each signed by its
-// own key, with 64 KiB chunks: A1 and A2 from the same checkpoint files (identical bytes), B and
+// Snapshots of block 200 built by buildSnapshot from one generated chain, each signed by its
+// own key, with 64 KiB chunks: A1, A2 and A3-A6 from the same checkpoint files (identical bytes), B and
 // E with one and two trailing bytes in walletscache.dat (same digest, another sha256 for that
 // file), D with another state digest. Built once for all tests.
 struct Snapshots {
-    enum { A1, A2, B, D, E, Count };
+    enum { A1, A2, B, D, E, A3, A4, A5, A6, Count };
 
     struct Source {
         cs::PrivateKey priv;
@@ -112,7 +112,7 @@ struct Snapshots {
         const auto qsB = checkpoint("b", 1, 7);
         const auto qsD = checkpoint("d", 0, 8);
         const auto qsE = checkpoint("e", 2, 7);
-        const std::array<fs::path, Count> qsOf{qsA, qsA, qsB, qsD, qsE};
+        const std::array<fs::path, Count> qsOf{qsA, qsA, qsB, qsD, qsE, qsA, qsA, qsA, qsA};
 
         for (size_t i = 0; i < Count; ++i) {
             auto& s = src[i];
@@ -173,6 +173,8 @@ struct Net {
         std::optional<std::string> manifestJson;   // replaces the manifest it serves
         size_t silentManifests = 0;       // manifest requests left without an answer, from the first
         size_t manifestAsks = 0;
+        uint64_t linkBytesPerSecond = 0;  // its uplink, when slow
+        uint64_t linkFreeAt = 0;
         size_t outstanding = 0;           // piece requests not answered yet
     };
 
@@ -190,6 +192,9 @@ struct Net {
     size_t maxOutstandingPerSource = 0;
     size_t outstandingTotal = 0;
     size_t manifestRequests = 0;
+    uint64_t linkBytesPerSecond = 0;
+    uint64_t linkFreeAt = 0;
+    std::multimap<uint64_t, std::pair<cs::PublicKey, PieceReply>> link;
     std::map<cs::PublicKey, std::string> addresses;   // of peers that are not sources
 
     SnapshotFetcher::Hooks hooks() {
@@ -278,6 +283,12 @@ struct Net {
             }
             fetcher.onManifestReply(k, *reply);
         }
+        // slow links: the joining node's downlink, or a source's uplink; replies arrive in order at the rate
+        while (!link.empty() && link.begin()->first <= nowMs) {
+            auto entry = std::move(link.begin()->second);
+            link.erase(link.begin());
+            fetcher.onPieceReply(entry.first, std::move(entry.second));
+        }
         auto pieces = std::move(pieceQueue);
         pieceQueue.clear();
         for (auto& [k, request] : pieces) {
@@ -308,6 +319,13 @@ struct Net {
                 if (s.corruptAll && reply.status == PieceStatus::Ok && !reply.data.empty()) {
                     reply.data[0] ^= 0x5a;
                 }
+            }
+            if (s.linkBytesPerSecond != 0 || linkBytesPerSecond != 0) {
+                auto& freeAt = s.linkBytesPerSecond != 0 ? s.linkFreeAt : linkFreeAt;
+                const uint64_t rate = s.linkBytesPerSecond != 0 ? s.linkBytesPerSecond : linkBytesPerSecond;
+                freeAt = std::max(freeAt, nowMs) + reply.data.size() * 1000 / rate;
+                link.emplace(freeAt, std::make_pair(k, std::move(reply)));
+                continue;
             }
             fetcher.onPieceReply(k, std::move(reply));
         }
@@ -702,7 +720,8 @@ TEST(SnapshotFetcher, StalledSourceTimesOut) {
     const uint64_t start = net.nowMs;
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
     EXPECT_GE(net.nowMs - start, SnapshotFetcher::kPieceTimeoutMs);
-    EXPECT_TRUE(net.logged(base58(net.key(Snapshots::A1)) + " did not answer within 30 s"));
+    // 30 s plus its two outstanding 64-KiB pieces at 64 KB/s
+    EXPECT_TRUE(net.logged(base58(net.key(Snapshots::A1)) + " did not answer within 32 s"));
     EXPECT_GT(net.sentTo(net.key(Snapshots::A1)), 0u);
     expectFilesOf(tmp.path, fetcher.result()->first);
 }
@@ -961,18 +980,103 @@ TEST(SnapshotFetcher, BusyForeverEndsTheFetch) {
     net.add(Snapshots::A1).busyAll = true;
     net.add(Snapshots::A2).busyAll = true;
     auto cfg = fetchConfig();
-    cfg.fetchWait = 86'400;
-    cfg.fetchFallback = "wait";
+    cfg.fetchWait = 86'400;   // fetch_fallback=sync
     SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return isFetching(fetcher); }, 20));
     const uint64_t start = net.nowMs;
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() != Phase::Fetch; }, 4000));
     EXPECT_EQ(fetcher.phase(), Phase::Collect);
     EXPECT_GE(net.nowMs - start, SnapshotFetcher::kNoProgressMs);
-    EXPECT_TRUE(net.logged("no data for 5 min (attempt 1 of 3)"));
+    EXPECT_TRUE(net.logged("no data for 5 min (failed fetch 1 of 3)"));
     EXPECT_TRUE(net.logged("busy for 1 min without a piece"));
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 10000));
-    EXPECT_TRUE(net.logged("(attempt 3 of 3): syncing from block 0"));
+    EXPECT_TRUE(net.logged("(failed fetch 3 of 3): syncing from block 0"));
+}
+
+// with fetch_fallback=wait failed fetches never end the bootstrap
+TEST(SnapshotFetcher, BusyForeverWithWaitKeepsTrying) {
+    TmpDir tmp("busywait");
+    Net net;
+    net.add(Snapshots::A1).busyAll = true;
+    net.add(Snapshots::A2).busyAll = true;
+    auto cfg = fetchConfig();
+    cfg.fetchWait = 86'400;
+    cfg.fetchFallback = "wait";
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return net.countLogged("(failed fetch 4, fetch_fallback=wait)") != 0; }, 20000));
+    EXPECT_NE(fetcher.phase(), Phase::Fallback);
+    // the sources deliver again: the fetch completes
+    net.sources[net.key(Snapshots::A1)].busyAll = false;
+    net.sources[net.key(Snapshots::A2)].busyAll = false;
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }, 10000));
+}
+
+// sources that serve bad pieces are banned wave after wave without pushing the node to a sync from 0
+TEST(SnapshotFetcher, MaliciousWavesDoNotForceFallback) {
+    TmpDir tmp("waves");
+    Net net;
+    for (auto i : {Snapshots::A1, Snapshots::A2, Snapshots::A3, Snapshots::A4, Snapshots::A5, Snapshots::A6}) {
+        net.add(i, i == Snapshots::A1 || i == Snapshots::A2).corruptAll = true;
+    }
+    net.add(Snapshots::B, false);
+    net.add(Snapshots::E, false);
+    auto cfg = fetchConfig();
+    cfg.fetchWait = 86'400;   // fetch_fallback=sync
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    const std::vector<std::pair<size_t, size_t>> waves{{Snapshots::A3, Snapshots::A4}, {Snapshots::A5, Snapshots::A6}, {Snapshots::B, Snapshots::E}};
+    for (size_t w = 0; w < waves.size(); ++w) {
+        ASSERT_TRUE(net.runUntil(fetcher, [&] { return net.countLogged("not counted") == w + 1; }, 2000)) << w;
+        EXPECT_EQ(fetcher.phase(), Phase::Collect);
+        net.peers.neighbours.insert(net.key(waves[w].first));
+        net.peers.neighbours.insert(net.key(waves[w].second));
+        if (w + 1 == waves.size()) {
+            break;
+        }
+    }
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+    EXPECT_EQ(net.countLogged("failed fetch"), 0u);
+    EXPECT_EQ(fetcher.result()->first.filesHash() == snapshots().src[Snapshots::B].manifest.filesHash() ||
+                  fetcher.result()->first.filesHash() == snapshots().src[Snapshots::E].manifest.filesHash(),
+              true);
+}
+
+// a slow downlink: about 100 KB/s for eight 512-KiB pieces in flight, scaled here to 64-KiB pieces;
+// no source is marked and the fetch completes
+TEST(SnapshotFetcher, SlowLinkIsNotMarked) {
+    TmpDir tmp("slowlink");
+    Net net;
+    net.linkBytesPerSecond = 12'500;
+    net.add(Snapshots::A1);
+    net.add(Snapshots::A2);
+    net.add(Snapshots::B);
+    net.add(Snapshots::E);
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }, 20000));
+    EXPECT_FALSE(net.logged("did not answer"));
+    EXPECT_FALSE(net.logged("looking at the sources again"));
+    expectFilesOf(tmp.path, fetcher.result()->first);
+}
+
+// sources whose uplink is so slow that their second piece outlives the timeout: they deliver, so
+// they go to one piece at a time instead of being marked, and their late pieces are taken
+TEST(SnapshotFetcher, SlowSourcesGoToOnePieceAtATime) {
+    TmpDir tmp("slowsources");
+    Net net;
+    net.add(Snapshots::A1).linkBytesPerSecond = 3'000;
+    net.add(Snapshots::A2).linkBytesPerSecond = 3'000;
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }, 20000));
+    EXPECT_TRUE(net.logged("is slow: one piece at a time"));
+    EXPECT_FALSE(net.logged("did not answer"));
+    EXPECT_FALSE(net.logged("looking at the sources again"));
+    // late pieces were taken, not asked for again: no more requests than pieces plus the requeued ones
+    const auto& m = snapshots().src[Snapshots::A1].manifest;
+    size_t pieces = 0;
+    for (const auto& f : m.files) {
+        pieces += f.chunks.size();
+    }
+    EXPECT_LT(net.sent.size(), pieces + pieces / 2);
+    expectFilesOf(tmp.path, fetcher.result()->first);
 }
 
 // two groups as strong as each other: the 30-s line says conflict

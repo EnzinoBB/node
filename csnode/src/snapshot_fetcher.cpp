@@ -586,7 +586,7 @@ bool SnapshotFetcher::everUsable(const Source& s) const {
 }
 
 bool SnapshotFetcher::usable(const Source& s, uint64_t t) const {
-    return !s.banned && s.markedUntil <= t && s.busyUntil <= t && s.outstanding < kPiecesPerSource;
+    return !s.banned && s.markedUntil <= t && s.busyUntil <= t && s.outstanding < s.budget;
 }
 
 bool SnapshotFetcher::startFetch(uint64_t t) {
@@ -594,6 +594,7 @@ bool SnapshotFetcher::startFetch(uint64_t t) {
         return false;
     }
     phase_ = Phase::Fetch;
+    misbehaviour_ = false;
     fetchStartedAt_ = t;
     lastSendAt_ = t;
     lastByteAt_ = t;
@@ -843,15 +844,26 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
         return;
     }
     auto& f = *file;
-    auto it = f.inFlight.find(reply.chunk);
-    if (it == f.inFlight.end() || it->second.source != sender) {
-        ++dropped_;
-        return;
-    }
-    f.inFlight.erase(it);
     auto* s = findSource(sender);
-    if (s != nullptr && s->outstanding != 0) {
-        --s->outstanding;
+    auto it = f.inFlight.find(reply.chunk);
+    bool lateReply = false;
+    if (it != f.inFlight.end() && it->second.source == sender) {
+        f.inFlight.erase(it);
+        if (s != nullptr && s->outstanding != 0) {
+            --s->outstanding;
+        }
+    }
+    else {
+        // the reply to a piece that timed out on a slow link: still taken while the piece is missing,
+        // so that the bytes already on their way are not asked for twice
+        auto l = late_.find({reply.name, reply.chunk});
+        if (l == late_.end() || l->second != sender || reply.chunk >= f.have.size() || f.have[reply.chunk] ||
+            reply.status != snapshot_p2p::PieceStatus::Ok) {
+            ++dropped_;
+            return;
+        }
+        late_.erase(l);
+        lateReply = true;
     }
     const uint64_t t = now();
 
@@ -908,6 +920,13 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
             lastByteAt_ = t;
             if (s != nullptr) {
                 s->busySince = 0;
+                s->delivered = true;
+                s->lastPieceAt = t;
+                // two pieces in a row within the timeout: back to two pieces at a time
+                s->streak = lateReply ? 0 : s->streak + 1;
+                if (s->budget < kPiecesPerSource && s->streak >= 2) {
+                    s->budget = kPiecesPerSource;
+                }
             }
             if (f.missing == 0) {
                 f.verifyPending = true;
@@ -936,9 +955,18 @@ void SnapshotFetcher::releaseSource(const cs::PublicKey& key) {
     if (auto* s = findSource(key)) {
         s->outstanding = 0;
     }
+    forgetLate(key);
+}
+
+void SnapshotFetcher::forgetLate(const cs::PublicKey& key) {
+    for (auto it = late_.begin(); it != late_.end();) {
+        it = it->second == key ? late_.erase(it) : std::next(it);
+    }
 }
 
 void SnapshotFetcher::clearInFlight() {
+    // late replies too: after a change of files a chunk index may name other bytes
+    late_.clear();
     for (auto& f : files_) {
         f.inFlight.clear();
     }
@@ -956,6 +984,7 @@ void SnapshotFetcher::mark(const cs::PublicKey& key, uint64_t t, bool forever, c
         return;
     }
     const bool wasBanned = s->banned;
+    misbehaviour_ = misbehaviour_ || phase_ == Phase::Fetch;
     if (forever) {
         s->banned = true;
     }
@@ -993,14 +1022,27 @@ void SnapshotFetcher::mark(const cs::PublicKey& key, uint64_t t, bool forever, c
 }
 
 void SnapshotFetcher::expire(uint64_t t) {
-    std::set<cs::PublicKey> late;
+    // the timeout grows with what the source still has to send us: 30 s plus its outstanding bytes
+    // at 64 KB/s, so that two large pieces on a slow link are not taken for a stall
+    std::map<cs::PublicKey, uint64_t> bytesTo;
+    for (const auto& f : files_) {
+        for (const auto& [chunk, piece] : f.inFlight) {
+            bytesTo[piece.source] += pieceLength(f, chunk);
+        }
+    }
+    std::set<cs::PublicKey> lateSources;
     for (auto& f : files_) {
         for (auto it = f.inFlight.begin(); it != f.inFlight.end();) {
-            if (t - it->second.sentAt >= kPieceTimeoutMs) {
-                late.insert(it->second.source);
+            const uint64_t timeout = kPieceTimeoutMs + bytesTo[it->second.source] * 1000 / kTimeoutBytesPerSecond;
+            if (t - it->second.sentAt >= timeout) {
+                lateSources.insert(it->second.source);
                 if (auto* s = findSource(it->second.source); s != nullptr && s->outstanding != 0) {
                     --s->outstanding;
                 }
+                if (late_.size() >= kMaxLate) {
+                    late_.erase(late_.begin());
+                }
+                late_[{f.file.name, it->first}] = it->second.source;
                 it = f.inFlight.erase(it);
             }
             else {
@@ -1008,11 +1050,21 @@ void SnapshotFetcher::expire(uint64_t t) {
             }
         }
     }
-    for (const auto& key : late) {
+    for (const auto& key : lateSources) {
         if (phase_ != Phase::Fetch) {
             break;
         }
-        mark(key, t, false, "did not answer within " + duration(kPieceTimeoutMs / 1000));
+        auto* s = findSource(key);
+        if (s != nullptr && s->delivered && t - s->lastPieceAt < kRecentPieceMs) {
+            // it delivers, slowly: one piece at a time until it delivers two in time
+            s->streak = 0;
+            if (s->budget != 1) {
+                s->budget = 1;
+                log("SNAPSHOT: source " + keyText(key) + " is slow: one piece at a time");
+            }
+            continue;
+        }
+        mark(key, t, false, "did not answer within " + duration((kPieceTimeoutMs + bytesTo[key] * 1000 / kTimeoutBytesPerSecond) / 1000));
     }
 }
 
@@ -1093,16 +1145,29 @@ void SnapshotFetcher::backToCollect(const std::string& why) {
     agreedSources_.clear();
     agreement_.chosen.reset();
     dirty_ = true;
-    ++failures_;
-    if (failures_ >= kMaxAttempts) {
-        log("SNAPSHOT: " + why + " (attempt " + std::to_string(failures_) + " of " + std::to_string(kMaxAttempts) +
+    phase_ = Phase::Collect;
+    if (misbehaviour_) {
+        // sources were banned or marked: remote peers must not be able to push the node to a sync
+        // from block 0, so this is not counted
+        misbehaviour_ = false;
+        log("SNAPSHOT: " + why + " (sources were banned or marked, not counted): looking at the sources again", true);
+        return;
+    }
+    ++fetchFailures_;
+    if (cfg_.fetchFallback == "wait") {
+        log("SNAPSHOT: " + why + " (failed fetch " + std::to_string(fetchFailures_) +
+                ", fetch_fallback=wait): looking at the sources again",
+            true);
+        return;
+    }
+    if (fetchFailures_ >= kMaxAttempts) {
+        log("SNAPSHOT: " + why + " (failed fetch " + std::to_string(fetchFailures_) + " of " + std::to_string(kMaxAttempts) +
                 "): syncing from block 0",
             true);
         phase_ = Phase::Fallback;
         return;
     }
-    phase_ = Phase::Collect;
-    log("SNAPSHOT: " + why + " (attempt " + std::to_string(failures_) + " of " + std::to_string(kMaxAttempts) +
+    log("SNAPSHOT: " + why + " (failed fetch " + std::to_string(fetchFailures_) + " of " + std::to_string(kMaxAttempts) +
             "): looking at the sources again",
         true);
 }
@@ -1162,7 +1227,7 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
     if (stopped_ || phase_ != Phase::Import) {
         return;
     }
-    ++failures_;
+    ++importFailures_;
     if (target_ && fileAtFault.empty()) {
         // not a file's fault: the source whose signed manifest this was
         std::vector<uint8_t> bytes;
@@ -1191,9 +1256,9 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
         }
     }
     log("SNAPSHOT: the import refused " + (fileAtFault.empty() ? std::string("the snapshot") : fileAtFault) + " (attempt " +
-            std::to_string(failures_) + " of " + std::to_string(kMaxAttempts) + ")",
+            std::to_string(importFailures_) + " of " + std::to_string(kMaxAttempts) + ")",
         true);
-    if (failures_ >= kMaxAttempts) {
+    if (importFailures_ >= kMaxAttempts) {
         log("SNAPSHOT: " + std::to_string(kMaxAttempts) + " imports failed: syncing from block 0", true);
         phase_ = Phase::Fallback;
         return;

@@ -57,7 +57,10 @@ public:
     static constexpr size_t kManifestRetries = 2;           // ... this many times, then every 30 s
     static constexpr uint64_t kSilentMs = kManifestIntervalMs + 5'000;   // no answer this long: silent
     static constexpr uint64_t kNeighbourRetryMs = 60'000;
-    static constexpr uint64_t kPieceTimeoutMs = 30'000;
+    static constexpr uint64_t kPieceTimeoutMs = 30'000;      // plus the bytes outstanding to the source at 64 KB/s
+    static constexpr uint64_t kTimeoutBytesPerSecond = 64 << 10;
+    static constexpr uint64_t kRecentPieceMs = 60'000;       // a source that delivered this recently is slow, not stalled
+    static constexpr size_t kMaxLate = 64;                   // timed-out pieces whose late reply is still taken
     static constexpr uint64_t kMarkMs = 60'000;
     static constexpr uint64_t kMinBusyMs = 500;
     static constexpr uint64_t kMaxBusyMs = 10'000;
@@ -73,7 +76,8 @@ public:
     static constexpr size_t kMaxPerBlock = 16;       // discovered sources per /16 (IPv4) or /32 (IPv6)
     static constexpr uint64_t kEvictedMs = 60'000;   // an evicted key is not taken again before
     static constexpr size_t kMaxEvicted = 1024;
-    static constexpr size_t kMaxAttempts = 3;        // fetches that end without a snapshot, then Fallback
+    static constexpr size_t kMaxAttempts = 3;        // refused imports, and with fetch_fallback=sync failed
+                                                     // fetches not explained by misbehaving sources: then Fallback
     static constexpr uint64_t kHashBytesPerTick = 64ull << 20;   // whole-file SHA-256 per tick
     static constexpr size_t kMaxSourcesFileKeys = 64;
 
@@ -134,6 +138,10 @@ private:
         bool banned = false;          // for the rest of the bootstrap
         uint64_t busyUntil = 0;
         uint64_t busySince = 0;       // first busy answer since its last piece; 0: none
+        size_t budget = kPiecesPerSource;   // pieces it may have outstanding: 1 after a timeout of a source that delivers
+        size_t streak = 0;            // pieces delivered in time in a row
+        bool delivered = false;
+        uint64_t lastPieceAt = 0;
         size_t outstanding = 0;
     };
 
@@ -190,6 +198,7 @@ private:
     void releaseSource(const cs::PublicKey& key);
     void mark(const cs::PublicKey& key, uint64_t t, bool forever, const std::string& why);
     void backToCollect(const std::string& why);
+    void forgetLate(const cs::PublicKey& key);
     void banDeclaring(const std::string& name, const std::string& sha256, const std::string& why);
     void closeFile(FileState& f);
     bool openFile(FileState& f, bool truncate);
@@ -215,7 +224,11 @@ private:
     std::optional<SnapshotManifest> target_;
     std::vector<FileState> files_;
     std::set<std::pair<std::string, std::string>> badFiles_;   // (name, sha256) refused by the importer
-    size_t failures_ = 0;          // fetches that ended without a snapshot, refused imports included
+    size_t importFailures_ = 0;    // imports refused (onImportFailed)
+    size_t fetchFailures_ = 0;     // fetches that ended without a snapshot and without a misbehaving source
+    bool misbehaviour_ = false;    // a source was marked or banned during the current fetch
+    // pieces that timed out, (file, chunk) -> the source asked: its late reply is still taken
+    std::map<std::pair<std::string, uint32_t>, cs::PublicKey> late_;
     bool dirty_ = true;            // the input of the agreement changed since it was computed
     uint64_t lastByteAt_ = 0;
     uint64_t lastSendAt_ = 0;
