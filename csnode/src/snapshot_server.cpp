@@ -203,7 +203,16 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
     }
 
     // returns false when the connection must end
-    bool handle(const std::shared_ptr<tcp::socket>& socketPtr, const http::request<http::empty_body>& req, uint64_t& served) {
+    // what one connection has used, across its requests: the minimum rate and the time limit apply to
+    // the connection, not to each request
+    struct Usage {
+        uint64_t served = 0;
+        double writeSeconds = 0;
+        std::chrono::steady_clock::time_point end;
+    };
+
+    bool handle(const std::shared_ptr<tcp::socket>& socketPtr, const http::request<http::empty_body>& req, Usage& usage) {
+        uint64_t& served = usage.served;
         tcp::socket& socket = *socketPtr;
         const bool keepAlive = req.keep_alive();
         auto simple = [&](http::status status, const std::string& text, bool retry = false) {
@@ -302,9 +311,10 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
         in.seekg(static_cast<std::streamoff>(first));
         std::vector<char> buffer(64 << 10);
         uint64_t left = length;
-        double writeSeconds = 0;
-        uint64_t written = 0;
         while (left > 0 && !stopping) {
+            if (std::chrono::steady_clock::now() >= usage.end) {
+                return false;   // the connection's time is up, even in the middle of a body
+            }
             const size_t n = static_cast<size_t>(std::min<uint64_t>(left, buffer.size()));
             in.read(buffer.data(), static_cast<std::streamsize>(n));
             if (static_cast<size_t>(in.gcount()) != n) {
@@ -318,9 +328,8 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             if (ec) {
                 return false;
             }
-            writeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-            written += n;
-            if (writeSeconds >= kMinRateAfterSec && static_cast<double>(written) / writeSeconds < kMinBytesPerSec) {
+            usage.writeSeconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            if (usage.writeSeconds >= kMinRateAfterSec && static_cast<double>(usage.served + n) / usage.writeSeconds < kMinBytesPerSec) {
                 return false;   // the reader is too slow to keep a slot
             }
             setDeadline(socketPtr, std::chrono::seconds(kWriteTimeoutSec));
@@ -338,10 +347,11 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
         }
         setTimeout(*socket, SO_RCVTIMEO, kIdleTimeoutSec);
         setTimeout(*socket, SO_SNDTIMEO, kWriteTimeoutSec);
-        uint64_t served = 0;
+        Usage usage;
+        usage.end = std::chrono::steady_clock::now() + std::chrono::seconds(kMaxConnectionSec);
+        uint64_t& served = usage.served;
         boost::beast::flat_buffer buffer;
-        const auto connectionEnd = std::chrono::steady_clock::now() + std::chrono::seconds(kMaxConnectionSec);
-        for (size_t i = 0; i < kMaxRequestsPerConnection && !stopping && std::chrono::steady_clock::now() < connectionEnd; ++i) {
+        for (size_t i = 0; i < kMaxRequestsPerConnection && !stopping && std::chrono::steady_clock::now() < usage.end; ++i) {
             http::request_parser<http::empty_body> parser;
             parser.header_limit(8 * 1024);
             setDeadline(socket, std::chrono::seconds(i == 0 ? kHeaderDeadlineSec : kIdleTimeoutSec));
@@ -350,7 +360,7 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             if (ec) {
                 break;
             }
-            if (!handle(socket, parser.get(), served)) {
+            if (!handle(socket, parser.get(), usage)) {
                 break;
             }
         }
