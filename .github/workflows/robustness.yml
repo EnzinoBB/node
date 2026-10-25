@@ -246,9 +246,14 @@ jobs:
           # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
             env: SLOW_NODES=3,6 SLOW_CPU=5
-          # snapshot sharing announced in host_data: n3 and n5 serve, a stopped node lists them
+          # snapshot sharing: n3 (full) and n5 serve, build their snapshots and announce them in
+          # host_data; a stopped node lists them
           - name: snapshot-capability
             env: SNAPSHOT_SERVE_NODES=3,5
+          # a pruned LMDB node and a full RocksDB one serve, the pruned one while it prunes (odd nodes:
+          # the even ones run node_alt_ref in a mixed run)
+          - name: snapshot-p2p-serve
+            env: NODE_STORAGE=berkeleydb,berkeleydb,berkeleydb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=5,7 TARGET_SEQ=2600
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300

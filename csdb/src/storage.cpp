@@ -1350,6 +1350,14 @@ bool Storage::pool_prune_batch(const std::vector<PoolHash>& hashes) {
     return true;
 }
 
+bool Storage::pool_bytes(cs::Sequence sequence, cs::Bytes& out) const {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    return d->db->get(static_cast<uint32_t>(sequence), &out);
+}
+
 cs::Sequence Storage::first_sequence() const {
     if (!isOpen()) {
         d->set_last_error(NotOpen);

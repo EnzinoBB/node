@@ -67,9 +67,10 @@
 #        snapshot with --import-snapshot into its own backend and joins; with SNAPSHOT_CORRUPT=1 the
 #        blocks file is truncated first, so the restore must fail and that node syncs from block 0.
 #        SNAPSHOT_FORMAT=1: packaging/docker/snapshot-make.sh and snapshot-restore.sh instead
-#        SNAPSHOT_SERVE_NODES (optional, comma separated): those nodes run with [snapshot] serve=on;
-#        at the end one other node of this build is stopped and its known_peers.json must list each
-#        of them with the snapshot capability, and no other node with it
+#        SNAPSHOT_SERVE_NODES (optional, comma separated): those nodes run with [snapshot] serve=on
+#        and a checkpoint every 1'000 blocks; each must build the snapshot of a checkpoint and serve
+#        it; at the end one other node of this build is stopped and its known_peers.json must list
+#        each of them with the snapshot capability, and no other node with it
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -203,6 +204,12 @@ SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 SNAPSHOT_SERVE_NODES=${SNAPSHOT_SERVE_NODES:-}
+if [ -n "$BIN_ALT" ]; then
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        # the even nodes run BIN_ALT, which may not serve snapshots
+        [ $((i % 2)) -eq 1 ] || { echo "FAIL: SNAPSHOT_SERVE_NODES names n$i, an even node, which runs BIN_ALT"; exit 1; }
+    done
+fi
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
@@ -354,6 +361,10 @@ storage_section() {
         # frequent checkpoints (checkpoint_every is at least 1000 blocks, so one a minute as well), so
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
+    fi
+    if [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && [[ "$lines" != *checkpoint_every=* ]]; then
+        # a serving node builds its snapshots from the periodic checkpoints
+        lines="${lines}checkpoint_every=1000\ncheckpoint_keep=2\n"
     fi
     [ -n "$backend" ] && lines="${lines}db_backend=$backend\n"
     [ -n "$lines" ] && printf "\n[storage]\n$lines"
@@ -1316,6 +1327,15 @@ if [ "$LOW_STAKE_NODES" -gt 0 ]; then
     echo "stake: none of the $LOW_STAKE_NODES nodes below the minimum stake was trusted after round $from"
 fi
 if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
+    # every serving node built the snapshot of a checkpoint and serves it (the build follows the
+    # checkpoint at 1'000 on a thread of low priority: a minute at most)
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        for _ in $(seq 1 60); do grep -aq 'SNAPSHOT: serving block' "$WORK/n$i/node.log" && break; sleep 1; done
+        built=$({ grep -a 'SNAPSHOT: built block' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E 's/.*(built block [0-9]+[^,]*, [^,]*, [^,]*).*/\1/')
+        serving=$({ grep -a 'SNAPSHOT: serving block' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E 's/.*SNAPSHOT: //')
+        [ -n "$built" ] && [ -n "$serving" ] || { echo "FAIL: n$i did not build and serve a snapshot"; { grep -a 'SNAPSHOT' "$WORK/n$i/node.log" || true; } | tail -5; exit 1; }
+        echo "snapshot: n$i $built; $serving"
+    done
     # known_peers.json is written at a clean stop: stop one node of this build that does not serve
     observer=0
     for i in $(seq 1 "$NODES"); do

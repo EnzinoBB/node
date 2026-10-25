@@ -75,7 +75,7 @@ struct StorageData {
 // observer: every key but fetch* applies while the node runs.
 struct SnapshotData {
     bool serve = false;                             // build snapshots and answer snapshot requests
-    size_t serveRateKbps = 2000;                    // upload cap of all peers together; 0: unlimited
+    size_t serveRateKbps = 2000;                    // upload cap of all peers together, KB/s (2000: 2 MB/s); 0: unlimited
     size_t serveMaxPeers = 8;                       // peers served within 30 s; more get busy
     size_t snapshotBlocks = 101'000;                // blocks before the checkpoint in a snapshot
     std::string fetch = "auto";                     // auto: fetch at a start on an empty database; off: never

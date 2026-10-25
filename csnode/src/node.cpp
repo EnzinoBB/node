@@ -14,6 +14,9 @@
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
 #include <csnode/snapshot_messages.hpp>
+#include <csnode/snapshot_provider.hpp>
+#include <csnode/snapshot_service.hpp>
+#include <fstream>
 #include <csnode/node.hpp>
 #include <csnode/blockrequest.hpp>
 #include <csnode/nodecore.hpp>
@@ -259,6 +262,29 @@ bool Node::init() {
     api_->run();
 #endif  // NODE_API
 
+    // snapshots served to p2p neighbours: [snapshot] serve, read again every 10 s (off by default)
+    {
+        std::string version;
+        std::ifstream versionFile("VERSION");
+        if (!versionFile || !std::getline(versionFile, version) || version.empty() || version.size() > 64) {
+            version = "4.2." + std::to_string(Config::getNodeVersion()) + "." + std::to_string(Config::getMinorNodeVersion());
+        }
+        for (auto& c : version) {
+            if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
+                c = '_';
+            }
+        }
+        snapshotProvider_ = std::make_unique<cs::SnapshotProvider>();
+        snapshotSummaryAt_ = std::chrono::steady_clock::now();
+        snapshotProvider_->onPeerCompleted = [](const cs::PublicKey& key, cs::Sequence seq, uint64_t bytes, std::chrono::seconds took) {
+            cslog() << "SNAPSHOT: served block " << seq << " to " << EncodeBase58(key.data(), key.data() + key.size()) << ", "
+                    << bytes / (1u << 20) << " MB in " << took.count() << " s";
+        };
+        snapshotService_ = std::make_unique<cs::SnapshotService>(blockChain_, *snapshotProvider_, solver_->getPrivateKey(), version);
+        cs::Connector::connect(&blockChain_.checkpointSavedEvent, snapshotService_.get(), &cs::SnapshotService::onCheckpointSaved);
+        snapshotService_->start();
+    }
+
     if (!transport_->isGood()) {
         return false;
     }
@@ -357,6 +383,11 @@ void Node::destroy() {
 
     api_->stop();
     cswarning() << "[API STOPPED]";
+
+    if (snapshotService_) {
+        snapshotService_->stop();
+        cswarning() << "[SNAPSHOT SERVICE STOPPED]";
+    }
 
     solver_->finish();
     cswarning() << "[SOLVER STOPPED]";
@@ -2162,17 +2193,53 @@ void logSnapshotDrop(uint64_t& dropped, const char* what, const cs::PublicKey& s
 }
 }  // namespace
 
+void Node::snapshotNodeState(cs::SnapshotNodeState& state) const {
+    state.lastSeq = blockChain_.getLastSeq();
+    state.round = cs::Conveyer::instance().currentRoundNumber();
+    // design 5.2: not syncing, not in a bootstrap round, at most 3 blocks behind a known round
+    state.synced = state.round != 0 && (!poolSynchronizer_ || !poolSynchronizer_->isSyncroStarted()) && !isBootstrapRound_ &&
+                   state.lastSeq + 3 >= state.round;
+    state.trusted = myLevel_ != Level::Normal;
+}
+
+namespace {
+cs::SnapshotProvider::Settings snapshotProviderSettings() {
+    const auto& cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
+    cs::SnapshotProvider::Settings settings;
+    settings.serve = cfg.serve;
+    settings.rateKBps = cfg.serveRateKbps;
+    settings.maxPeers = cfg.serveMaxPeers;
+    return settings;
+}
+}  // namespace
+
+void Node::logSnapshotSummary() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - snapshotSummaryAt_ < std::chrono::hours(1)) {
+        return;
+    }
+    snapshotSummaryAt_ = now;
+    const auto summary = snapshotProvider_->takeSummary();
+    if (!summary.empty()) {
+        cslog() << "SNAPSHOT: in the last hour " << summary;
+    }
+}
+
 void Node::getSnapshotManifestRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
     cs::snapshot_p2p::ManifestRequest request;
     if (!cs::snapshot_p2p::decode(data, size, request)) {
         return logSnapshotDrop(snapshotMessagesDropped_, "a malformed manifest request", sender);
     }
-    // this build does not serve snapshots yet
-    cs::snapshot_p2p::ManifestReply reply;
-    reply.status = cs::snapshot_p2p::ManifestStatus::NotServing;
-    reply.lastSeq = blockChain_.getLastSeq();
-    reply.round = cs::Conveyer::instance().currentRoundNumber();
-    sendSnapshotMessage(sender, MsgTypes::SnapshotManifestReply, cs::snapshot_p2p::encode(reply));
+    if (!snapshotProvider_) {
+        return;
+    }
+    cs::SnapshotNodeState state;
+    snapshotNodeState(state);
+    const auto reply = snapshotProvider_->onManifestRequest(sender, snapshotProviderSettings(), state);
+    if (reply) {
+        sendSnapshotMessage(sender, MsgTypes::SnapshotManifestReply, cs::snapshot_p2p::encode(*reply));
+    }
+    logSnapshotSummary();
 }
 
 void Node::getSnapshotManifestReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
@@ -2189,12 +2256,14 @@ void Node::getSnapshotPieceRequest(const uint8_t* data, const size_t size, const
     if (!cs::snapshot_p2p::decode(data, size, request)) {
         return logSnapshotDrop(snapshotMessagesDropped_, "a malformed piece request", sender);
     }
-    cs::snapshot_p2p::PieceReply reply;
-    reply.status = cs::snapshot_p2p::PieceStatus::NotServing;
-    reply.seq = request.seq;
-    reply.name = request.name;
-    reply.chunk = request.chunk;
+    if (!snapshotProvider_) {
+        return;
+    }
+    cs::SnapshotNodeState state;
+    snapshotNodeState(state);
+    const auto reply = snapshotProvider_->onPieceRequest(sender, request, snapshotProviderSettings(), state);
     sendSnapshotMessage(sender, MsgTypes::SnapshotPieceReply, cs::snapshot_p2p::encode(reply));
+    logSnapshotSummary();
 }
 
 void Node::getSnapshotPieceReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {

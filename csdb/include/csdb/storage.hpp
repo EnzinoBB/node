@@ -365,6 +365,11 @@ public:
     cs::Sequence first_sequence() const;
 
     /**
+     * The stored bytes of block sequence, as the database holds them (no parsing, no pool cache).
+     */
+    bool pool_bytes(cs::Sequence sequence, cs::Bytes& out) const;
+
+    /**
      * Returns the space of pruned pools to the file system.
      */
     bool compact();
