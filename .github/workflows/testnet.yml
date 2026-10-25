@@ -44,7 +44,7 @@ on:
         description: 'With contracts: branch or commit of EnzinoBB/contract-executor built and run by the even nodes, the odd nodes keep the release executor (empty = all release)'
         default: ''
       node_alt_ref:
-        description: 'Branch or commit of this repository built and run by the even nodes, the odd nodes run this run''s node (empty = all the same)'
+        description: 'Branch or commit of this repository built and run by the even nodes, the odd nodes run this run''s node; "official" = the official 4.2.532 node with the CI test-network hooks (the second nightly run uses it; empty = all the same)'
         default: ''
       restart_nodes:
         description: 'Nodes stopped and restarted together in the restart test, e.g. "6 7" (empty = the last node)'
@@ -59,13 +59,15 @@ on:
         description: 'With contracts: load phase as "seconds,writes per second,reads per second", e.g. 120,2,20 (empty = none)'
         default: ''
   schedule:
+    # every night: one run of this node alone, one with official nodes on the even positions
     - cron: '17 2 * * *'
+    - cron: '47 3 * * *'
   pull_request:
     branches: [master]
     types: [labeled, synchronize, opened, reopened]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.schedule }}
   cancel-in-progress: true
 
 permissions:
@@ -161,13 +163,21 @@ jobs:
       # mixed nodes: the even nodes run a node built from another ref, so a block or contract result
       # that differs from this run's node shows up as a stalled or diverging network
       - name: Build node under test
-        if: inputs.node_alt_ref != ''
+        if: inputs.node_alt_ref != '' || github.event.schedule == '47 3 * * *'
         env:
           CCACHE_BASEDIR: ${{ github.workspace }}
-          NODE_ALT_REF: ${{ inputs.node_alt_ref }}
+          NODE_ALT_REF: ${{ inputs.node_alt_ref || (github.event.schedule == '47 3 * * *' && 'official' || '') }}
         run: |
-          git fetch -q --no-recurse-submodules origin -- "$NODE_ALT_REF"
+          # "official": the official 4.2.532 node (CREDITSCOM 4a95aaaf) with only the two hooks a CI
+          # test network needs (its starter key and genesis recipient, ci/official/testnet-hooks.patch)
+          ref=$NODE_ALT_REF
+          [ "$ref" != official ] || ref=4a95aaaf602daead3ad70ecba113da92374b14f4
+          git fetch -q --no-recurse-submodules origin -- "$ref"
           git worktree add -q node-alt FETCH_HEAD
+          if [ "$NODE_ALT_REF" = official ]; then
+            git -C node-alt apply --whitespace=nowarn "$PWD/ci/official/testnet-hooks.patch"
+            git -C node-alt diff --stat
+          fi
           # the submodules are copied from this run's checkout, which must point to the same commits
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
@@ -186,9 +196,10 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
             -DWITH_HASKELL=OFF \
-            -DCREDITS_TESTNET=ON
+            -DCREDITS_TESTNET=$([ "$NODE_ALT_REF" = official ] && echo OFF || echo ON)
           cmake --build build-alt -j"$(nproc)" --target node
           echo "BIN_ALT=$PWD/build-alt/client/node" >> "$GITHUB_ENV"
+          [ "$NODE_ALT_REF" != official ] || echo "BIN_ALT_OFFICIAL=1" >> "$GITHUB_ENV"
           echo "node under test: $(git -C node-alt log -1 --format='%h %s')"
 
       # the contract executor of the official mainnet release (the one operators run)

@@ -1,0 +1,44 @@
+diff --git a/csnode/src/blockchain.cpp b/csnode/src/blockchain.cpp
+index 274d3a30..71714d25 100644
+--- a/csnode/src/blockchain.cpp
++++ b/csnode/src/blockchain.cpp
+@@ -1,5 +1,6 @@
+ #include <base58.h>
+ #include <chrono>
++#include <cstdlib>
+ #include <csdb/currency.hpp>
+ #include <lib/system/hash.hpp>
+ #include <lib/system/logger.hpp>
+@@ -367,6 +368,11 @@ void BlockChain::writeGenesisBlock() {
+     csdb::Transaction transaction;
+ 
+     std::string strAddr = "5B3YXqDTcWQFGAqEJQJP3Bg1ZK8FFtHtgCiFLT5VAxpe";
++    // CI test networks only (patch ci/official/testnet-hooks.patch): genesis funds to the network's key
++    if (const char* key = std::getenv("CS_TESTNET_GENESIS_KEY"); key != nullptr && *key != '\0') {
++        strAddr = key;
++        cswarning() << kLogPrefix << "TESTNET hooks: genesis funds go to " << strAddr;
++    }
+     std::vector<uint8_t> pub_key;
+     DecodeBase58(strAddr, pub_key);
+ 
+diff --git a/net/src/packetvalidator.cpp b/net/src/packetvalidator.cpp
+index fbaa4f88..70565c23 100644
+--- a/net/src/packetvalidator.cpp
++++ b/net/src/packetvalidator.cpp
+@@ -1,3 +1,5 @@
++#include <cstdlib>
++
+ #include <base58.h>
+ #include <consensus.hpp>
+ 
+@@ -18,6 +20,10 @@ std::string bcStr("81p93jgrHqA9L4Vkdut9ESSCV1XNoge7LXBW96cuA7sm");
+ 
+ struct BlockChainKey {
+   BlockChainKey() {
++      // CI test networks only (patch ci/official/testnet-hooks.patch): the starter key of the network
++      if (const char* key = std::getenv("CS_TESTNET_STARTER_KEY"); key != nullptr && *key != '\0') {
++          bcStr = key;
++      }
+       cs::Bytes keyBytes;
+       DecodeBase58(bcStr, keyBytes);
+       std::copy(keyBytes.begin(), keyBytes.end(), key_.begin());
