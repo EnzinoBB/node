@@ -190,7 +190,12 @@ StartupCheck startupCheck(const fs::path& nodeDir, cs::Sequence lastSeq, const C
     }
     report.seq = m->seq;
     report.snapshot = digestText(lower(m->stateDigest), m->wallets, lower(m->settingsDigest));
-    if (lastSeq != m->seq) {
+    if (lastSeq < m->seq) {
+        // the quick start of an import always reaches the snapshot's block: a chain below it did not
+        // load the restored state
+        return mismatch("the chain ends at block " + std::to_string(lastSeq) + ", below the snapshot's block " + std::to_string(m->seq));
+    }
+    if (lastSeq > m->seq) {
         // the chain moved past the snapshot before a start verified it: the digest at its block is gone
         writeFile(nodeDir / kVerifiedFile, "skipped: chain at " + std::to_string(lastSeq) + ", snapshot at " + std::to_string(m->seq) + "\n");
         return StartupCheck::Skipped;

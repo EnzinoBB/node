@@ -198,6 +198,18 @@ TEST(SnapshotBootstrap, StartupCheckOutcomes) {
     EXPECT_EQ(sb::startupCheck(dir, 2001, digestOf(0x22, 1), report), sb::StartupCheck::Skipped);
     EXPECT_EQ(readAll(dir / sb::kVerifiedFile), "skipped: chain at 2001, snapshot at 2000\n");
 
+    // the chain below the snapshot's block: the restored state was not loaded, a mismatch whatever the digest
+    dir = freshDir("check_below");
+    touch(dir / sb::kManifestFile, manifestOf(2000, digest).toJson());
+    EXPECT_EQ(sb::startupCheck(dir, 1999, digest, report), sb::StartupCheck::Mismatch);
+    EXPECT_FALSE(fs::exists(dir / sb::kVerifiedFile));
+    EXPECT_TRUE(fs::exists(dir / sb::kMismatchFile));
+    EXPECT_NE(report.detail.find("below"), std::string::npos);
+    dir = freshDir("check_zero");
+    touch(dir / sb::kManifestFile, manifestOf(2000, digest).toJson());
+    EXPECT_EQ(sb::startupCheck(dir, 0, digest, report), sb::StartupCheck::Mismatch);
+    EXPECT_FALSE(fs::exists(dir / sb::kVerifiedFile));
+
     // another digest, other wallets, other settings: each a mismatch
     int n = 0;
     for (auto other : {digestOf(0x22, 42), digestOf(0x11, 43), digest}) {

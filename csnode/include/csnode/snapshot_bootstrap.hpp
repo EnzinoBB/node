@@ -53,8 +53,9 @@ enum class StartupCheck {
     NoManifest,        // no snapshot.json: nothing to verify
     AlreadyVerified,   // snapshot.verified exists
     Verified,          // the digests are equal: snapshot.verified written
-    Skipped,           // the chain is past the snapshot's block: snapshot.verified written, nothing compared
-    Mismatch,          // the digests differ, or the manifest does not parse: snapshot.mismatch written
+    Skipped,           // the chain is above the snapshot's block: snapshot.verified written, nothing compared
+    Mismatch,          // the digests differ, the chain ends below the snapshot's block, or the manifest
+                       // does not parse: snapshot.mismatch written
     NotFormat2         // a manifest of another format (the Docker image's format-1 restore): left to its entrypoint
 };
 
