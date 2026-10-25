@@ -242,7 +242,10 @@ if [ "$JOIN_FETCH" = p2p ]; then
     [ "$JOIN_PRUNED_AT" -gt 0 ] && [ "${SNAPSHOT_AT:-0}" -eq 0 ] \
         || { echo "JOIN_FETCH=p2p needs JOIN_PRUNED_AT and no SNAPSHOT_AT"; exit 1; }
 fi
-# one loopback /24 per node (127.0.<i>.1): the agreement counts sources by /24
+# one loopback /24 per node (127.0.<i>.1): the agreement counts sources by /24. The p2p library
+# binds its UDP socket to every interface whatever [host_input] ip says, so a datagram to another
+# node leaves from 127.0.0.1: node_nets_on rewrites its source to the sender's address (SNAT by the
+# sender's p2p port, needs sudo), which is the address the receiver's routing table records
 NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && echo 1 || echo 0)}
 node_ip() { if [ "$NODE_NETS" = 1 ]; then echo "127.0.$1.1"; else echo 127.0.0.1; fi; }
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
@@ -436,6 +439,11 @@ storage_section() {
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
     fi
+    if [ "$JOIN_FETCH" = p2p ] && [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]]; then
+        # a joiner needs JOIN_MIN_SOURCES sources on one block: a serving node builds its snapshots
+        # from the checkpoints every 1'000 blocks only, not from the minute ones of a pruned node
+        lines=${lines//checkpoint_every_minutes=1\\n/}
+    fi
     if [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && [[ "$lines" != *checkpoint_every=* ]]; then
         # a serving node builds its snapshots from the periodic checkpoints
         lines="${lines}checkpoint_every=1000\ncheckpoint_keep=2\n"
@@ -546,6 +554,16 @@ net_fault_off() {
     sudo tc qdisc del dev lo root 2>/dev/null || true
     sudo iptables -t mangle -F OUTPUT 2>/dev/null || true
 }
+node_nets_on() {
+    for i in $(seq 1 "$ALL_NODES"); do
+        sudo iptables -t nat -A POSTROUTING -o lo -p udp --sport $((BASE_PORT + i)) -j SNAT --to-source "$(node_ip "$i")" \
+            || { echo "FAIL: cannot give n$i the source address $(node_ip "$i")"; exit 1; }
+    done
+    echo "node nets: n1..n$ALL_NODES send their p2p datagrams from 127.0.<i>.1"
+}
+node_nets_off() {
+    sudo iptables -t nat -F POSTROUTING 2>/dev/null || true
+}
 net_fault_stats() {
     sudo tc -s qdisc show dev lo 2>/dev/null | grep -A1 netem | tail -1 | sed 's/^ *//'
 }
@@ -577,6 +595,7 @@ stop_all() {
         echo "net fault: until the end ($(net_fault_stats))"
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
+    [ "$NODE_NETS" != 1 ] || node_nets_off
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
@@ -651,6 +670,9 @@ if [ "$DISK_FULL_NODE" -gt 0 ]; then
     echo "disk-full test: n$DISK_FULL_NODE block DB on a ${DISK_TMPFS_MB} MB tmpfs"
 fi
 
+if [ "$NODE_NETS" = 1 ]; then
+    node_nets_on
+fi
 for i in $(seq 1 "$NODES"); do start_node "$i"; done
 echo "started $NODES nodes in $WORK"
 SAMPLER_PID=
