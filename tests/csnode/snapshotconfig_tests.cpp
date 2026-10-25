@@ -17,11 +17,10 @@ SnapshotData parse(const std::string& ini) {
     boost::property_tree::read_ini(in, tree);
     return Config::parseSnapshotData(tree);
 }
-}  // namespace
 
 // a node key that decodes to 32 bytes, and the same bytes for the comparison
-const char* kKeyA = "3rUevsW5xfob6qDxWMDFwwTQCq39SYhzstuyfUGSDvF2";
-const char* kKeyB = "ESWr7ZThCmP2DVNNgrcsCvZZ2rrhDnFRW8oUFEpKpgdD";
+const char* const kKeyA = "3rUevsW5xfob6qDxWMDFwwTQCq39SYhzstuyfUGSDvF2";
+const char* const kKeyB = "ESWr7ZThCmP2DVNNgrcsCvZZ2rrhDnFRW8oUFEpKpgdD";
 
 cs::PublicKey decoded(const char* key) {
     std::vector<uint8_t> bytes;
@@ -31,6 +30,7 @@ cs::PublicKey decoded(const char* key) {
     std::copy(bytes.begin(), bytes.end(), result.begin());
     return result;
 }
+}  // namespace
 
 TEST(SnapshotConfig, DefaultsWithoutTheSection) {
     const auto s = parse("[params]\nipv6=false\n");

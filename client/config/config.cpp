@@ -1084,7 +1084,7 @@ SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config
     readSnapshotNumber<size_t>(data, "min_sources", result.minSources, 1, 20);
     if (data.count("sources")) {
         std::vector<std::string> keys;
-        boost::split(keys, data.get<std::string>("sources"), boost::is_any_of(", "), boost::token_compress_on);
+        boost::split(keys, data.get<std::string>("sources"), boost::is_any_of(", \t"), boost::token_compress_on);
         for (const auto& key : keys) {
             if (key.empty()) {
                 continue;
