@@ -32,7 +32,10 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #99 | config: the `[snapshot]` section takes the keys of p2p snapshot sharing (`serve`, `serve_rate_kbps`, `serve_max_peers`, `snapshot_blocks` from 1, `fetch`, `fetch_wait`, `fetch_fallback`, `min_sources` 2, `sources` as node keys, `sources_file`, `fetch_rate_kbps`); the HTTP service keys are gone and an unknown key is logged and ignored; nothing reads them yet |
+| #100 | net: four p2p messages for snapshot manifests and pieces (types 40-43) with bounded decoders; this build answers requests as not serving and sends none |
 
 ## community.12 — 2026-10-24
 
