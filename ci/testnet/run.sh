@@ -1447,12 +1447,13 @@ done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$SNAPSHOT_AT" "$BIN_ALT_OFFICIAL" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$({ [ "$SNAPSHOT_AT" -gt 0 ] || [ "$JOIN_FETCH" = p2p ]; } && echo 1 || echo 0)" "$BIN_ALT_OFFICIAL" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
 # official nodes (the even ones with BIN_ALT_OFFICIAL) log no digest: their blocks are compared below
 official = {i for i in range(2, nodes + 1, 2)} if sys.argv[6] == "1" else set()
-# a node that joins from a snapshot starts past block 1000: only the initial nodes log it
+# a node that joins from a snapshot (imported or fetched over p2p) starts past block 1000: only the
+# initial nodes log it
 initial = int(sys.argv[4]) if int(sys.argv[5]) > 0 else nodes
 initial -= len([i for i in official if i <= initial])
 seen = collections.defaultdict(dict)
