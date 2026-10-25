@@ -31,7 +31,7 @@ struct SnapshotBuildInput {
     std::function<bool(cs::Sequence, cs::Bytes&)> blockBytes;
     std::function<bool(const std::function<bool(const cs::Bytes&, const cs::Bytes&)>&)> contracts;
     std::string nodeVersion;
-    uint64_t chunkSize = 4ull << 20;
+    uint64_t chunkSize = 512ull << 10;    // one p2p piece (design 4.3)
     const std::atomic<bool>* stop = nullptr;   // checked between blocks: true aborts the build
 };
 

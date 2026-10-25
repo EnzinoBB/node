@@ -1,6 +1,7 @@
 #ifndef NODE_HPP
 #define NODE_HPP
 
+#include <chrono>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -25,6 +26,13 @@
 #include "roundstat.hpp"
 
 class Transport;
+
+namespace cs {
+class SnapshotFetcher;
+class SnapshotProvider;
+class SnapshotService;
+struct SnapshotNodeState;
+}
 
 namespace cs {
 class SolverCore;
@@ -425,6 +433,9 @@ public slots:
 private:
     // snapshot messages dropped: malformed, or not expected by this node
     uint64_t snapshotMessagesDropped_ = 0;
+    // the provider's view of this node: last block, round, synced, trusted
+    void snapshotNodeState(cs::SnapshotNodeState& state) const;
+    void logSnapshotSummary();
 
     bool init();
     void initPoolSynchronizer();
@@ -496,6 +507,13 @@ private:
 #ifdef NODE_API
     std::unique_ptr<csconnector::connector> api_;
 #endif
+
+    // snapshots served to p2p neighbours ([snapshot] serve)
+    std::unique_ptr<cs::SnapshotProvider> snapshotProvider_;
+    std::unique_ptr<cs::SnapshotService> snapshotService_;
+    // snapshot fetched from p2p neighbours at a start on an empty database (constructed in bootstrap mode only)
+    std::unique_ptr<cs::SnapshotFetcher> snapshotFetcher_;
+    std::chrono::steady_clock::time_point snapshotSummaryAt_{};
 
     uint32_t startPacketRequestPoint_ = 0;
 
