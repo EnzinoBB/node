@@ -446,9 +446,9 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
         }
         {
             std::lock_guard<std::mutex> lock(socketsLock);
-            for (const auto& s : sockets) {
+            for (const auto& [socket, conn] : sockets) {
                 boost::system::error_code ec;
-                s->shutdown(tcp::socket::shutdown_both, ec);
+                socket->shutdown(tcp::socket::shutdown_both, ec);
             }
         }
         // the sessions see their sockets shut and stopping set: they end within their current write
