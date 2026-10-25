@@ -198,6 +198,12 @@ int main(int argc, char* argv[]) {
         // dbcheck would take it for a database
         std::error_code ec;
         std::filesystem::create_directories(config.getPathToDB(), ec);
+        // the lock first: another node in this folder may be importing right now, and the cleanup
+        // below would remove its files (the lock is kept for the whole run)
+        if (dbcheck::lockedByAnotherProcess(config.getPathToDB())) {
+            std::cerr << "another node runs with " << config.getPathToDB() << " (db/.lock is held): not starting" << std::endl;
+            return 3;
+        }
         std::string removed;
         if (cs::snapshot_bootstrap::cleanupInterruptedImport(".", config.getPathToDB(), removed)) {
             std::cout << "SNAPSHOT: removed the files of an interrupted import (" << removed << ")" << std::endl;

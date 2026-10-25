@@ -129,6 +129,11 @@ std::optional<Skip> notNeeded(const SnapshotData& cfg, const fs::path& nodeDir, 
             *removedTmp = true;
         }
     }
+    // the files of an earlier import describe nothing on an empty database: left there, the check at
+    // the end of a fallback would compare them with the genesis block and refuse to start
+    for (const char* name : {kManifestFile, kVerifiedFile, kSourcesFile}) {
+        fs::remove(nodeDir / name, ec);
+    }
     return std::nullopt;
 }
 

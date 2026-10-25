@@ -151,7 +151,7 @@ Node::~Node() {
 
     sendingTimer_.stop();
     bootstrapStop_ = true;
-    snapshotTickTimer_.stop();
+    stopSnapshotTimer();
     {
         std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
         if (bootstrapThread_.joinable()) {
@@ -447,6 +447,9 @@ bool Node::startBootstrap() {
         if (skip->why == sb::Skip::Backend) {
             cswarning() << "SNAPSHOT: " << skip->text << ": syncing from block 0";
         }
+        else if (skip->why == sb::Skip::Checkpoint) {
+            csinfo() << "SNAPSHOT: not fetching: " << skip->text;
+        }
         else {
             csdebug() << "SNAPSHOT: not fetching: " << skip->text;
         }
@@ -513,6 +516,10 @@ void Node::onSnapshotTick() {
     snapshotFetcher_->tick(peers);
     switch (snapshotFetcher_->phase()) {
         case cs::SnapshotFetcher::Phase::Import:
+            if (!snapshotFetcher_->result()) {
+                failBootstrap(1, "the fetch ended without a snapshot to import");
+                break;
+            }
             startBootstrapWorker(true);
             break;
         case cs::SnapshotFetcher::Phase::Fallback:
@@ -544,7 +551,25 @@ void Node::startBootstrapWorker(bool import) {
         return;
     }
     bootstrapWorking_ = true;
-    bootstrapThread_ = std::thread([this, snapshot = std::move(snapshot)] { bootstrapWork(snapshot ? &*snapshot : nullptr); });
+    bootstrapThread_ = std::thread([this, snapshot = std::move(snapshot)] {
+        // the import and the chain's opening may throw (storage engines, caches): a failed bootstrap,
+        // not a terminate
+        std::string what;
+        try {
+            bootstrapWork(snapshot ? &*snapshot : nullptr);
+            return;
+        }
+        catch (const std::exception& e) {
+            what = e.what();
+        }
+        catch (...) {
+            what = "unknown exception";
+        }
+        CallsQueue::instance().insert([this, what] {
+            joinWorker();
+            failBootstrap(1, "the bootstrap failed: " + what);
+        });
+    });
 }
 
 void Node::bootstrapWork(const std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>* snapshot) {
@@ -630,6 +655,11 @@ void Node::bootstrapWork(const std::pair<cs::SnapshotManifest, std::vector<cs::S
     });
 }
 
+void Node::stopSnapshotTimer() {
+    std::lock_guard<std::mutex> lock(snapshotTimerMutex_);
+    snapshotTickTimer_.stop();
+}
+
 void Node::joinWorker() {
     {
         std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
@@ -651,7 +681,7 @@ void Node::finishBootstrap() {
     }
     // from the next message on, the node processes everything: initRunning() is complete
     bootstrapping_ = false;
-    snapshotTickTimer_.stop();
+    stopSnapshotTimer();
     snapshotFetcher_.reset();
     transport_->setPermanentNeighbours(permanentAtStart_);
     bootstrapPermanent_.clear();
@@ -696,14 +726,20 @@ void Node::stop() {
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     // bootstrap mode: the importer stops between two blocks, BlockChain::init at its stop request
-    // (onStopRequested); stop() runs twice and may run on the worker itself (a stop requested by the
-    // chain while it opens): it never joins its own thread
+    // (onStopRequested); the thread is taken out under the lock and joined outside it, never by itself
     bootstrapStop_ = true;
-    snapshotTickTimer_.stop();
+    stopSnapshotTimer();
+    std::thread worker;
     {
         std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
-        if (bootstrapThread_.joinable() && bootstrapThread_.get_id() != std::this_thread::get_id()) {
-            bootstrapThread_.join();
+        worker = std::move(bootstrapThread_);
+    }
+    if (worker.joinable()) {
+        if (worker.get_id() != std::this_thread::get_id()) {
+            worker.join();
+        }
+        else {
+            worker.detach();
         }
     }
 

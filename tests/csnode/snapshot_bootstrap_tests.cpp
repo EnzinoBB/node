@@ -314,3 +314,61 @@ TEST(SnapshotBootstrap, SourcesRoundTrip) {
     ASSERT_TRUE(sb::writeSources(dir, {}));
     EXPECT_EQ(readAll(dir / sb::kSourcesFile), "[]\n");
 }
+
+TEST(SnapshotBootstrap, StaleImportFilesAreRemovedOnAnEmptyDatabase) {
+    const auto dir = freshDir("stale");
+    touch(dir / sb::kManifestFile, "{}");
+    touch(dir / sb::kVerifiedFile, "verified");
+    touch(dir / sb::kSourcesFile, "[]");
+    touch(dir / sb::kMismatchFile, "kept: it stops the node until an operator looks");
+    EXPECT_FALSE(sb::notNeeded(fetching(), dir, (dir / "db").string(), "lmdb", false));
+    EXPECT_FALSE(fs::exists(dir / sb::kManifestFile));
+    EXPECT_FALSE(fs::exists(dir / sb::kVerifiedFile));
+    EXPECT_FALSE(fs::exists(dir / sb::kSourcesFile));
+    EXPECT_TRUE(fs::exists(dir / sb::kMismatchFile));
+}
+
+TEST(SnapshotBootstrap, NotNeededWithARocksdbDatabase) {
+    const auto dir = freshDir("rocksdb_db");
+    const std::string db = (dir / "db").string();
+    fs::create_directories(db);
+    {
+        auto opened = csdb::backend::open("rocksdb", db);
+        ASSERT_TRUE(opened);
+    }
+    const auto r = sb::notNeeded(fetching(), dir, db, "rocksdb", false);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->why, sb::Skip::Database);
+}
+
+TEST(SnapshotBootstrap, CleanupOfAKilledRocksdbImport) {
+    const auto dir = freshDir("killed_rocksdb");
+    const std::string db = (dir / "db").string();
+    fs::create_directories(db);
+    touch(fs::path(db) / ".lock", "");
+    {
+        auto opened = csdb::backend::open("rocksdb", db);
+        ASSERT_TRUE(opened);
+    }
+    touch(dir / "caches" / "hashdb" / "data.mdb");
+    ASSERT_TRUE(sb::writeImportMarker(db, "rocksdb", 2000));
+    std::string what;
+    ASSERT_TRUE(sb::cleanupInterruptedImport(dir, db, what));
+    EXPECT_TRUE(csdb::backend::detect(db, true).empty());
+    EXPECT_TRUE(fs::exists(fs::path(db) / ".lock"));
+    EXPECT_FALSE(fs::exists(dir / "caches" / "hashdb"));
+    EXPECT_FALSE(sb::notNeeded(fetching(), dir, db, "rocksdb", false));
+}
+
+TEST(SnapshotBootstrap, CleanupWithADamagedMarker) {
+    const auto dir = freshDir("killed_garbage");
+    const std::string db = (dir / "db").string();
+    fs::create_directories(db);
+    touch(fs::path(db) / sb::kImportingFile, "\x01garbage");
+    touch(dir / "caches" / "hashdb" / "data.mdb");
+    std::string what;
+    // the backend is unknown: the marker and the caches go, nothing else is guessed
+    EXPECT_TRUE(sb::cleanupInterruptedImport(dir, db, what));
+    EXPECT_FALSE(fs::exists(fs::path(db) / sb::kImportingFile));
+    EXPECT_FALSE(fs::exists(dir / "caches" / "hashdb"));
+}

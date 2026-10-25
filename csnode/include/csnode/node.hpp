@@ -563,6 +563,8 @@ private:
     std::atomic<bool> bootstrapWorking_{false};   // the worker thread runs (set and cleared on the processor thread)
     cs::Timer snapshotTickTimer_;                 // the fetcher's tick, every 500 ms on the processor thread
     std::mutex bootstrapThreadMutex_;             // joins from the processor thread and from stop()
+    std::mutex snapshotTimerMutex_;               // the tick timer is stopped from the processor thread and from stop()
+    void stopSnapshotTimer();
     std::thread bootstrapThread_;
     std::set<cs::PublicKey> permanentAtStart_;    // the permanent neighbours initCommon() set
     std::set<cs::PublicKey> bootstrapPermanent_;  // those and the fetcher's sources

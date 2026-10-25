@@ -236,6 +236,9 @@ JOIN_FETCH=${JOIN_FETCH:-}
 JOIN_MIN_SOURCES=${JOIN_MIN_SOURCES:-3}
 JOIN_WAIT=${JOIN_WAIT:-300}
 JOIN_FALLBACK=${JOIN_FALLBACK:-sync}
+# JOIN_EXPECT=fallback: too few sources on purpose; the joiner must give up after fetch_wait and sync from block 0
+JOIN_EXPECT=${JOIN_EXPECT:-snapshot}
+case "$JOIN_EXPECT" in snapshot|fallback) ;; *) echo "JOIN_EXPECT must be snapshot or fallback, got '$JOIN_EXPECT'"; exit 1 ;; esac
 case "$JOIN_FETCH" in ""|p2p) ;; *) echo "JOIN_FETCH must be p2p or empty, got '$JOIN_FETCH'"; exit 1 ;; esac
 case "$JOIN_FALLBACK" in sync|wait) ;; *) echo "JOIN_FALLBACK must be sync or wait, got '$JOIN_FALLBACK'"; exit 1 ;; esac
 if [ "$JOIN_FETCH" = p2p ]; then
@@ -1318,7 +1321,24 @@ if [ "$SNAPSHOT_AT" -gt 0 ]; then
         echo "snapshot test: n$JOIN_NODE started from the snapshot at block $snap_seq with its digest $got"
     fi
 fi
-if [ "$JOIN_FETCH" = p2p ]; then
+if [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" = fallback ]; then
+    jdir="$WORK/n$JOIN_NODE"
+    jlog="$jdir/node.log"
+    fail_join() {
+        echo "FAIL: n$JOIN_NODE $1"
+        { grep -a 'SNAPSHOT' "$jlog" || true; } | tail -40
+        exit 1
+    }
+    # the fallback: no agreement in fetch_wait, the line naming the manual ways out, then block 0
+    grep -aq 'SNAPSHOT: started with an empty database after' "$jlog" || fail_join "did not fall back to syncing from block 0"
+    grep -aq -- '--download-snapshot' "$jlog" || fail_join "never logged the manual way out (--download-snapshot)"
+    ! grep -aq 'SNAPSHOT: started from block ' "$jlog" || fail_join "started from a snapshot although too few sources served one"
+    for f in snapshot.json snapshot.verified snapshot.mismatch snapshot-tmp db/.importing; do
+        [ ! -e "$jdir/$f" ] || fail_join "has $f after the fallback"
+    done
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: started with an empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+elif [ "$JOIN_FETCH" = p2p ]; then
     jdir="$WORK/n$JOIN_NODE"
     jlog="$jdir/node.log"
     fail_join() {
