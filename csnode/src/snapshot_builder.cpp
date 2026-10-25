@@ -175,10 +175,6 @@ std::string utcNow() {
     return buf;
 }
 
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return !in.bad();
-}
-
 bool stopped(const SnapshotBuildInput& in) {
     return in.stop && in.stop->load();
 }
