@@ -62,6 +62,11 @@ enum MsgTypes : uint8_t {
     TransactionPacketHash,
     TransactionsPacketBaseRequest,
     TransactionsPacketBaseReply,
+    // snapshots shared between community nodes (csnode/snapshot_messages.hpp)
+    SnapshotManifestRequest = 40,
+    SnapshotManifestReply,
+    SnapshotPieceRequest,
+    SnapshotPieceReply,
     NodeStopRequest = 255
 };
 

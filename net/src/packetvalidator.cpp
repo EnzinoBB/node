@@ -103,6 +103,11 @@ bool PacketValidator::validateNodePacket(const Packet& packet) {
         case MsgTypes::RoundPackRequest:  // old-round node may ask for round info
         case MsgTypes::EmptyRoundPack:
         case MsgTypes::BlockAlarm:
+        // a joining node is at round 0: the round cut below would drop every snapshot reply
+        case MsgTypes::SnapshotManifestRequest:
+        case MsgTypes::SnapshotManifestReply:
+        case MsgTypes::SnapshotPieceRequest:
+        case MsgTypes::SnapshotPieceReply:
             return true;
         default:
             break;
