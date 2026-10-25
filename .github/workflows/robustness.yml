@@ -277,6 +277,9 @@ jobs:
           - name: snapshot-join-rocksdb-full
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,rocksdb PRUNE_NODE=6 JOIN_FULL=1 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
+          # a pruned node serves the snapshots it builds over HTTP (snapshot serving, step 4)
+          - name: snapshot-serve
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_SERVE_NODE=6 TARGET_SEQ=2600
           - name: snapshot-join-format1
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_FORMAT=1 TARGET_SEQ=3100
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
