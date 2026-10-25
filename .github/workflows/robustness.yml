@@ -328,6 +328,7 @@ jobs:
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300 SYNC_CONTRACT_EXECUTION=0
             contracts: true
           - name: contracts-crash
+            official: 'no'   # n6 is official: killed while saving a checkpoint it never restarts (checkpoint ahead of its blocks, official behaviour this fork handles; reproduced 2026-10-25)
             env: DB_BACKEND=lmdb CRASH_NODE=6 CONTRACTS=1 TARGET_SEQ=1600
             contracts: true
           # every node and executor killed after the first calls, calls again after the restart
