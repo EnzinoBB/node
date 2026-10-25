@@ -61,7 +61,8 @@ public:
     static constexpr uint64_t kStallMs = 120'000;
     static constexpr size_t kPiecesPerSource = 2;
     static constexpr size_t kPiecesTotal = 8;
-    static constexpr size_t kMaxSources = 64;
+    static constexpr size_t kMaxSources = 64;        // discovered sources; configured keys come on top
+    static constexpr size_t kMaxPerPrefix = 4;       // discovered sources per /24 (IPv4) or /48 (IPv6)
     static constexpr size_t kMaxAttempts = 3;
     static constexpr size_t kMaxSourcesFileKeys = 64;
 
@@ -100,6 +101,8 @@ private:
         bool configured = false;      // [snapshot] sources or sources_file
         bool trusted = false;         // [snapshot] sources
         bool serving = false;         // announced capability bit 24
+        std::string prefix;           // netPrefix of the address when discovered
+        uint64_t discoveredAt = 0;
         uint64_t addedAt = 0;         // last addNeighbours
         bool added = false;
         uint64_t askedAt = 0;
@@ -138,7 +141,9 @@ private:
     uint64_t now() const;
     std::string keyText(const cs::PublicKey& key) const;
     Source* findSource(const cs::PublicKey& key);
-    Source* addSource(const cs::PublicKey& key);
+    Source* addConfigured(const cs::PublicKey& key);
+    Source* addDiscovered(const cs::PublicKey& key, uint64_t t);
+    bool isProtected(const cs::PublicKey& key, const Source& s) const;
     void loadSourcesFile();
 
     void discover(const Peers& peers, uint64_t t);

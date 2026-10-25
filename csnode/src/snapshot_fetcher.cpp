@@ -67,10 +67,7 @@ SnapshotFetcher::SnapshotFetcher(const SnapshotData& cfg, fs::path tmpDir, Hooks
         hooks_.clock = steadyMs;
     }
     for (const auto& key : cfg_.sources) {
-        if (auto* s = addSource(key)) {
-            s->configured = true;
-            s->trusted = true;
-        }
+        addConfigured(key)->trusted = true;
     }
     loadSourcesFile();
 }
@@ -106,22 +103,66 @@ SnapshotFetcher::Source* SnapshotFetcher::findSource(const cs::PublicKey& key) {
     return it == sources_.end() ? nullptr : &it->second;
 }
 
-SnapshotFetcher::Source* SnapshotFetcher::addSource(const cs::PublicKey& key) {
+SnapshotFetcher::Source* SnapshotFetcher::addConfigured(const cs::PublicKey& key) {
+    // configured keys have their own room: discovered peers never push them out
+    auto& s = sources_[key];
+    s.configured = true;
+    return &s;
+}
+
+bool SnapshotFetcher::isProtected(const cs::PublicKey& key, const Source& s) const {
+    if (s.configured || s.outstanding != 0) {
+        return true;
+    }
+    return phase_ == Phase::Fetch && std::any_of(agreedSources_.begin(), agreedSources_.end(),
+                                                 [&](const SourceManifest& m) { return m.key == key; });
+}
+
+SnapshotFetcher::Source* SnapshotFetcher::addDiscovered(const cs::PublicKey& key, uint64_t t) {
     if (auto* s = findSource(key)) {
         return s;
     }
-    if (sources_.size() >= kMaxSources) {
-        // make room by dropping a discovered peer that is not a neighbour and gave no manifest
-        auto victim = std::find_if(sources_.begin(), sources_.end(), [this](const auto& entry) {
-            const auto& s = entry.second;
-            return !s.configured && !s.manifest && s.outstanding == 0 && neighbours_.count(entry.first) == 0;
-        });
+    // peer keys cost nothing: discovered sources are limited per /24 (/48) and in all, so that one
+    // network cannot fill the table; when it is full the oldest entry of the most represented
+    // prefix makes room, unless the newcomer's prefix would become as represented
+    std::string prefix = netPrefix(hooks_.addressOf ? hooks_.addressOf(key) : std::string());
+    if (prefix.empty()) {
+        prefix = "unknown";
+    }
+    std::map<std::string, size_t> perPrefix;
+    size_t discovered = 0;
+    for (const auto& [k, s] : sources_) {
+        if (!s.configured) {
+            ++perPrefix[s.prefix];
+            ++discovered;
+        }
+    }
+    if (perPrefix[prefix] >= kMaxPerPrefix) {
+        return nullptr;
+    }
+    if (discovered >= kMaxSources) {
+        auto most = std::max_element(perPrefix.begin(), perPrefix.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        if (most->second <= perPrefix[prefix] + 1) {
+            return nullptr;
+        }
+        auto victim = sources_.end();
+        for (auto it = sources_.begin(); it != sources_.end(); ++it) {
+            if (it->second.configured || it->second.prefix != most->first || isProtected(it->first, it->second)) {
+                continue;
+            }
+            if (victim == sources_.end() || it->second.discoveredAt < victim->second.discoveredAt) {
+                victim = it;
+            }
+        }
         if (victim == sources_.end()) {
             return nullptr;
         }
         sources_.erase(victim);
     }
-    return &sources_[key];
+    auto& s = sources_[key];
+    s.prefix = prefix;
+    s.discoveredAt = t;
+    return &s;
 }
 
 void SnapshotFetcher::loadSourcesFile() {
@@ -156,10 +197,8 @@ void SnapshotFetcher::loadSourcesFile() {
         }
         cs::PublicKey key;
         std::copy(bytes.begin(), bytes.end(), key.begin());
-        if (auto* s = addSource(key)) {
-            s->configured = true;
-            ++keys;
-        }
+        addConfigured(key);
+        ++keys;
     }
     if (keys != 0) {
         log("SNAPSHOT: " + std::to_string(keys) + " source keys read from " + cfg_.sourcesFile);
@@ -214,7 +253,7 @@ void SnapshotFetcher::discover(const Peers& peers, uint64_t t) {
         if ((capabilities & cs::hostdata::kSnapshotProtocolV1) == 0) {
             continue;
         }
-        if (auto* s = addSource(key)) {
+        if (auto* s = addDiscovered(key, t)) {
             s->serving = true;
         }
     }

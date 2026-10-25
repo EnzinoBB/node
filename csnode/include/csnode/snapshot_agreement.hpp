@@ -36,23 +36,28 @@ struct AgreementGroup {
     std::vector<size_t> sources;          // indices into agree()'s input
     std::vector<cs::PublicKey> keys;      // their keys, same order
     size_t independent = 0;               // counting sources: one per /24 or /48, trusted keys once each
+    bool configured = false;              // holds a key of [snapshot] sources
     bool chosen = false;
+    std::string reason;                   // why it was not chosen
 };
 
 using GroupReport = AgreementGroup;
 
 struct AgreementResult {
     std::optional<AgreementGroup> chosen;
-    std::vector<AgreementGroup> groups;   // every group, highest seq first, then most sources
+    std::vector<AgreementGroup> groups;   // every group, strongest first
     size_t shortfall = 0;                 // counting sources the best group lacks (0 when chosen)
 };
 
-// Groups by (seq, head_hash), inside by (state_digest, settings_digest). Candidate blocks have at
-// least minSources counting sources, highest seq first; in a candidate block the digest group with
-// most counting sources is chosen if it reaches minSources and no other group of that block has as
-// many (a tie is a conflict: that block is skipped). Sources are counted by netPrefix(address),
+// Groups by (seq, head_hash, state_digest, settings_digest). Among the groups with at least
+// minSources counting sources, the chosen one is, in this order: a group holding a key of
+// [snapshot] sources (trusted), then the group with most counting sources, then the highest seq
+// (only a tie-breaker: a later block never wins over more support, so that min_sources forged
+// sources at a made-up later block do not beat a larger honest group; an honest network's newest
+// snapshot gains sources as the nodes rebuild, and the fetcher asks again every 30 s). Two groups
+// equal on all three are a conflict: nothing is chosen. Sources are counted by netPrefix(address),
 // trusted ones by key; sources whose address does not parse count together as one; a key that
-// appears twice counts once.
+// appears twice counts once. Every group that is not chosen carries the reason.
 AgreementResult agree(const std::vector<SourceManifest>& sources, size_t minSources);
 
 // "block S hash H digest D : N sources (keys k1 k2 …)" with shortened hashes and keys

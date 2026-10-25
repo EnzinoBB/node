@@ -112,16 +112,49 @@ TEST(SnapshotAgreement, SameKeyCountsOnce) {
     EXPECT_FALSE(r.chosen);
 }
 
-TEST(SnapshotAgreement, HighestBlockFirst) {
+TEST(SnapshotAgreement, MoreSupportWinsOverAHigherBlock) {
+    // (a) two forged sources at a made-up later block against three honest ones
     const std::vector<cs::SourceManifest> v{source(1, "10.0.1.1", 1000), source(2, "10.0.2.1", 1000), source(3, "10.0.3.1", 1000),
-                                            source(4, "10.0.4.1", 2000), source(5, "10.0.5.1", 2000)};
+                                            source(4, "10.0.4.1", 2000, "forged"), source(5, "10.0.5.1", 2000, "forged")};
+    const auto r = cs::agree(v, 2);
+    ASSERT_TRUE(r.chosen);
+    EXPECT_EQ(r.chosen->seq, 1000u);
+    EXPECT_EQ(r.chosen->independent, 3u);
+    ASSERT_EQ(r.groups.size(), 2u);
+    EXPECT_TRUE(r.groups[0].chosen);
+    EXPECT_FALSE(r.groups[1].chosen);
+    EXPECT_EQ(r.groups[1].seq, 2000u);
+    EXPECT_NE(cs::describe(r.groups[1]).find("fewer independent sources"), std::string::npos);
+}
+
+TEST(SnapshotAgreement, HigherBlockBreaksATie) {
+    // (b) equal support: the newer snapshot
+    const std::vector<cs::SourceManifest> v{source(1, "10.0.1.1", 1000), source(2, "10.0.2.1", 1000), source(4, "10.0.4.1", 2000),
+                                            source(5, "10.0.5.1", 2000)};
     const auto r = cs::agree(v, 2);
     ASSERT_TRUE(r.chosen);
     EXPECT_EQ(r.chosen->seq, 2000u);
-    ASSERT_EQ(r.groups.size(), 2u);
-    EXPECT_EQ(r.groups[0].seq, 2000u);
-    EXPECT_TRUE(r.groups[0].chosen);
-    EXPECT_FALSE(r.groups[1].chosen);
+    EXPECT_NE(cs::describe(r.groups[1]).find("lower block"), std::string::npos);
+}
+
+TEST(SnapshotAgreement, ConfiguredKeyWins) {
+    // (c) a group holding a key of [snapshot] sources wins over one without, both above the threshold
+    std::vector<cs::SourceManifest> v{source(1, "10.0.1.1", 1000, "a", "", true), source(2, "10.0.2.1", 1000, "a"),
+                                      source(3, "10.0.3.1", 2000, "b"), source(4, "10.0.4.1", 2000, "b")};
+    auto r = cs::agree(v, 2);
+    ASSERT_TRUE(r.chosen);
+    EXPECT_EQ(r.chosen->seq, 1000u);
+    EXPECT_TRUE(r.chosen->configured);
+    EXPECT_NE(cs::describe(r.groups[1]).find("no configured source"), std::string::npos);
+    // even when the other group has more support
+    v.push_back(source(5, "10.0.5.1", 2000, "b"));
+    r = cs::agree(v, 2);
+    ASSERT_TRUE(r.chosen);
+    EXPECT_EQ(r.chosen->seq, 1000u);
+    // but a configured key alone does not lift a group below min_sources
+    r = cs::agree({source(1, "10.0.1.1", 1000, "a", "", true), source(3, "10.0.3.1", 2000, "b"), source(4, "10.0.4.1", 2000, "b")}, 2);
+    ASSERT_TRUE(r.chosen);
+    EXPECT_EQ(r.chosen->seq, 2000u);
 }
 
 TEST(SnapshotAgreement, OnlyTheLowerBlockReachesTheThreshold) {
@@ -146,18 +179,23 @@ TEST(SnapshotAgreement, DigestMajorityInsideABlock) {
     EXPECT_NE(cs::describe(r.groups[1]).find("1 source"), std::string::npos);
 }
 
-TEST(SnapshotAgreement, DigestTieIsNotAnAgreement) {
+TEST(SnapshotAgreement, TieIsNotAnAgreement) {
     std::vector<cs::SourceManifest> v{source(1, "10.0.1.1", 2000, "a"), source(2, "10.0.2.1", 2000, "a"),
                                       source(3, "10.0.3.1", 2000, "b"), source(4, "10.0.4.1", 2000, "b")};
     auto r = cs::agree(v, 2);
     EXPECT_FALSE(r.chosen);
     EXPECT_EQ(r.shortfall, 0u);   // groups are large enough, they conflict
-    // a lower block that agrees is taken instead
+    EXPECT_NE(cs::describe(r.groups[0]).find("conflict"), std::string::npos);
+    // a weaker group is not taken instead
     v.push_back(source(5, "10.0.5.1", 1000));
     v.push_back(source(6, "10.0.6.1", 1000));
     r = cs::agree(v, 2);
+    EXPECT_FALSE(r.chosen);
+    // one more source for one side settles it
+    v.push_back(source(7, "10.0.7.1", 2000, "a"));
+    r = cs::agree(v, 2);
     ASSERT_TRUE(r.chosen);
-    EXPECT_EQ(r.chosen->seq, 1000u);
+    EXPECT_EQ(r.chosen->stateDigest, "a");
 }
 
 TEST(SnapshotAgreement, DifferentHeadsAreDifferentBlocks) {

@@ -83,16 +83,7 @@ AgreementResult agree(const std::vector<SourceManifest>& sources, size_t minSour
         blocks[{m.seq, m.headHash}][{m.stateDigest, m.settingsDigest}].push_back(i);
     }
 
-    struct Block {
-        BlockKey key;
-        size_t independent = 0;
-        std::vector<AgreementGroup> groups;
-    };
-    std::vector<Block> ordered;
     for (const auto& [blockKey, digests] : blocks) {
-        Block b;
-        b.key = blockKey;
-        std::vector<size_t> all;
         for (const auto& [digestKey, indices] : digests) {
             AgreementGroup g;
             g.seq = blockKey.first;
@@ -102,44 +93,65 @@ AgreementResult agree(const std::vector<SourceManifest>& sources, size_t minSour
             g.sources = indices;
             for (auto i : indices) {
                 g.keys.push_back(sources[i].key);
+                g.configured = g.configured || sources[i].trusted;
             }
             g.independent = countUnits(indices, units);
-            all.insert(all.end(), indices.begin(), indices.end());
-            b.groups.push_back(std::move(g));
-        }
-        b.independent = countUnits(all, units);
-        std::stable_sort(b.groups.begin(), b.groups.end(),
-                         [](const AgreementGroup& x, const AgreementGroup& y) { return x.independent > y.independent; });
-        ordered.push_back(std::move(b));
-    }
-    std::stable_sort(ordered.begin(), ordered.end(), [](const Block& x, const Block& y) {
-        return x.key.first != y.key.first ? x.key.first > y.key.first : x.independent > y.independent;
-    });
-
-    for (auto& b : ordered) {
-        if (b.independent < minSources) {
-            continue;
-        }
-        auto& top = b.groups.front();
-        if (top.independent < minSources) {
-            continue;
-        }
-        if (b.groups.size() > 1 && b.groups[1].independent == top.independent) {
-            continue;   // two digests with as many sources for one block: a conflict, not an agreement
-        }
-        top.chosen = true;
-        result.chosen = top;
-        break;
-    }
-
-    size_t best = 0;
-    for (auto& b : ordered) {
-        for (auto& g : b.groups) {
-            best = std::max(best, g.independent);
             result.groups.push_back(std::move(g));
         }
     }
-    result.shortfall = result.chosen ? 0 : minSources - std::min(best, minSources);
+
+    // The rule (see the header): among the groups that reach minSources, a group with a configured
+    // key first, then the most independent sources, then the highest block. A higher block alone
+    // never wins over more support: min_sources made-up sources at a forged later block lose to a
+    // larger honest group at an earlier one. Equal on all three: a conflict, nothing is chosen.
+    auto stronger = [](const AgreementGroup& x, const AgreementGroup& y) {
+        if (x.configured != y.configured) return x.configured;
+        if (x.independent != y.independent) return x.independent > y.independent;
+        return x.seq > y.seq;
+    };
+    auto equal = [](const AgreementGroup& x, const AgreementGroup& y) {
+        return x.configured == y.configured && x.independent == y.independent && x.seq == y.seq;
+    };
+    std::stable_sort(result.groups.begin(), result.groups.end(), stronger);
+
+    const AgreementGroup* best = nullptr;
+    for (const auto& g : result.groups) {
+        if (g.independent >= minSources) {
+            best = &g;
+            break;
+        }
+    }
+    const bool conflict = best != nullptr && std::any_of(result.groups.begin(), result.groups.end(), [&](const AgreementGroup& g) {
+        return &g != best && g.independent >= minSources && equal(g, *best);
+    });
+    for (auto& g : result.groups) {
+        if (g.independent < minSources) {
+            g.reason = "fewer than " + std::to_string(minSources) + " independent sources";
+        }
+        else if (conflict && equal(g, *best)) {
+            g.reason = "as much support as another group: conflict";
+        }
+        else if (&g == best) {
+            g.chosen = true;
+        }
+        else if (best->configured && !g.configured) {
+            g.reason = "no configured source, the strongest group has one";
+        }
+        else if (g.independent < best->independent) {
+            g.reason = "fewer independent sources than the strongest group";
+        }
+        else {
+            g.reason = "lower block than the strongest group, with as much support";
+        }
+    }
+    size_t most = 0;
+    for (const auto& g : result.groups) {
+        most = std::max(most, g.independent);
+        if (g.chosen) {
+            result.chosen = g;
+        }
+    }
+    result.shortfall = (result.chosen || conflict) ? 0 : minSources - std::min(most, minSources);
     return result;
 }
 
@@ -151,6 +163,9 @@ std::string describe(const AgreementGroup& group) {
         out << ' ' << EncodeBase58(k.data(), k.data() + k.size()).substr(0, 8) << "...";
     }
     out << ')';
+    if (!group.reason.empty()) {
+        out << ": " << group.reason;
+    }
     return out.str();
 }
 

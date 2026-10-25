@@ -188,6 +188,7 @@ struct Net {
     size_t maxOutstandingPerSource = 0;
     size_t outstandingTotal = 0;
     size_t manifestRequests = 0;
+    std::map<cs::PublicKey, std::string> addresses;   // of peers that are not sources
 
     SnapshotFetcher::Hooks hooks() {
         SnapshotFetcher::Hooks h;
@@ -208,7 +209,11 @@ struct Net {
         h.addNeighbours = [this](const std::set<cs::PublicKey>& keys) { addCalls.push_back(keys); };
         h.addressOf = [this](const cs::PublicKey& k) {
             auto it = sources.find(k);
-            return it == sources.end() ? std::string() : it->second.address;
+            if (it != sources.end()) {
+                return it->second.address;
+            }
+            auto other = addresses.find(k);
+            return other == addresses.end() ? std::string() : other->second;
         };
         h.clock = [this]() { return nowMs; };
         h.onLog = [this](const std::string& line) { logs.push_back(line); };
@@ -409,6 +414,76 @@ TEST(SnapshotFetcher, DiscoveryAddsServingPeersAndConfiguredKeys) {
     ASSERT_EQ(net.addCalls.size(), 2u);
     EXPECT_EQ(net.addCalls[1].count(net.key(Snapshots::A1)), 0u);
     EXPECT_EQ(net.addCalls[1].size(), 3u);
+}
+
+// a flood of discovered keys from one /24 pushes out neither a configured key nor other networks' sources
+TEST(SnapshotFetcher, FloodFromOnePrefixDoesNotFillTheTable) {
+    TmpDir tmp("flood");
+    Net net;
+    const auto configured = otherKey(1);
+    auto cfg = fetchConfig();
+    cfg.sources = {configured};
+    std::vector<cs::PublicKey> flood;
+    for (int i = 0; i < 100; ++i) {
+        cs::PublicKey k{};
+        k.fill(0x40);
+        k[0] = static_cast<uint8_t>(i);
+        flood.push_back(k);
+        net.addresses[k] = "10.9.9." + std::to_string(i + 1);
+        net.peers.known.emplace_back(k, cs::hostdata::kSnapshotProtocolV1);
+        net.peers.neighbours.insert(k);   // all of them neighbours that never answer
+    }
+    net.add(Snapshots::A1);
+    net.add(Snapshots::A2);
+    net.add(Snapshots::B);
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    fetcher.tick(net.peers);
+    ASSERT_EQ(net.addCalls.size(), 1u);
+    const auto& added = net.addCalls[0];
+    EXPECT_EQ(added.count(configured), 1u);
+    // the sources of other networks (neighbours already) are asked; of the flood at most kMaxPerPrefix
+    std::set<cs::PublicKey> asked;
+    size_t floodAsked = 0;
+    for (const auto& [k, request] : net.manifestQueue) {
+        asked.insert(k);
+        floodAsked += std::count(flood.begin(), flood.end(), k);
+    }
+    for (auto i : {Snapshots::A1, Snapshots::A2, Snapshots::B}) {
+        EXPECT_EQ(asked.count(net.key(i)), 1u);
+    }
+    EXPECT_EQ(floodAsked, SnapshotFetcher::kMaxPerPrefix);
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+}
+
+// a full table makes room for a new network by dropping the oldest of the most represented one
+TEST(SnapshotFetcher, FullTableMakesRoomForANewPrefix) {
+    TmpDir tmp("fulltable");
+    Net net;
+    for (int p = 0; p < 16; ++p) {
+        for (int i = 0; i < 4; ++i) {
+            cs::PublicKey k{};
+            k.fill(0x50);
+            k[0] = static_cast<uint8_t>(p);
+            k[1] = static_cast<uint8_t>(i);
+            net.addresses[k] = "10.8." + std::to_string(p) + "." + std::to_string(i + 1);
+            net.peers.known.emplace_back(k, cs::hostdata::kSnapshotProtocolV1);
+        }
+    }
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    fetcher.tick(net.peers);
+    ASSERT_EQ(net.addCalls.size(), 1u);
+    EXPECT_EQ(net.addCalls[0].size(), SnapshotFetcher::kMaxSources);
+    // two serving nodes from other networks turn up later
+    net.add(Snapshots::A1, false);
+    net.add(Snapshots::A2, false);
+    net.nowMs += 500;
+    fetcher.tick(net.peers);
+    ASSERT_EQ(net.addCalls.size(), 2u);
+    EXPECT_EQ(net.addCalls[1].count(net.key(Snapshots::A1)), 1u);
+    EXPECT_EQ(net.addCalls[1].count(net.key(Snapshots::A2)), 1u);
+    net.peers.neighbours.insert(net.key(Snapshots::A1));
+    net.peers.neighbours.insert(net.key(Snapshots::A2));
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
 }
 
 // (2) bad signature, another node's manifest, an oversized chunk, an unsolicited reply: dropped
