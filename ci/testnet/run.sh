@@ -67,6 +67,8 @@
 #        snapshot with --import-snapshot into its own backend and joins; with SNAPSHOT_CORRUPT=1 the
 #        blocks file is truncated first, so the restore must fail and that node syncs from block 0.
 #        SNAPSHOT_FORMAT=1: packaging/docker/snapshot-make.sh and snapshot-restore.sh instead
+#        SNAPSHOT_SERVE_NODE (default 0 = off): that node gets [snapshot] serve_port (BASE_PORT + 700 + i):
+#        at the end it must have built the snapshot of a periodic checkpoint and serve it over HTTP
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -198,6 +200,7 @@ JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 # the joining node is node NODES + 1; it is in nobody's hosts or trusted list
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
+SNAPSHOT_SERVE_NODE=${SNAPSHOT_SERVE_NODE:-0}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
@@ -330,6 +333,15 @@ PROPS
     chmod +x "$WORK/n$i/executor.sh"
 }
 
+# the [snapshot] section of node i: SNAPSHOT_SERVE_NODE serves the snapshots it builds over HTTP
+snapshot_section() {
+    local i=$1
+    if [ "$i" -eq "$SNAPSHOT_SERVE_NODE" ]; then
+        printf "\n[snapshot]\nserve_port=%s\nserve_bind=127.0.0.1\n" "$((BASE_PORT + 700 + i))"
+    fi
+    return 0
+}
+
 # the [storage] section of node i: pruning, backend and checkpoint frequency
 storage_section() {
     local i=$1 backend="" lines=""
@@ -384,6 +396,7 @@ $(api_settings "$i")
 ajax_port=0
 diag_port=0
 $(storage_section "$i")
+$(snapshot_section "$i")
 
 [Core]
 Filter="%Severity% >= info"
@@ -1155,6 +1168,48 @@ for i in $(seq 1 "$ALL_NODES"); do
     n=$(cat "$WORK/n$i"/*.log | grep -ac "but its caches already hold block" || true)
     if [ "${n:-0}" -gt 0 ]; then echo "n$i loaded $n checkpoint(s) one block behind their caches"; fi
 done
+if [ "$SNAPSHOT_SERVE_NODE" -gt 0 ]; then
+    # the node built the snapshot of a periodic checkpoint and serves it: the manifest verifies, and a
+    # piece of the blocks file has the hash the manifest declares for it
+    serve_port=$((BASE_PORT + 700 + SNAPSHOT_SERVE_NODE))
+    deadline=$(( $(date +%s) + 300 ))
+    until grep -aq 'SNAPSHOT: built block' "$WORK/n$SNAPSHOT_SERVE_NODE/node.log" || [ "$(date +%s)" -ge "$deadline" ]; do sleep 5; done
+    grep -a 'SNAPSHOT: ' "$WORK/n$SNAPSHOT_SERVE_NODE/node.log" | tail -4 | sed 's/^.*SNAPSHOT/serve test: SNAPSHOT/'
+    python3 - "$serve_port" <<'PY' || exit 1
+import hashlib, json, sys, time, urllib.request
+port = int(sys.argv[1])
+base = f"http://127.0.0.1:{port}/snapshot"
+for attempt in range(30):
+    try:
+        with urllib.request.urlopen(base + "/latest.json", timeout=10) as r:
+            manifest = json.load(r)
+        break
+    except Exception as e:  # 503 while the node catches up or builds
+        last = e
+        time.sleep(10)
+else:
+    print(f"FAIL: no manifest from the serving node: {last}")
+    sys.exit(1)
+f = next(x for x in manifest["files"] if x["name"] == "blocks.bin.lz4")
+n = min(manifest["chunk_size"], f["size"])
+req = urllib.request.Request(f"{base}/{manifest['seq']}/blocks.bin.lz4", headers={"Range": f"bytes=0-{n - 1}"})
+with urllib.request.urlopen(req, timeout=30) as r:
+    piece = r.read()
+    status = r.status
+if status != 206 or hashlib.sha256(piece).hexdigest() != f["chunks"][0]:
+    print(f"FAIL: the first piece of blocks.bin.lz4 does not match the manifest (status {status}, {len(piece)} bytes)")
+    sys.exit(1)
+try:
+    urllib.request.urlopen(f"{base}/{manifest['seq']}/../../config.ini", timeout=10)
+    print("FAIL: a path outside the snapshot was served")
+    sys.exit(1)
+except urllib.error.HTTPError as e:
+    if e.code != 404:
+        print(f"FAIL: unexpected status {e.code} for a path outside the snapshot")
+        sys.exit(1)
+print(f"serve test: block {manifest['seq']} served by node at {manifest.get('synced_to')}, {len(manifest['files'])} files, first piece verified")
+PY
+fi
 if [ "$SNAPSHOT_AT" -gt 0 ]; then
     if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
         grep -aq 'SLOW START' "$WORK/n$JOIN_NODE"/node.log || { echo "FAIL: n$JOIN_NODE did not sync from block 0"; exit 1; }
