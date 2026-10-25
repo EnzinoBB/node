@@ -25,6 +25,21 @@ namespace http = boost::beast::http;
 using tcp = asio::ip::tcp;
 namespace fs = std::filesystem;
 
+// the unit the per-address cap counts: an IPv4 address (also when written as IPv4-mapped IPv6), or
+// the /64 network of an IPv6 address, which one host usually holds whole
+std::string peerGroup(const asio::ip::address& address) {
+    if (address.is_v6()) {
+        const auto v6 = address.to_v6();
+        if (v6.is_v4_mapped()) {
+            return asio::ip::make_address_v4(asio::ip::v4_mapped, v6).to_string();
+        }
+        auto bytes = v6.to_bytes();
+        std::fill(bytes.begin() + 8, bytes.end(), 0);
+        return asio::ip::address_v6(bytes).to_string() + "/64";
+    }
+    return address.to_string();
+}
+
 void setTimeout(tcp::socket& socket, int option, int seconds) {
     timeval tv{};
     tv.tv_sec = seconds;
@@ -116,7 +131,6 @@ struct Loaded {
 
 struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl> {
     static constexpr int kHeaderDeadlineSec = 10;          // a whole request line and headers
-    static constexpr uint64_t kMinWriteBytesPerSec = 32 << 10;
     static constexpr size_t kMaxPerAddress = 2;
 
     fs::path root;
@@ -128,7 +142,6 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
     std::mutex loadedLock;
 
     TokenBucket bucket;
-    std::atomic<size_t> bucketRateKBps{0};
     std::atomic<size_t> maxConnections{8};
     std::atomic<size_t> active{0};
     // every open connection, its peer address and the time its current step must end by: the accept
@@ -279,9 +292,8 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
         if (head || length == 0) {
             return keepAlive;
         }
-        // the body must flow at a minimum rate (the cap included): a stalled reader holds no slot
-        setDeadline(socketPtr, std::chrono::seconds(kWriteTimeoutSec + length / kMinWriteBytesPerSec +
-                                                    (bucketRateKBps.load() ? length / (bucketRateKBps.load() * 1000) : 0)));
+        // a stalled reader holds no slot: every piece written renews a short deadline
+        setDeadline(socketPtr, std::chrono::seconds(kWriteTimeoutSec));
         in.seekg(static_cast<std::streamoff>(first));
         std::vector<char> buffer(64 << 10);
         uint64_t left = length;
@@ -298,6 +310,7 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             if (ec) {
                 return false;
             }
+            setDeadline(socketPtr, std::chrono::seconds(kWriteTimeoutSec));
             left -= n;
             served += n;
         }
@@ -355,11 +368,11 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
 
     void acceptLoop() {
         while (!stopping) {
+            closeExpired();   // on every pass, whether connections are waiting or not
             auto socket = std::make_shared<tcp::socket>(io);
             boost::system::error_code ec;
             acceptor->accept(*socket, ec);
             if (ec == asio::error::would_block || ec == asio::error::try_again) {
-                closeExpired();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
@@ -376,7 +389,7 @@ struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl>
             std::string address;
             {
                 boost::system::error_code aec;
-                address = socket->remote_endpoint(aec).address().to_string();
+                address = peerGroup(socket->remote_endpoint(aec).address());
             }
             bool tooMany = false;
             {
@@ -463,7 +476,6 @@ SnapshotServer::~SnapshotServer() {
 void SnapshotServer::apply(const Settings& settings) {
     std::lock_guard<std::mutex> lock(impl_->settingsLock);
     impl_->bucket.setRate(settings.rateKBps);
-    impl_->bucketRateKBps = settings.rateKBps;
     impl_->maxConnections = std::max<size_t>(1, settings.maxConnections);
     const bool listening = boundPort_.load() != 0;
     const bool sameAddress = listening && settings.bind == impl_->settings.bind && settings.port == impl_->settings.port;
