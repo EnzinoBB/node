@@ -56,6 +56,9 @@ struct PeerData {
     uint16_t port = 0;
     int16_t version = 0;
     int8_t platform = OS_UNSPECIFIED;
+    // community nodes only (host_data bits 24-47), 0 on official nodes
+    uint8_t capabilities = 0;
+    uint16_t minorVersion = 0;
 };
 
 using ConfidantSignature = std::pair<Byte, Signature>;

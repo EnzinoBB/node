@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <regex>
+#include <sstream>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -30,7 +32,8 @@
 #endif
 
 const NodeVersion NODE_VERSION = 532;
-const uint8_t MINOR_NODE_VERSION = 0;
+// the community release (4.2.532-community.N); also announced to peers in host_data bits 32-47
+const uint8_t MINOR_NODE_VERSION = 13;
 
 const std::string BLOCK_NAME_PARAMS = "params";
 const std::string BLOCK_NAME_HOST_INPUT = "host_input";
@@ -233,6 +236,27 @@ void Config::updateKnownHosts(std::vector<cs::PeerData>& peers) const {
   for (auto& p : peers) {
     f << p.ip << ":" << p.port << " " << p.id << std::endl;
   }
+
+  // the same peers with what they announce, next to known_hosts.txt
+  const auto json = boost::filesystem::path(hostsFileName_).parent_path() / "known_peers.json";
+  std::ofstream j(json.string());
+  if (j.is_open()) {
+    j << knownPeersJson(peers);
+  }
+}
+
+std::string Config::knownPeersJson(const std::vector<cs::PeerData>& peers) {
+  // ids are base58 and addresses are printed by asio: nothing to escape
+  std::ostringstream out;
+  out << "[";
+  for (size_t i = 0; i < peers.size(); ++i) {
+    const auto& p = peers[i];
+    out << (i ? ",\n " : "\n ") << "{\"id\":\"" << p.id << "\",\"ip\":\"" << p.ip << "\",\"port\":" << p.port
+        << ",\"version\":" << p.version << ",\"minor\":" << p.minorVersion << ",\"platform\":" << int(p.platform)
+        << ",\"capabilities\":" << int(p.capabilities) << "}";
+  }
+  out << (peers.empty() ? "]\n" : "\n]\n");
+  return out.str();
 }
 
 Config::Config(const ConveyerData& conveyerData)
