@@ -579,3 +579,18 @@ first agreement between a node and the workflow; then the weekly job's first `sn
 6. **Second digest over the consensus settings**: now, in `state_digest.bin` and the manifest.
 7. **Signature checks on import**: kept.
 8. **Step 0**: the local node's logs are read (not touched) for the digest-family measurement.
+
+## 15. Decisions (2026-10-25), after the evaluation of snapshots over p2p
+
+See [2026-10-25-snapshots-over-p2p-evaluation.md](2026-10-25-snapshots-over-p2p-evaluation.md).
+
+1. **B2**: the state travels as a snapshot over HTTP (this design); the blocks before the checkpoint
+   come from the neighbours, official nodes included, through the existing BlockRequest, by backward
+   sync with a floor (`F = S - snapshot_blocks`). Until backward sync is merged, snapshots keep the
+   full block stream; then they shrink to the state and the anchor block S (about 70 MB). The importer
+   handles both (the manifest's `first_block`).
+2. **Discovery** also through the p2p `host_data` bits that official nodes ignore (24-63): a
+   community node advertises that it serves snapshots and on which port.
+3. The p2p findings (no frame size limit, no node-key authentication, one queue per connection) go to
+   the private report for the official developers.
+
