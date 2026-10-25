@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <limits>
+#include <string>
+#include <vector>
 #include "datastream.hpp"
 #include <lib/system/console.hpp>
 
@@ -164,4 +167,39 @@ TEST(DataStream, CorrectAmountSerialization) {
     readStream >> expectedAmount;
 
     ASSERT_TRUE(amount == expectedAmount);
+}
+
+TEST(DataStream, AvailabilityOfLargeSizes) {
+    char data[16] = {};
+    cs::IDataStream stream(data, sizeof data);
+    stream.skip(8);
+    ASSERT_TRUE(stream.isAvailable(8));
+    ASSERT_FALSE(stream.isAvailable(9));
+    ASSERT_FALSE(stream.isAvailable(std::numeric_limits<std::size_t>::max()));
+    ASSERT_FALSE(stream.isAvailable(std::numeric_limits<std::size_t>::max() - 7));
+}
+
+TEST(DataStream, LargeLengthPrefixesAreRefused) {
+    for (std::size_t length : {std::numeric_limits<std::size_t>::max(), std::numeric_limits<std::size_t>::max() - 7,
+                               std::numeric_limits<std::size_t>::max() - 3}) {
+        cs::Bytes bytes;
+        cs::ODataStream out(bytes);
+        out << length;
+        bytes.resize(bytes.size() + 8, 0);
+
+        cs::IDataStream text(bytes.data(), bytes.size());
+        std::string s;
+        text >> s;
+        EXPECT_TRUE(s.empty());
+
+        cs::IDataStream vector(bytes.data(), bytes.size());
+        cs::Bytes v;
+        vector >> v;
+        EXPECT_TRUE(v.empty());
+
+        cs::IDataStream sequences(bytes.data(), bytes.size());
+        std::vector<uint64_t> list;
+        sequences >> list;
+        EXPECT_TRUE(list.empty());
+    }
 }
