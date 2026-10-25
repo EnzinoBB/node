@@ -116,9 +116,9 @@ void SnapshotService::buildLatest() {
         out = pool.to_binary();
         return !out.empty();
     };
-    in.contracts = [this](const std::function<bool(const cs::Bytes&, const cs::Bytes&)>& visit) {
-        return blockchain_.forEachContractData(visit);
-    };
+    // no contract records: the contracts database holds the latest state of each contract, later than
+    // S, while the signed snapshot is the state at S; the checkpoint carries the states at S
+    // (smartcontracts.dat) and the node fetches any it lacks from the confidants
     fs::create_directories(root_, ec);
     cslog() << "SNAPSHOT: building the snapshot of checkpoint " << S;
     const auto started = std::chrono::steady_clock::now();

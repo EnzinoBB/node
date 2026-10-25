@@ -4,6 +4,7 @@
 #include <cctype>
 #include <chrono>
 #include <fstream>
+#include <map>
 #include <set>
 #include <vector>
 
@@ -76,19 +77,22 @@ public:
         rate_ = static_cast<double>(kBps) * 1000.0;
         tokens_ = std::min(tokens_, rate_);
     }
-    // waits until n bytes may be sent
-    void take(size_t n) {
+    // waits until n bytes may be sent; false when the server stops meanwhile
+    bool take(size_t n, const std::atomic<bool>& stopping) {
         for (;;) {
+            if (stopping) {
+                return false;
+            }
             std::unique_lock<std::mutex> lock(m_);
             if (rate_ <= 0) {
-                return;
+                return true;
             }
             const auto now = std::chrono::steady_clock::now();
             tokens_ = std::min(rate_, tokens_ + rate_ * std::chrono::duration<double>(now - last_).count());
             last_ = now;
             if (tokens_ >= static_cast<double>(n)) {
                 tokens_ -= static_cast<double>(n);
-                return;
+                return true;
             }
             const double wait = (static_cast<double>(n) - tokens_) / rate_;
             lock.unlock();
@@ -110,7 +114,11 @@ struct Loaded {
 };
 }  // namespace
 
-struct SnapshotServer::Impl {
+struct SnapshotServer::Impl : std::enable_shared_from_this<SnapshotServer::Impl> {
+    static constexpr int kHeaderDeadlineSec = 10;          // a whole request line and headers
+    static constexpr uint64_t kMinWriteBytesPerSec = 32 << 10;
+    static constexpr size_t kMaxPerAddress = 2;
+
     fs::path root;
     SyncedTo syncedTo;
     Settings settings;
@@ -120,10 +128,36 @@ struct SnapshotServer::Impl {
     std::mutex loadedLock;
 
     TokenBucket bucket;
+    std::atomic<size_t> bucketRateKBps{0};
     std::atomic<size_t> maxConnections{8};
     std::atomic<size_t> active{0};
-    std::set<std::shared_ptr<tcp::socket>> sockets;
+    // every open connection, its peer address and the time its current step must end by: the accept
+    // thread closes the ones past it (a client that sends its headers byte by byte holds no slot)
+    struct Conn {
+        std::string address;
+        std::chrono::steady_clock::time_point deadline;
+    };
+    std::map<std::shared_ptr<tcp::socket>, Conn> sockets;
     std::mutex socketsLock;
+
+    void setDeadline(const std::shared_ptr<tcp::socket>& socket, std::chrono::seconds in) {
+        std::lock_guard<std::mutex> lock(socketsLock);
+        const auto it = sockets.find(socket);
+        if (it != sockets.end()) {
+            it->second.deadline = std::chrono::steady_clock::now() + in;
+        }
+    }
+
+    void closeExpired() {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> lock(socketsLock);
+        for (auto& [socket, conn] : sockets) {
+            if (now > conn.deadline) {
+                boost::system::error_code ec;
+                socket->shutdown(tcp::socket::shutdown_both, ec);
+            }
+        }
+    }
 
     asio::io_context io;
     std::unique_ptr<tcp::acceptor> acceptor;
@@ -151,7 +185,8 @@ struct SnapshotServer::Impl {
     }
 
     // returns false when the connection must end
-    bool handle(tcp::socket& socket, const http::request<http::empty_body>& req, uint64_t& served) {
+    bool handle(const std::shared_ptr<tcp::socket>& socketPtr, const http::request<http::empty_body>& req, uint64_t& served) {
+        tcp::socket& socket = *socketPtr;
         const bool keepAlive = req.keep_alive();
         auto simple = [&](http::status status, const std::string& text, bool retry = false) {
             http::response<http::string_body> res{status, req.version()};
@@ -244,6 +279,9 @@ struct SnapshotServer::Impl {
         if (head || length == 0) {
             return keepAlive;
         }
+        // the body must flow at a minimum rate (the cap included): a stalled reader holds no slot
+        setDeadline(socketPtr, std::chrono::seconds(kWriteTimeoutSec + length / kMinWriteBytesPerSec +
+                                                    (bucketRateKBps.load() ? length / (bucketRateKBps.load() * 1000) : 0)));
         in.seekg(static_cast<std::streamoff>(first));
         std::vector<char> buffer(64 << 10);
         uint64_t left = length;
@@ -253,7 +291,9 @@ struct SnapshotServer::Impl {
             if (static_cast<size_t>(in.gcount()) != n) {
                 return false;
             }
-            bucket.take(n);
+            if (!bucket.take(n, stopping)) {
+                return false;
+            }
             asio::write(socket, asio::buffer(buffer.data(), n), ec);
             if (ec) {
                 return false;
@@ -277,12 +317,13 @@ struct SnapshotServer::Impl {
         for (size_t i = 0; i < kMaxRequestsPerConnection && !stopping; ++i) {
             http::request_parser<http::empty_body> parser;
             parser.header_limit(8 * 1024);
+            setDeadline(socket, std::chrono::seconds(i == 0 ? kHeaderDeadlineSec : kIdleTimeoutSec));
             boost::system::error_code ec;
             http::read(*socket, buffer, parser, ec);
             if (ec) {
                 break;
             }
-            if (!handle(*socket, parser.get(), served)) {
+            if (!handle(socket, parser.get(), served)) {
                 break;
             }
         }
@@ -318,6 +359,7 @@ struct SnapshotServer::Impl {
             boost::system::error_code ec;
             acceptor->accept(*socket, ec);
             if (ec == asio::error::would_block || ec == asio::error::try_again) {
+                closeExpired();
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
@@ -331,12 +373,27 @@ struct SnapshotServer::Impl {
                 refuse(*socket);
                 continue;
             }
-            ++active;
+            std::string address;
+            {
+                boost::system::error_code aec;
+                address = socket->remote_endpoint(aec).address().to_string();
+            }
+            bool tooMany = false;
             {
                 std::lock_guard<std::mutex> lock(socketsLock);
-                sockets.insert(socket);
+                const auto same = std::count_if(sockets.begin(), sockets.end(), [&](const auto& kv) { return kv.second.address == address; });
+                tooMany = static_cast<size_t>(same) >= kMaxPerAddress;
+                if (!tooMany) {
+                    sockets.emplace(socket, Conn{address, std::chrono::steady_clock::now() + std::chrono::seconds(kHeaderDeadlineSec)});
+                }
             }
-            std::thread([this, socket]() { session(socket); }).detach();
+            if (tooMany) {
+                refuse(*socket);   // outside the lock: it writes, up to its own timeout
+                continue;
+            }
+            ++active;
+            // the session keeps the server's state alive until it ends, whatever happens to the server
+            std::thread([self = shared_from_this(), socket]() { self->session(socket); }).detach();
         }
     }
 
@@ -357,7 +414,8 @@ struct SnapshotServer::Impl {
                 s->shutdown(tcp::socket::shutdown_both, ec);
             }
         }
-        for (int i = 0; i < 100 && active.load() > 0; ++i) {
+        // the sessions see their sockets shut and stopping set: they end within their current write
+        while (active.load() > 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
         }
         stopping = false;
@@ -393,7 +451,7 @@ struct SnapshotServer::Impl {
     }
 };
 
-SnapshotServer::SnapshotServer(fs::path root, SyncedTo syncedTo) : impl_(std::make_unique<Impl>()) {
+SnapshotServer::SnapshotServer(fs::path root, SyncedTo syncedTo) : impl_(std::make_shared<Impl>()) {
     impl_->root = std::move(root);
     impl_->syncedTo = std::move(syncedTo);
 }
@@ -405,6 +463,7 @@ SnapshotServer::~SnapshotServer() {
 void SnapshotServer::apply(const Settings& settings) {
     std::lock_guard<std::mutex> lock(impl_->settingsLock);
     impl_->bucket.setRate(settings.rateKBps);
+    impl_->bucketRateKBps = settings.rateKBps;
     impl_->maxConnections = std::max<size_t>(1, settings.maxConnections);
     const bool listening = boundPort_.load() != 0;
     const bool sameAddress = listening && settings.bind == impl_->settings.bind && settings.port == impl_->settings.port;

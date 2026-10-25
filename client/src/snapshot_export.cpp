@@ -123,9 +123,8 @@ int run(const Config& config, const std::string& outDir) {
     in.blockBytes = [&db](cs::Sequence seq, cs::Bytes& out) {
         return db->get(static_cast<uint32_t>(seq), &out);
     };
-    in.contracts = [&db](const std::function<bool(const cs::Bytes&, const cs::Bytes&)>& visit) {
-        return db->forEachContractData(visit);
-    };
+    // no contract records: the contracts database holds each contract's latest state, later than the
+    // checkpoint; the checkpoint carries the states at its block
 
     say() << "checkpoint " << S << ", blocks from " << std::max<cs::Sequence>(first, S > in.snapshotBlocks ? S - in.snapshotBlocks : 0)
           << ", into " << outDir << std::endl;

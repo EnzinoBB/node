@@ -231,3 +231,17 @@ TEST(SnapshotServer, ConnectionCapAndRateAndMove) {
     fx.server->apply(s);
     EXPECT_FALSE(fx.server->running());
 }
+
+TEST(SnapshotServer, SlowHeadersAreCutOffAndAddressesCapped) {
+    Fixture fx("snapshot_server_slow");
+    // two connections from one address that send nothing: a third is refused, and the two are closed
+    // once the header deadline passes, after which the address is served again
+    asio::io_context io;
+    tcp::socket a(io), b(io);
+    a.connect(tcp::endpoint(asio::ip::address_v4::loopback(), fx.port));
+    b.connect(tcp::endpoint(asio::ip::address_v4::loopback(), fx.port));
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_EQ(request(fx.port, http::verb::get, "/snapshot/latest.json").status, 503u);
+    std::this_thread::sleep_for(std::chrono::seconds(12));
+    EXPECT_EQ(request(fx.port, http::verb::get, "/snapshot/latest.json").status, 200u);
+}
