@@ -287,6 +287,16 @@ void SnapshotFetcher::tick(const Peers& peers) {
         lastWaitLogAt_ = t;
     }
     neighbours_ = peers.neighbours;
+    // fetch_fallback=sync: the whole bootstrap is bounded whatever the counters say
+    if (!dryRun_ && cfg_.fetchFallback != "wait" && t - startedAt_ >= uint64_t(cfg_.fetchWait) * 1000 + kBootstrapCapMs) {
+        log("SNAPSHOT: no snapshot after " + duration((t - startedAt_) / 1000 / 60 * 60) +
+                " (fetch_wait + 30 min): syncing from block 0. To start from the published snapshot instead: stop the node and run"
+                "  ./node --download-snapshot  in this folder (Docker: CREDITS_SNAPSHOT=github), then start it again.",
+            true);
+        clearInFlight();
+        phase_ = Phase::Fallback;
+        return;
+    }
     discover(peers, t);
 
     if (phase_ == Phase::Discover || phase_ == Phase::Collect) {
@@ -984,7 +994,9 @@ void SnapshotFetcher::mark(const cs::PublicKey& key, uint64_t t, bool forever, c
         return;
     }
     const bool wasBanned = s->banned;
-    misbehaviour_ = misbehaviour_ || phase_ == Phase::Fetch;
+    // only a proven fault (bytes that do not match the signed manifest) excuses the end of a fetch;
+    // timeouts, busy and "not serving" answers do not, or a peer could keep the node from its fallback
+    misbehaviour_ = misbehaviour_ || (forever && phase_ == Phase::Fetch);
     if (forever) {
         s->banned = true;
     }
@@ -1147,10 +1159,18 @@ void SnapshotFetcher::backToCollect(const std::string& why) {
     dirty_ = true;
     phase_ = Phase::Collect;
     if (misbehaviour_) {
-        // sources were banned or marked: remote peers must not be able to push the node to a sync
-        // from block 0, so this is not counted
+        // a source was banned for bytes that do not match the signed manifest: remote peers must
+        // not be able to push the node to a sync from block 0, so this is counted apart, with its own cap
         misbehaviour_ = false;
-        log("SNAPSHOT: " + why + " (sources were banned or marked, not counted): looking at the sources again", true);
+        ++excusedAborts_;
+        if (cfg_.fetchFallback != "wait" && excusedAborts_ >= kMaxExcusedAborts) {
+            log("SNAPSHOT: " + why + " (a source sent bad data, " + std::to_string(excusedAborts_) + " of " +
+                    std::to_string(kMaxExcusedAborts) + "): syncing from block 0",
+                true);
+            phase_ = Phase::Fallback;
+            return;
+        }
+        log("SNAPSHOT: " + why + " (a source sent bad data, not counted as a failed fetch): looking at the sources again", true);
         return;
     }
     ++fetchFailures_;

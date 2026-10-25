@@ -47,11 +47,11 @@ void putU16(std::ofstream& f, uint16_t v) {
 }
 
 // Snapshots of block 200 built by buildSnapshot from one generated chain, each signed by its
-// own key, with 64 KiB chunks: A1, A2 and A3-A6 from the same checkpoint files (identical bytes), B and
+// own key, with 64 KiB chunks: A1, A2 and A3-A10 from the same checkpoint files (identical bytes), B and
 // E with one and two trailing bytes in walletscache.dat (same digest, another sha256 for that
 // file), D with another state digest. Built once for all tests.
 struct Snapshots {
-    enum { A1, A2, B, D, E, A3, A4, A5, A6, Count };
+    enum { A1, A2, B, D, E, A3, A4, A5, A6, A7, A8, A9, A10, Count };
 
     struct Source {
         cs::PrivateKey priv;
@@ -112,7 +112,7 @@ struct Snapshots {
         const auto qsB = checkpoint("b", 1, 7);
         const auto qsD = checkpoint("d", 0, 8);
         const auto qsE = checkpoint("e", 2, 7);
-        const std::array<fs::path, Count> qsOf{qsA, qsA, qsB, qsD, qsE, qsA, qsA, qsA, qsA};
+        const std::array<fs::path, Count> qsOf{qsA, qsA, qsB, qsD, qsE, qsA, qsA, qsA, qsA, qsA, qsA, qsA, qsA};
 
         for (size_t i = 0; i < Count; ++i) {
             auto& s = src[i];
@@ -173,6 +173,8 @@ struct Net {
         std::optional<std::string> manifestJson;   // replaces the manifest it serves
         size_t silentManifests = 0;       // manifest requests left without an answer, from the first
         size_t manifestAsks = 0;
+        uint64_t pieceIntervalMs = 0;     // serves one piece per interval, busy otherwise
+        uint64_t lastServedAt = 0;
         uint64_t linkBytesPerSecond = 0;  // its uplink, when slow
         uint64_t linkFreeAt = 0;
         size_t outstanding = 0;           // piece requests not answered yet
@@ -303,7 +305,8 @@ struct Net {
             --s.outstanding;
             --outstandingTotal;
             PieceReply reply;
-            if (s.busyAll) {
+            const bool throttled = s.pieceIntervalMs != 0 && s.lastServedAt != 0 && nowMs - s.lastServedAt < s.pieceIntervalMs;
+            if (s.busyAll || throttled) {
                 reply.status = PieceStatus::Busy;
                 reply.retryMs = s.busyMs;
                 reply.seq = request.seq;
@@ -313,6 +316,9 @@ struct Net {
             }
             else {
                 reply = s.provider->onPieceRequest(me, request, serving(), synced());
+                if (reply.status == PieceStatus::Ok) {
+                    s.lastServedAt = nowMs;
+                }
                 if (reply.status == PieceStatus::Busy) {
                     busySent.emplace_back(nowMs, k);
                 }
@@ -1025,7 +1031,7 @@ TEST(SnapshotFetcher, MaliciousWavesDoNotForceFallback) {
     SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
     const std::vector<std::pair<size_t, size_t>> waves{{Snapshots::A3, Snapshots::A4}, {Snapshots::A5, Snapshots::A6}, {Snapshots::B, Snapshots::E}};
     for (size_t w = 0; w < waves.size(); ++w) {
-        ASSERT_TRUE(net.runUntil(fetcher, [&] { return net.countLogged("not counted") == w + 1; }, 2000)) << w;
+        ASSERT_TRUE(net.runUntil(fetcher, [&] { return net.countLogged("not counted as a failed fetch") == w + 1; }, 2000)) << w;
         EXPECT_EQ(fetcher.phase(), Phase::Collect);
         net.peers.neighbours.insert(net.key(waves[w].first));
         net.peers.neighbours.insert(net.key(waves[w].second));
@@ -1034,7 +1040,7 @@ TEST(SnapshotFetcher, MaliciousWavesDoNotForceFallback) {
         }
     }
     ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
-    EXPECT_EQ(net.countLogged("failed fetch"), 0u);
+    EXPECT_EQ(net.countLogged("(failed fetch"), 0u);
     EXPECT_EQ(fetcher.result()->first.filesHash() == snapshots().src[Snapshots::B].manifest.filesHash() ||
                   fetcher.result()->first.filesHash() == snapshots().src[Snapshots::E].manifest.filesHash(),
               true);
@@ -1077,6 +1083,66 @@ TEST(SnapshotFetcher, SlowSourcesGoToOnePieceAtATime) {
     }
     EXPECT_LT(net.sent.size(), pieces + pieces / 2);
     expectFilesOf(tmp.path, fetcher.result()->first);
+}
+
+// sources that only stop answering cannot keep a node with fetch_fallback=sync from its fallback
+TEST(SnapshotFetcher, TimeoutsDoNotExcuseFailedFetches) {
+    TmpDir tmp("timeoutwaves");
+    Net net;
+    for (auto i : {Snapshots::A1, Snapshots::A2, Snapshots::A3, Snapshots::A4, Snapshots::A5, Snapshots::A6}) {
+        net.add(i, i == Snapshots::A1 || i == Snapshots::A2).stall = true;
+    }
+    auto cfg = fetchConfig();
+    cfg.fetchWait = 86'400;
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    const std::vector<std::pair<size_t, size_t>> waves{{Snapshots::A3, Snapshots::A4}, {Snapshots::A5, Snapshots::A6}};
+    for (size_t w = 0; w < waves.size(); ++w) {
+        ASSERT_TRUE(net.runUntil(fetcher, [&] { return net.countLogged("(failed fetch " + std::to_string(w + 1) + " of 3)") != 0; },
+                                 10000))
+            << w;
+        net.peers.neighbours.insert(net.key(waves[w].first));
+        net.peers.neighbours.insert(net.key(waves[w].second));
+    }
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 10000));
+    EXPECT_TRUE(net.logged("(failed fetch 3 of 3): syncing from block 0"));
+    EXPECT_FALSE(net.logged("not counted as a failed fetch"));
+}
+
+// sources proven bad are not counted as failed fetches, but ten such fetches end the bootstrap (sync)
+TEST(SnapshotFetcher, TenBadSourceAbortsEndWithSync) {
+    TmpDir tmp("badwaves");
+    Net net;
+    const std::vector<size_t> bad{Snapshots::A1, Snapshots::A2, Snapshots::A3, Snapshots::A4, Snapshots::A5,
+                                  Snapshots::A6, Snapshots::A7, Snapshots::A8, Snapshots::A9, Snapshots::A10};
+    for (auto i : bad) {
+        net.add(i, i == Snapshots::A1).corruptAll = true;
+    }
+    auto cfg = fetchConfig(1);
+    cfg.fetchWait = 86'400;
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    for (size_t w = 1; w < bad.size(); ++w) {
+        ASSERT_TRUE(net.runUntil(fetcher, [&] { return net.countLogged("not counted as a failed fetch") == w; }, 2000)) << w;
+        net.peers.neighbours.insert(net.key(bad[w]));
+    }
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 2000));
+    EXPECT_TRUE(net.logged("(a source sent bad data, 10 of 10): syncing from block 0"));
+    EXPECT_FALSE(net.logged("(failed fetch"));
+}
+
+// a source that keeps a fetch alive with one valid piece every 4 min: fetch_fallback=sync ends the
+// bootstrap at fetch_wait + 30 min whatever the counters say
+TEST(SnapshotFetcher, BootstrapCapWithSync) {
+    TmpDir tmp("bootcap");
+    Net net;
+    net.add(Snapshots::A1).pieceIntervalMs = 4 * 60'000;
+    auto cfg = fetchConfig(1);
+    cfg.fetchWait = 60;
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    const uint64_t start = net.nowMs;
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 20000));
+    EXPECT_GE(net.nowMs - start, 31 * 60'000u);
+    EXPECT_TRUE(net.logged("(fetch_wait + 30 min): syncing from block 0"));
+    EXPECT_FALSE(net.logged("(failed fetch"));
 }
 
 // two groups as strong as each other: the 30-s line says conflict

@@ -77,7 +77,9 @@ public:
     static constexpr uint64_t kEvictedMs = 60'000;   // an evicted key is not taken again before
     static constexpr size_t kMaxEvicted = 1024;
     static constexpr size_t kMaxAttempts = 3;        // refused imports, and with fetch_fallback=sync failed
-                                                     // fetches not explained by misbehaving sources: then Fallback
+                                                     // fetches without a proven bad source: then Fallback
+    static constexpr size_t kMaxExcusedAborts = 10;  // fetches ended by a proven bad source (fetch_fallback=sync)
+    static constexpr uint64_t kBootstrapCapMs = 30 * 60'000;   // fetch_fallback=sync: Fallback after fetch_wait + this
     static constexpr uint64_t kHashBytesPerTick = 64ull << 20;   // whole-file SHA-256 per tick
     static constexpr size_t kMaxSourcesFileKeys = 64;
 
@@ -226,7 +228,8 @@ private:
     std::set<std::pair<std::string, std::string>> badFiles_;   // (name, sha256) refused by the importer
     size_t importFailures_ = 0;    // imports refused (onImportFailed)
     size_t fetchFailures_ = 0;     // fetches that ended without a snapshot and without a misbehaving source
-    bool misbehaviour_ = false;    // a source was marked or banned during the current fetch
+    size_t excusedAborts_ = 0;     // fetches that ended with a source banned for a proven fault
+    bool misbehaviour_ = false;    // a source was banned for a proven fault (a hash against the signed manifest) in this fetch
     // pieces that timed out, (file, chunk) -> the source asked: its late reply is still taken
     std::map<std::pair<std::string, uint32_t>, cs::PublicKey> late_;
     bool dirty_ = true;            // the input of the agreement changed since it was computed
