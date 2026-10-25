@@ -58,6 +58,10 @@ std::string hexOf(const uint8_t* data, size_t size) {
 }
 }  // namespace
 
+struct SnapshotFetcher::HashState {
+    crypto_hash_sha256_state state;
+};
+
 SnapshotFetcher::SnapshotFetcher(const SnapshotData& cfg, fs::path tmpDir, Hooks hooks, bool dryRun)
 : cfg_(cfg)
 , tmpDir_(std::move(tmpDir))
@@ -166,24 +170,27 @@ SnapshotFetcher::Source* SnapshotFetcher::addDiscovered(const cs::PublicKey& key
 }
 
 bool SnapshotFetcher::silent(const Source& s, uint64_t t) const {
-    return !s.configured && s.everAsked && !s.everAnswered && t - s.discoveredAt > kMarkMs;
+    // at least two requests without an answer over more than one request interval, counted from
+    // the first request, not from the discovery: a peer that became a neighbour late is not silent
+    return !s.configured && s.unanswered >= 2 && t - s.firstUnansweredAt > kSilentMs;
 }
 
 void SnapshotFetcher::evict(std::map<cs::PublicKey, Source>::iterator it, uint64_t t) {
-    // an evicted key is not taken again for a while, so that keys that come back at every tick
-    // cannot churn the table
+    // an evicted key is not taken again for a minute, so that keys that come back at every tick
+    // cannot churn the table; longer would only hurt honest keys, since keys cost an attacker nothing
     if (evicted_.size() >= kMaxEvicted) {
         auto oldest = std::min_element(evicted_.begin(), evicted_.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
         evicted_.erase(oldest);
     }
     evicted_[it->first] = t;
     sources_.erase(it);
+    dirty_ = true;
 }
 
 bool SnapshotFetcher::evictOne(uint64_t t) {
     // the least useful discovered source makes room, whatever its prefix: one that is not a
-    // neighbour now, then one that never answered in a minute, then one without a manifest after
-    // a minute, then one without a manifest in the most represented prefix, then the oldest of the
+    // neighbour now, then a silent one (silence is a reason only here, when room is needed), then
+    // one without a manifest after a minute, then one without a manifest in the most represented prefix, then the oldest of the
     // most represented prefix; never a configured source, one with pieces outstanding or one of the
     // agreed group during a fetch
     std::map<std::string, size_t> perPrefix;
@@ -301,22 +308,20 @@ void SnapshotFetcher::tick(const Peers& peers) {
         return;
     }
     fill(t);
+    // a fetch always ends: nothing to ask for 2 min, or no new byte for 5 min (sources busy,
+    // silent or slow), and it counts as a failed attempt
     if (phase_ == Phase::Fetch && outstanding() == 0 && t - lastSendAt_ >= kStallMs) {
         backToCollect("no piece could be asked for " + duration(kStallMs / 1000));
+        return;
+    }
+    if (phase_ == Phase::Fetch && t - lastByteAt_ >= kNoProgressMs) {
+        backToCollect("no data for " + duration(kNoProgressMs / 1000));
         return;
     }
     logProgress(t, false);
 }
 
 void SnapshotFetcher::discover(const Peers& peers, uint64_t t) {
-    // discovered sources that never answered a manifest request in a minute are let go
-    for (auto it = sources_.begin(); it != sources_.end();) {
-        auto next = std::next(it);
-        if (silent(it->second, t) && !isProtected(it->first, it->second)) {
-            evict(it, t);
-        }
-        it = next;
-    }
     for (const auto& [key, capabilities] : peers.known) {
         if ((capabilities & cs::hostdata::kSnapshotProtocolV1) == 0) {
             continue;
@@ -346,9 +351,18 @@ void SnapshotFetcher::askManifests(const Peers&, uint64_t t) {
         if (s.banned || neighbours_.count(key) == 0) {
             continue;
         }
-        // silence (the serving side may not answer at all) or a reply: ask again after 30 s
-        if (s.everAsked && t - s.askedAt < kManifestIntervalMs) {
+        // a reply: ask again after 30 s; silence (a serving node may not answer when its share for
+        // idle keys is spent, design 5.3a): again after 10 s, twice, then every 30 s
+        const uint64_t interval = (s.awaiting && s.unanswered <= kManifestRetries) ? kManifestRetryMs : kManifestIntervalMs;
+        if (s.everAsked && t - s.askedAt < interval) {
             continue;
+        }
+        if (s.awaiting) {
+            ++s.unanswered;
+        }
+        else {
+            s.unanswered = 1;
+            s.firstUnansweredAt = t;
         }
         s.everAsked = true;
         s.awaiting = true;
@@ -378,9 +392,11 @@ void SnapshotFetcher::onManifestReply(const cs::PublicKey& sender, const snapsho
     }
     s->awaiting = false;
     s->everAnswered = true;
+    s->unanswered = 0;
     const uint64_t t = now();
     if (reply.status != snapshot_p2p::ManifestStatus::Ready) {
         // not serving, not synced or still building: whatever it declared before is not served now
+        dirty_ = dirty_ || s->manifest.has_value();
         s->manifest.reset();
         return;
     }
@@ -400,6 +416,7 @@ void SnapshotFetcher::onManifestReply(const cs::PublicKey& sender, const snapsho
     }
     if (!manifest || !why.empty()) {
         ++dropped_;
+        dirty_ = dirty_ || s->manifest.has_value();
         s->manifest.reset();
         log("SNAPSHOT: manifest from " + keyText(sender) + " dropped: " + why, true);
         return;
@@ -411,7 +428,11 @@ void SnapshotFetcher::onManifestReply(const cs::PublicKey& sender, const snapsho
     if (!s->configured && !roomFor(sender, prefix, block)) {
         ++dropped_;
         log("SNAPSHOT: manifest from " + keyText(sender) + " dropped: too many sources at " + prefix);
-        sources_.erase(sender);
+        if (!isProtected(sender, *s)) {
+            sources_.erase(sender);
+            dirty_ = true;
+        }
+        // a source in use keeps its entry, its address and the manifest it had
         return;
     }
     s->address = address;
@@ -420,10 +441,15 @@ void SnapshotFetcher::onManifestReply(const cs::PublicKey& sender, const snapsho
     s->filesHash = manifest->filesHash();
     s->manifest = std::move(manifest);
     s->manifestAt = t;
+    dirty_ = true;
     // agreement is tried at the next tick, so that the replies to one round of requests count together
 }
 
 bool SnapshotFetcher::tryAgree(uint64_t t) {
+    if (!dirty_) {
+        return false;   // nothing changed since the last agreement that did not lead to a fetch
+    }
+    dirty_ = false;
     std::vector<SourceManifest> input;
     for (const auto& [key, s] : sources_) {
         if (s.banned || !s.manifest) {
@@ -497,19 +523,26 @@ void SnapshotFetcher::logWaiting(uint64_t t) {
             }
         }
     }
+    size_t unknown = 0;
+    for (const auto& [key, s] : sources_) {
+        unknown += !s.banned && s.manifest && !s.trusted && netPrefix(s.address).empty();
+    }
     log("SNAPSHOT: " + std::to_string(serving) + " peers serve snapshots (" + std::to_string(neighbours) + " neighbours), " +
-        std::to_string(manifests()) + " manifests collected");
+        std::to_string(manifests()) + " manifests collected, " + std::to_string(unknown) + " not counted: address unknown, " +
+        std::to_string(dropped_) + " replies dropped");
     const std::string left = duration((waitMs - (t - startedAt_) + 59'999) / 60'000 * 60) + " left";
     if (agreement_.chosen) {
         log("SNAPSHOT: block " + std::to_string(agreement_.chosen->seq) +
             " is agreed, but no file group has a source left: waiting, " + left);
         return;
     }
-    const AgreementGroup* best = nullptr;
-    for (const auto& g : agreement_.groups) {
-        if (best == nullptr || g.independent > best->independent) {
-            best = &g;
-        }
+    // groups come strongest first
+    const AgreementGroup* best = agreement_.groups.empty() ? nullptr : &agreement_.groups.front();
+    if (best != nullptr && best->independent >= cfg_.minSources) {
+        // as strong as another group: a conflict, not a shortage
+        log("SNAPSHOT: conflict: two groups with " + std::to_string(best->independent) + " sources at block " +
+            std::to_string(best->seq) + ": waiting, " + left);
+        return;
     }
     if (best != nullptr) {
         log("SNAPSHOT: " + std::to_string(best->independent) + (best->independent == 1 ? " source declares" : " sources declare") +
@@ -533,13 +566,13 @@ void SnapshotFetcher::checkWait(uint64_t t) {
             fallbackLogged_ = true;
             lastWaitLogAt_ = t;
             log(head + " Waiting for more sources (fetch_fallback=wait). To start from the published snapshot instead: stop the node "
-                       "and run  ./node --download-snapshot  in this folder, then start it again.",
+                       "and run  ./node --download-snapshot  in this folder (Docker: CREDITS_SNAPSHOT=github), then start it again.",
                 true);
         }
         return;
     }
     log(head + " Syncing from block 0 (about 35 h on a fast machine). To start from the published snapshot instead: stop the node "
-               "and run  ./node --download-snapshot  in this folder, then start it again.",
+               "and run  ./node --download-snapshot  in this folder (Docker: CREDITS_SNAPSHOT=github), then start it again.",
         true);
     clearInFlight();
     phase_ = Phase::Fallback;
@@ -563,6 +596,7 @@ bool SnapshotFetcher::startFetch(uint64_t t) {
     phase_ = Phase::Fetch;
     fetchStartedAt_ = t;
     lastSendAt_ = t;
+    lastByteAt_ = t;
     lastProgressAt_ = t;
     lastProgressBytes_ = bytesDone();
     lastProgressDecile_ = bytesTotal() == 0 ? 0 : static_cast<int>(bytesDone() * 10 / bytesTotal());
@@ -581,10 +615,14 @@ bool SnapshotFetcher::chooseTarget(uint64_t t) {
     std::vector<std::vector<cs::PublicKey>> bestSources;
     size_t bestOwners = 0;
     size_t bestTotal = 0;
+    std::vector<std::string> hashes;   // filesHash of each agreed source, computed once
+    for (const auto& a : agreedSources_) {
+        hashes.push_back(a.manifest.filesHash());
+    }
     std::set<std::string> tried;
-    for (const auto& candidate : agreedSources_) {
-        const auto& rep = candidate.manifest;
-        const auto hash = rep.filesHash();
+    for (size_t c = 0; c < agreedSources_.size(); ++c) {
+        const auto& rep = agreedSources_[c].manifest;
+        const auto& hash = hashes[c];
         if (!tried.insert(hash).second) {
             continue;
         }
@@ -596,9 +634,9 @@ bool SnapshotFetcher::chooseTarget(uint64_t t) {
             continue;
         }
         size_t owners = 0;
-        for (const auto& other : agreedSources_) {
-            const auto* s = findSource(other.key);
-            if (s != nullptr && everUsable(*s) && other.manifest.filesHash() == hash) {
+        for (size_t o = 0; o < agreedSources_.size(); ++o) {
+            const auto* s = findSource(agreedSources_[o].key);
+            if (s != nullptr && everUsable(*s) && hashes[o] == hash) {
                 ++owners;
             }
         }
@@ -643,6 +681,7 @@ bool SnapshotFetcher::chooseTarget(uint64_t t) {
         if (reuse) {
             state = std::move(*old);
             old->fd = -1;
+            state.hashing.reset();   // a check in progress starts over
             // what is on disk is checked again before it is handed over
             if (state.verified) {
                 state.verified = false;
@@ -819,7 +858,19 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
     switch (reply.status) {
         case snapshot_p2p::PieceStatus::Busy:
             if (s != nullptr) {
-                s->busyUntil = t + std::min<uint64_t>(reply.retryMs, kMaxBusyMs);
+                // at least 500 ms, so that a source answering busy with no delay is not asked at every round trip
+                s->busyUntil = t + std::clamp<uint64_t>(reply.retryMs, kMinBusyMs, kMaxBusyMs);
+                if (s->busySince == 0) {
+                    s->busySince = t;
+                }
+                else if (t - s->busySince >= kBusyMarkMs) {
+                    // busy for a minute without a piece: left alone for a minute, without counting
+                    // towards the ban (a loaded honest node is not a faulty one)
+                    s->busySince = 0;
+                    s->markedUntil = t + kMarkMs;
+                    log("SNAPSHOT: source " + keyText(sender) + " busy for " + duration(kBusyMarkMs / 1000) +
+                        " without a piece: not asked for 1 min");
+                }
             }
             break;
         case snapshot_p2p::PieceStatus::Unknown:
@@ -832,6 +883,7 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
             const uint64_t length = pieceLength(f, reply.chunk);
             if (reply.data.size() != length || sha256Hex(reply.data.data(), reply.data.size()) != f.file.chunks[reply.chunk]) {
                 log("SNAPSHOT: rejected piece " + f.file.name + ":" + std::to_string(reply.chunk) + " from " + keyText(sender), true);
+                // mark() may switch to another file group and replace files_: f is not used after it
                 mark(sender, t, true, "sent a piece that does not match the manifest");
                 break;
             }
@@ -853,6 +905,10 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
             f.have[reply.chunk] = true;
             --f.missing;
             f.doneBytes += length;
+            lastByteAt_ = t;
+            if (s != nullptr) {
+                s->busySince = 0;
+            }
             if (f.missing == 0) {
                 f.verifyPending = true;
             }
@@ -891,11 +947,15 @@ void SnapshotFetcher::clearInFlight() {
     }
 }
 
+// Keys are not authenticated by the p2p layer (design section 2): a host that spoofs a source's key
+// can get that key marked or banned here. The cost is bounded: a source lost for this bootstrap,
+// never a wrong snapshot, since every piece is checked against the signed manifest.
 void SnapshotFetcher::mark(const cs::PublicKey& key, uint64_t t, bool forever, const std::string& why) {
     auto* s = findSource(key);
     if (s == nullptr) {
         return;
     }
+    const bool wasBanned = s->banned;
     if (forever) {
         s->banned = true;
     }
@@ -904,6 +964,7 @@ void SnapshotFetcher::mark(const cs::PublicKey& key, uint64_t t, bool forever, c
         s->markedUntil = t + kMarkMs;
         s->banned = s->marks >= 2;
     }
+    dirty_ = dirty_ || (s->banned && !wasBanned);
     log("SNAPSHOT: source " + keyText(key) + " " + why + (s->banned ? ": not asked again" : ": not asked for 1 min"));
     if (!s->banned || phase_ != Phase::Fetch) {
         return;
@@ -956,28 +1017,42 @@ void SnapshotFetcher::expire(uint64_t t) {
 }
 
 void SnapshotFetcher::verifyFiles(uint64_t t) {
+    // the whole-file SHA-256, at most kHashBytesPerTick per tick so that a large file does not hold
+    // the processor thread; a file that does not match is downloaded again
+    uint64_t budget = kHashBytesPerTick;
+    std::vector<uint8_t> buffer;
+    bool bad = false;
     for (auto& f : files_) {
         if (!f.verifyPending) {
             continue;
         }
-        f.verifyPending = false;
-        crypto_hash_sha256_state state;
-        crypto_hash_sha256_init(&state);
-        std::vector<uint8_t> buffer(1u << 20);
-        uint64_t offset = 0;
+        if (!f.hashing) {
+            f.hashing = std::make_shared<HashState>();
+            crypto_hash_sha256_init(&f.hashing->state);
+            f.hashed = 0;
+        }
         bool ok = f.fd >= 0;
-        while (ok && offset < f.file.size) {
-            const auto want = static_cast<size_t>(std::min<uint64_t>(buffer.size(), f.file.size - offset));
-            const auto n = ::pread(f.fd, buffer.data(), want, static_cast<off_t>(offset));
+        while (ok && f.hashed < f.file.size && budget != 0) {
+            if (buffer.empty()) {
+                buffer.resize(1u << 20);
+            }
+            const auto want = static_cast<size_t>(std::min<uint64_t>({buffer.size(), f.file.size - f.hashed, budget}));
+            const auto n = ::pread(f.fd, buffer.data(), want, static_cast<off_t>(f.hashed));
             if (n <= 0) {
                 ok = false;
                 break;
             }
-            crypto_hash_sha256_update(&state, buffer.data(), static_cast<unsigned long long>(n));
-            offset += static_cast<uint64_t>(n);
+            crypto_hash_sha256_update(&f.hashing->state, buffer.data(), static_cast<unsigned long long>(n));
+            f.hashed += static_cast<uint64_t>(n);
+            budget -= static_cast<uint64_t>(n);
+        }
+        if (ok && f.hashed < f.file.size) {
+            return;   // the rest at the next tick
         }
         std::array<uint8_t, crypto_hash_sha256_BYTES> digest{};
-        crypto_hash_sha256_final(&state, digest.data());
+        crypto_hash_sha256_final(&f.hashing->state, digest.data());
+        f.hashing.reset();
+        f.verifyPending = false;
         if (ok && hexOf(digest.data(), digest.size()) == f.file.sha256) {
             f.verified = true;
             continue;
@@ -989,6 +1064,9 @@ void SnapshotFetcher::verifyFiles(uint64_t t) {
         f.doneBytes = 0;
         f.verified = false;
         f.verifyPending = f.file.chunks.empty();
+        bad = true;
+    }
+    if (bad) {
         backToCollect("a downloaded file did not verify");
         return;
     }
@@ -1014,8 +1092,31 @@ void SnapshotFetcher::backToCollect(const std::string& why) {
     target_.reset();
     agreedSources_.clear();
     agreement_.chosen.reset();
+    dirty_ = true;
+    ++failures_;
+    if (failures_ >= kMaxAttempts) {
+        log("SNAPSHOT: " + why + " (attempt " + std::to_string(failures_) + " of " + std::to_string(kMaxAttempts) +
+                "): syncing from block 0",
+            true);
+        phase_ = Phase::Fallback;
+        return;
+    }
     phase_ = Phase::Collect;
-    log("SNAPSHOT: " + why + ": looking at the sources again", true);
+    log("SNAPSHOT: " + why + " (attempt " + std::to_string(failures_) + " of " + std::to_string(kMaxAttempts) +
+            "): looking at the sources again",
+        true);
+}
+
+void SnapshotFetcher::banDeclaring(const std::string& name, const std::string& sha256, const std::string& why) {
+    for (const auto& a : agreedSources_) {
+        const auto* f = a.manifest.file(name);
+        auto* s = findSource(a.key);
+        if (f != nullptr && f->sha256 == sha256 && s != nullptr && !s->banned) {
+            s->banned = true;
+            dirty_ = true;
+            log("SNAPSHOT: source " + keyText(a.key) + " " + why + ": not asked again");
+        }
+    }
 }
 
 void SnapshotFetcher::logProgress(uint64_t t, bool force) {
@@ -1061,10 +1162,24 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
     if (stopped_ || phase_ != Phase::Import) {
         return;
     }
-    ++importFailures_;
+    ++failures_;
+    if (target_ && fileAtFault.empty()) {
+        // not a file's fault: the source whose signed manifest this was
+        std::vector<uint8_t> bytes;
+        if (DecodeBase58(target_->nodeKey, bytes) && bytes.size() == cs::PublicKey{}.size()) {
+            cs::PublicKey key;
+            std::copy(bytes.begin(), bytes.end(), key.begin());
+            if (auto* s = findSource(key); s != nullptr && !s->banned) {
+                s->banned = true;
+                log("SNAPSHOT: source " + keyText(key) + " signed a snapshot the import refused: not asked again");
+            }
+        }
+    }
     if (target_) {
         if (const auto* f = target_->file(fileAtFault)) {
             badFiles_.insert({f->name, f->sha256});
+            // every agreed source that declared these bytes (design 6.7)
+            banDeclaring(f->name, f->sha256, "declared " + f->name + " that the import refused");
             files_.erase(std::remove_if(files_.begin(), files_.end(), [&](FileState& s) {
                              if (s.file.name != fileAtFault) {
                                  return false;
@@ -1076,9 +1191,9 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
         }
     }
     log("SNAPSHOT: the import refused " + (fileAtFault.empty() ? std::string("the snapshot") : fileAtFault) + " (attempt " +
-            std::to_string(importFailures_) + " of " + std::to_string(kMaxAttempts) + ")",
+            std::to_string(failures_) + " of " + std::to_string(kMaxAttempts) + ")",
         true);
-    if (importFailures_ >= kMaxAttempts) {
+    if (failures_ >= kMaxAttempts) {
         log("SNAPSHOT: " + std::to_string(kMaxAttempts) + " imports failed: syncing from block 0", true);
         phase_ = Phase::Fallback;
         return;
@@ -1086,6 +1201,7 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
     target_.reset();
     agreedSources_.clear();
     agreement_.chosen.reset();
+    dirty_ = true;
     phase_ = Phase::Collect;
 }
 

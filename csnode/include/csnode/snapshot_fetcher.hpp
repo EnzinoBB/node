@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -52,10 +53,16 @@ public:
     };
 
     static constexpr uint64_t kManifestIntervalMs = 30'000;
+    static constexpr uint64_t kManifestRetryMs = 10'000;   // a request without an answer: asked again sooner
+    static constexpr size_t kManifestRetries = 2;           // ... this many times, then every 30 s
+    static constexpr uint64_t kSilentMs = kManifestIntervalMs + 5'000;   // no answer this long: silent
     static constexpr uint64_t kNeighbourRetryMs = 60'000;
     static constexpr uint64_t kPieceTimeoutMs = 30'000;
     static constexpr uint64_t kMarkMs = 60'000;
+    static constexpr uint64_t kMinBusyMs = 500;
     static constexpr uint64_t kMaxBusyMs = 10'000;
+    static constexpr uint64_t kBusyMarkMs = 60'000;          // busy this long without a piece: marked
+    static constexpr uint64_t kNoProgressMs = 300'000;       // a fetch without a new byte this long ends
     static constexpr uint64_t kLogIntervalMs = 30'000;
     static constexpr uint64_t kWaitLogIntervalMs = 300'000;
     static constexpr uint64_t kStallMs = 120'000;
@@ -64,11 +71,13 @@ public:
     static constexpr size_t kMaxSources = 64;        // discovered sources; configured keys come on top
     static constexpr size_t kMaxPerPrefix = 4;       // discovered sources per /24 (IPv4) or /48 (IPv6)
     static constexpr size_t kMaxPerBlock = 16;       // discovered sources per /16 (IPv4) or /32 (IPv6)
-    static constexpr uint64_t kEvictedMs = 600'000;  // an evicted or silent key is not taken again before
+    static constexpr uint64_t kEvictedMs = 60'000;   // an evicted key is not taken again before
     static constexpr size_t kMaxEvicted = 1024;
-    static constexpr size_t kMaxAttempts = 3;
+    static constexpr size_t kMaxAttempts = 3;        // fetches that end without a snapshot, then Fallback
+    static constexpr uint64_t kHashBytesPerTick = 64ull << 20;   // whole-file SHA-256 per tick
     static constexpr size_t kMaxSourcesFileKeys = 64;
 
+    // cfg.fetchWait = 0: no wait, Fallback (or Done) at the first tick without agreement
     SnapshotFetcher(const SnapshotData& cfg, std::filesystem::path tmpDir, Hooks hooks, bool dryRun = false);
     ~SnapshotFetcher();
     SnapshotFetcher(const SnapshotFetcher&) = delete;
@@ -107,6 +116,8 @@ private:
         std::string prefix;           // netPrefix and netBlock of the address, empty while unknown;
         std::string block;            // resolved again when a manifest arrives
         bool everAnswered = false;
+        size_t unanswered = 0;        // manifest requests since the last answer
+        uint64_t firstUnansweredAt = 0;
         uint64_t discoveredAt = 0;
         uint64_t addedAt = 0;         // last addNeighbours
         bool added = false;
@@ -122,6 +133,7 @@ private:
         uint64_t markedUntil = 0;
         bool banned = false;          // for the rest of the bootstrap
         uint64_t busyUntil = 0;
+        uint64_t busySince = 0;       // first busy answer since its last piece; 0: none
         size_t outstanding = 0;
     };
 
@@ -129,6 +141,8 @@ private:
         cs::PublicKey source{};
         uint64_t sentAt = 0;
     };
+
+    struct HashState;
 
     struct FileState {
         SnapshotFile file;
@@ -140,6 +154,8 @@ private:
         int fd = -1;
         bool verifyPending = false;
         bool verified = false;
+        std::shared_ptr<HashState> hashing;   // whole-file SHA-256 in progress, kHashBytesPerTick per tick
+        uint64_t hashed = 0;
     };
 
     void log(const std::string& line, bool warning = false);
@@ -174,6 +190,7 @@ private:
     void releaseSource(const cs::PublicKey& key);
     void mark(const cs::PublicKey& key, uint64_t t, bool forever, const std::string& why);
     void backToCollect(const std::string& why);
+    void banDeclaring(const std::string& name, const std::string& sha256, const std::string& why);
     void closeFile(FileState& f);
     bool openFile(FileState& f, bool truncate);
     uint64_t pieceLength(const FileState& f, uint32_t chunk) const;
@@ -198,7 +215,9 @@ private:
     std::optional<SnapshotManifest> target_;
     std::vector<FileState> files_;
     std::set<std::pair<std::string, std::string>> badFiles_;   // (name, sha256) refused by the importer
-    size_t importFailures_ = 0;
+    size_t failures_ = 0;          // fetches that ended without a snapshot, refused imports included
+    bool dirty_ = true;            // the input of the agreement changed since it was computed
+    uint64_t lastByteAt_ = 0;
     uint64_t lastSendAt_ = 0;
     size_t rr_ = 0;   // first source of the next fill
 

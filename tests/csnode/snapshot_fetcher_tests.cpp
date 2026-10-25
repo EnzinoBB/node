@@ -171,6 +171,8 @@ struct Net {
         bool busyAll = false;             // answers every piece request busy
         uint32_t busyMs = 2000;
         std::optional<std::string> manifestJson;   // replaces the manifest it serves
+        size_t silentManifests = 0;       // manifest requests left without an answer, from the first
+        size_t manifestAsks = 0;
         size_t outstanding = 0;           // piece requests not answered yet
     };
 
@@ -260,6 +262,11 @@ struct Net {
         for (auto& [k, request] : manifests) {
             auto it = sources.find(k);
             if (it == sources.end()) {
+                continue;
+            }
+            ++it->second.manifestAsks;
+            if (it->second.silentManifests != 0) {
+                --it->second.silentManifests;
                 continue;
             }
             auto reply = it->second.provider->onManifestRequest(me, serving(), synced());
@@ -811,7 +818,7 @@ TEST(SnapshotFetcher, FetchWaitSync) {
     EXPECT_GE(net.nowMs - 10'000'000, 60'000u);
     EXPECT_TRUE(net.logged("SNAPSHOT: 1 source declares block 200 (need 2): waiting"));
     EXPECT_TRUE(net.logged("SNAPSHOT: no agreement of 2 community sources after 1 min (seen: 1 source for block 200). Syncing from block 0"));
-    EXPECT_TRUE(net.logged("./node --download-snapshot"));
+    EXPECT_TRUE(net.logged("./node --download-snapshot  in this folder (Docker: CREDITS_SNAPSHOT=github)"));
     const auto sends = net.manifestRequests + net.sent.size();
     for (int i = 0; i < 1000; ++i) {
         net.step(fetcher);
@@ -846,8 +853,10 @@ TEST(SnapshotFetcher, ImportFailures) {
     net.add(Snapshots::A2);
     net.add(Snapshots::B);
     net.add(Snapshots::E);
-    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    // the sources that declared a refused file are banned: min_sources=1 keeps one for the third attempt
+    SnapshotFetcher fetcher(fetchConfig(1), tmp.path, net.hooks());
     std::set<std::string> walletHashes;
+    std::set<cs::PublicKey> banned;
     for (int attempt = 1; attempt <= 3; ++attempt) {
         const size_t sentBefore = net.sent.size();
         ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; })) << attempt;
@@ -857,10 +866,17 @@ TEST(SnapshotFetcher, ImportFailures) {
         const auto* wallets = result->first.file(kWallets);
         ASSERT_NE(wallets, nullptr);
         EXPECT_TRUE(walletHashes.insert(wallets->sha256).second) << "the refused file came back";
-        if (attempt > 1) {
-            // files already verified are not asked again
-            for (size_t i = sentBefore; i < net.sent.size(); ++i) {
+        for (size_t i = sentBefore; i < net.sent.size(); ++i) {
+            if (attempt > 1) {
+                // files already verified are not asked again
                 EXPECT_EQ(std::get<2>(net.sent[i]).name, kWallets);
+            }
+            EXPECT_EQ(banned.count(std::get<1>(net.sent[i])), 0u) << "a banned source was asked";
+        }
+        for (const auto& [key, source] : net.sources) {
+            const auto* f = snapshots().src[source.index].manifest.file(kWallets);
+            if (f->sha256 == wallets->sha256) {
+                banned.insert(key);
             }
         }
         fetcher.onImportFailed(kWallets);
@@ -868,6 +884,110 @@ TEST(SnapshotFetcher, ImportFailures) {
         EXPECT_FALSE(fetcher.result());
     }
     EXPECT_TRUE(net.logged("3 imports failed"));
+    EXPECT_EQ(net.countLogged("that the import refused: not asked again"), 4u);
+}
+
+// a refusal that is no file's fault bans the source that signed the manifest
+TEST(SnapshotFetcher, ImportFailureWithoutAFileBansTheSigner) {
+    TmpDir tmp("importsigner");
+    Net net;
+    net.add(Snapshots::A1);
+    net.add(Snapshots::A2);
+    net.add(Snapshots::B);
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+    const auto signer = fetcher.result()->first.nodeKey;
+    fetcher.onImportFailed("");
+    EXPECT_EQ(fetcher.phase(), Phase::Collect);
+    EXPECT_TRUE(net.logged("source " + signer + " signed a snapshot the import refused: not asked again"));
+    const size_t before = net.sent.size();
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+    for (size_t i = before; i < net.sent.size(); ++i) {
+        EXPECT_NE(base58(std::get<1>(net.sent[i])), signer);
+    }
+}
+
+// a peer that becomes a neighbour late, and one silent for its first requests, are kept (design 5.3a)
+TEST(SnapshotFetcher, LateAndSilentSourcesAreKept) {
+    TmpDir tmp("late");
+    Net net;
+    net.add(Snapshots::A1, false).silentManifests = 1;
+    net.add(Snapshots::A2).silentManifests = 2;
+    net.add(Snapshots::B, false);
+    SnapshotFetcher fetcher(fetchConfig(3), tmp.path, net.hooks());
+    for (int i = 0; i < 250; ++i) {
+        net.step(fetcher);
+    }
+    // A2 was silent twice and answered the third request, 10 and 20 s after the first
+    EXPECT_EQ(net.sources[net.key(Snapshots::A2)].manifestAsks, 3u);
+    EXPECT_EQ(fetcher.manifests(), 1u);
+    for (int i = 0; i < 360; ++i) {   // past a minute: A1 and B become neighbours late
+        net.step(fetcher);
+    }
+    EXPECT_EQ(fetcher.manifests(), 1u);
+    net.peers.neighbours.insert(net.key(Snapshots::A1));
+    net.peers.neighbours.insert(net.key(Snapshots::B));
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+    EXPECT_EQ(fetcher.result()->second.size(), 3u);
+}
+
+// busy with no delay: not asked again before 500 ms
+TEST(SnapshotFetcher, BusyWithoutDelayIsFloored) {
+    TmpDir tmp("busyfloor");
+    Net net;
+    auto& a1 = net.add(Snapshots::A1);
+    a1.busyAll = true;
+    a1.busyMs = 0;
+    net.add(Snapshots::A2);
+    SnapshotFetcher fetcher(fetchConfig(), tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Import; }));
+    const auto a1Key = net.key(Snapshots::A1);
+    for (const auto& s : net.sent) {
+        if (std::get<1>(s) != a1Key) {
+            continue;
+        }
+        for (const auto& [when, who] : net.busySent) {
+            if (who == a1Key) {
+                EXPECT_FALSE(when < std::get<0>(s) && std::get<0>(s) < when + SnapshotFetcher::kMinBusyMs);
+            }
+        }
+    }
+}
+
+// sources that are busy forever: each fetch ends after 5 min without data, the third ends the bootstrap
+TEST(SnapshotFetcher, BusyForeverEndsTheFetch) {
+    TmpDir tmp("busyforever");
+    Net net;
+    net.add(Snapshots::A1).busyAll = true;
+    net.add(Snapshots::A2).busyAll = true;
+    auto cfg = fetchConfig();
+    cfg.fetchWait = 86'400;
+    cfg.fetchFallback = "wait";
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks());
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return isFetching(fetcher); }, 20));
+    const uint64_t start = net.nowMs;
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() != Phase::Fetch; }, 4000));
+    EXPECT_EQ(fetcher.phase(), Phase::Collect);
+    EXPECT_GE(net.nowMs - start, SnapshotFetcher::kNoProgressMs);
+    EXPECT_TRUE(net.logged("no data for 5 min (attempt 1 of 3)"));
+    EXPECT_TRUE(net.logged("busy for 1 min without a piece"));
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Fallback; }, 10000));
+    EXPECT_TRUE(net.logged("(attempt 3 of 3): syncing from block 0"));
+}
+
+// two groups as strong as each other: the 30-s line says conflict
+TEST(SnapshotFetcher, ConflictLine) {
+    TmpDir tmp("conflict");
+    Net net;
+    net.add(Snapshots::A1);
+    net.add(Snapshots::D);
+    SnapshotFetcher fetcher(fetchConfig(1), tmp.path, net.hooks());
+    for (int i = 0; i < 320; ++i) {
+        net.step(fetcher);
+    }
+    EXPECT_EQ(fetcher.phase(), Phase::Collect);
+    EXPECT_TRUE(net.logged("SNAPSHOT: conflict: two groups with 1 sources at block 200: waiting"));
+    EXPECT_TRUE(net.logged("2 manifests collected, 0 not counted: address unknown, 0 replies dropped"));
 }
 
 // (13) a dry run stops after Collect and reports the groups
