@@ -272,7 +272,8 @@ answers and the fetcher moves to another source of the same `sha256` group (6.5)
 ### 5.3a As implemented in P3 (review notes)
 
 - A manifest request gets no answer (not a busy status) when the same key asked less than 5 s
-  ago, when any manifest was sent less than 50 ms ago, or when the global bucket is empty: the
+  ago, when keys that are not downloading have used up their share (20 a second, bursts of 8; a
+  peer that downloaded in the last 30 s is exempt), or when the global bucket is empty: the
   fetcher (P4) treats silence as "ask again after 5 s" and moves to its other sources meanwhile.
 - The 64-entry peer table evicts the oldest key that has not downloaded in the last 30 s first, so
   that keys made up by one host cannot push out a peer in the middle of a download; the table is
