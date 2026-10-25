@@ -1053,6 +1053,7 @@ void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
         if (serializationManPtr_->save(pool.sequence(), head, digest)) {
             cslog() << cs::stateDigestLine(pool.sequence(), digest.digest, digest.wallets) << " checkpoint";
             serializationManPtr_->pruneCheckpoints(sto.checkpointKeep);
+            emit checkpointSavedEvent(pool.sequence());
             lastCheckpointWallClock_ = now;
             if (byCount) {
                 schedulePruning(pool.sequence());
@@ -1062,6 +1063,16 @@ void BlockChain::saveLiveCheckpoint(const csdb::Pool& pool) {
             cserror() << "Cannot save caches with version " << pool.sequence();
         }
     }
+}
+
+bool BlockChain::blockBytes(cs::Sequence sequence, cs::Bytes& out) const {
+    std::lock_guard lock(dbLock_);
+    return storage_.pool_bytes(sequence, out);
+}
+
+cs::Sequence BlockChain::pruneTarget() const {
+    std::lock_guard lock(dbLock_);
+    return pruneUpTo_;
 }
 
 cs::CheckpointDigest BlockChain::checkpointDigest() const {

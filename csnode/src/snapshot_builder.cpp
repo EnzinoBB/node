@@ -175,15 +175,6 @@ std::string utcNow() {
     return buf;
 }
 
-bool readFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return !in.bad();
-}
-
 bool stopped(const SnapshotBuildInput& in) {
     return in.stop && in.stop->load();
 }
@@ -332,14 +323,28 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
         if (!std::filesystem::exists(src, ec)) {
             continue;   // tokens.dat and apihandler.dat exist only in builds with the API
         }
-        std::vector<uint8_t> data;
-        if (!readFile(src, data)) {
+        // in pieces: walletscache.dat is about 180 MB on mainnet, and the builder runs inside the node
+        std::ifstream in(src, std::ios::binary);
+        if (!in) {
             return failWith("cannot read " + src.string());
         }
         SnapshotFile f;
         f.name = "qs-" + name + ".lz4";
         Lz4Writer w(tmp / f.name, m.chunkSize);
-        w.write(data);
+        std::vector<uint8_t> piece(snapshot_lz4::kBlockSize);
+        while (in) {
+            if (stopped(input)) {
+                return failWith("stopped");
+            }
+            in.read(reinterpret_cast<char*>(piece.data()), static_cast<std::streamsize>(piece.size()));
+            const auto n = in.gcount();
+            if (n > 0) {
+                w.write(piece.data(), static_cast<size_t>(n));
+            }
+        }
+        if (in.bad()) {
+            return failWith("cannot read " + src.string());
+        }
         if (!w.finish(f)) {
             return failWith("cannot write " + f.name);
         }
