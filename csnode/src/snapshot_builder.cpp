@@ -422,6 +422,16 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     }
 
     // 4. manifest, signed; publish
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-forge-snapshot makes this node declare another state digest
+    // than its checkpoint holds (ci/testnet/run.sh FORGE_NODE): a forged source, consistent with itself
+    // except for the digest the agreement compares
+    if (std::ifstream("testnet-forge-snapshot") && !m.stateDigest.empty()) {
+        char& last = m.stateDigest.back();
+        last = last == '0' ? '1' : '0';
+        cswarning() << "SNAPSHOT: TESTNET build: the manifest of block " << m.seq << " declares a forged state digest";
+    }
+#endif
     m.sign(key);
     {
         std::ofstream out(tmp / "snapshot.json", std::ios::binary | std::ios::trunc);

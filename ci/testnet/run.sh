@@ -89,6 +89,18 @@
 #        JOIN_FALLBACK (default sync). Every node then listens on its own loopback /24 (127.0.<i>.1,
 #        NODE_NETS=1), so that the sources count as independent. It must agree, fetch, import, verify
 #        the digest of the snapshot at its quick start and reach the target
+#        JOIN_EXPECT=fallback: too few sources on purpose; the joiner gives up after fetch_wait and
+#        syncs from block 0. JOIN_FETCH_RATE: the joiner's fetch_rate_kbps (KB/s), to slow a fetch down
+#        SNAPSHOT_LATE_SERVE_NODES (comma separated, odd): checkpoints as a serving node but serve=off;
+#        JOIN_LATE_SERVE_AFTER (default 90) s after the joiner started they are stopped for 40 s (so
+#        that the peers' routing tables forget them) and started again with serve=on
+#        JOIN_SOURCES=keys: the joiner trusts the serving nodes by key ([snapshot] sources=) and every
+#        node stays on 127.0.0.1 (one /24: only keys can make up min_sources); JOIN_SOURCES=file: the
+#        serving and late nodes are listed in the joiner's snapshot_sources.txt instead (not trusted)
+#        JOIN_KILL_DURING_FETCH=1: the joiner is killed once when it logs "fetching block" and once
+#        when it logs "importing block", and started again each time; it must clean up and join
+#        FORGE_NODE / CORRUPT_NODE (odd, a CREDITS_TESTNET build): that serving node declares a forged
+#        state digest / flips a byte of every third piece it serves
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
 #        node 5 is restarted as a pruned node and node 6 as a full one
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
@@ -238,6 +250,17 @@ JOIN_WAIT=${JOIN_WAIT:-300}
 JOIN_FALLBACK=${JOIN_FALLBACK:-sync}
 # JOIN_EXPECT=fallback: too few sources on purpose; the joiner must give up after fetch_wait and sync from block 0
 JOIN_EXPECT=${JOIN_EXPECT:-snapshot}
+JOIN_FETCH_RATE=${JOIN_FETCH_RATE:-0}
+SNAPSHOT_LATE_SERVE_NODES=${SNAPSHOT_LATE_SERVE_NODES:-}
+JOIN_LATE_SERVE_AFTER=${JOIN_LATE_SERVE_AFTER:-90}
+JOIN_SOURCES=${JOIN_SOURCES:-}
+case "$JOIN_SOURCES" in ""|keys|file) ;; *) echo "JOIN_SOURCES must be keys, file or empty, got '$JOIN_SOURCES'"; exit 1 ;; esac
+JOIN_KILL_DURING_FETCH=${JOIN_KILL_DURING_FETCH:-0}
+FORGE_NODE=${FORGE_NODE:-0}
+CORRUPT_NODE=${CORRUPT_NODE:-0}
+for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ } $FORGE_NODE $CORRUPT_NODE; do
+    [ "$i" -eq 0 ] || [ $((i % 2)) -eq 1 ] || [ -z "$BIN_ALT" ] || { echo "FAIL: n$i is even and runs BIN_ALT: it cannot serve, forge or corrupt snapshots"; exit 1; }
+done
 case "$JOIN_EXPECT" in snapshot|fallback) ;; *) echo "JOIN_EXPECT must be snapshot or fallback, got '$JOIN_EXPECT'"; exit 1 ;; esac
 case "$JOIN_FETCH" in ""|p2p) ;; *) echo "JOIN_FETCH must be p2p or empty, got '$JOIN_FETCH'"; exit 1 ;; esac
 case "$JOIN_FALLBACK" in sync|wait) ;; *) echo "JOIN_FALLBACK must be sync or wait, got '$JOIN_FALLBACK'"; exit 1 ;; esac
@@ -249,7 +272,7 @@ fi
 # binds its UDP socket to every interface whatever [host_input] ip says, so a datagram to another
 # node leaves from 127.0.0.1: node_nets_on rewrites its source to the sender's address (SNAT by the
 # sender's p2p port, needs sudo), which is the address the receiver's routing table records
-NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && echo 1 || echo 0)}
+NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && [ "$JOIN_SOURCES" != keys ] && echo 1 || echo 0)}
 node_ip() { if [ "$NODE_NETS" = 1 ]; then echo "127.0.$1.1"; else echo 127.0.0.1; fi; }
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
 CONVERT_AT=${CONVERT_AT:-0}
@@ -442,12 +465,12 @@ storage_section() {
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
     fi
-    if [ "$JOIN_FETCH" = p2p ] && [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]]; then
+    if [ "$JOIN_FETCH" = p2p ] && [[ ",$SNAPSHOT_SERVE_NODES,$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]]; then
         # a joiner needs JOIN_MIN_SOURCES sources on one block: a serving node builds its snapshots
         # from the checkpoints every 1'000 blocks only, not from the minute ones of a pruned node
         lines=${lines//checkpoint_every_minutes=1\\n/}
     fi
-    if [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && [[ "$lines" != *checkpoint_every=* ]]; then
+    if [[ ",$SNAPSHOT_SERVE_NODES,$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]] && [[ "$lines" != *checkpoint_every=* ]]; then
         # a serving node builds its snapshots from the periodic checkpoints
         lines="${lines}checkpoint_every=1000\ncheckpoint_keep=2\n"
     fi
@@ -465,6 +488,12 @@ snapshot_section() {
     printf "\n[snapshot]\n"
     if [ "$JOIN_FETCH" = p2p ] && [ "$i" -eq "$JOIN_NODE" ]; then
         printf "fetch=auto\nmin_sources=%s\nfetch_wait=%s\nfetch_fallback=%s\n" "$JOIN_MIN_SOURCES" "$JOIN_WAIT" "$JOIN_FALLBACK"
+        [ "$JOIN_FETCH_RATE" -eq 0 ] || printf "fetch_rate_kbps=%s\n" "$JOIN_FETCH_RATE"
+        if [ "$JOIN_SOURCES" = keys ]; then
+            local keys=""
+            for j in ${SNAPSHOT_SERVE_NODES//,/ } ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do keys="$keys${keys:+,}${KEYS[$((j - 1))]}"; done
+            printf "sources=%s\n" "$keys"
+        fi
     else
         printf "fetch=off\n"
     fi
@@ -513,6 +542,15 @@ Append=true
 Format="[%TimeStamp%] %Severity% %Message%"
 CFG
 done
+
+# test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes
+[ "$FORGE_NODE" -eq 0 ] || : > "$WORK/n$FORGE_NODE/testnet-forge-snapshot"
+[ "$CORRUPT_NODE" -eq 0 ] || : > "$WORK/n$CORRUPT_NODE/testnet-corrupt-pieces"
+if [ "$JOIN_SOURCES" = file ]; then
+    for j in ${SNAPSHOT_SERVE_NODES//,/ } ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+        echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$WORK/n$JOIN_NODE/snapshot_sources.txt"
+    done
+fi
 
 # the binary node i runs
 bin_of() {
@@ -580,6 +618,7 @@ stop_all() {
         wait "$SAMPLER_PID" 2>/dev/null || true
     fi
     [ -z "${API_LOAD_PID:-}" ] || kill -TERM "$API_LOAD_PID" 2>/dev/null || true
+    [ -z "${JOIN_KILL_PID:-}" ] || kill "$JOIN_KILL_PID" 2>/dev/null || true
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
     done
@@ -748,9 +787,56 @@ while :; do
             echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
         fi
         start_node "$JOIN_NODE"
+        join_started=$(date +%s)
+        if [ "$JOIN_KILL_DURING_FETCH" = 1 ]; then
+            # the joiner's fetch and import take seconds: a watcher kills it at those lines (node.log
+            # is appended across starts: the first "importing block" comes after the restart)
+            (
+                jl="$WORK/n$JOIN_NODE/node.log"
+                for phase in "fetching block" "importing block"; do
+                    until grep -aq "SNAPSHOT: $phase" "$jl" 2>/dev/null; do
+                        grep -aq 'SNAPSHOT: started from block' "$jl" 2>/dev/null && exit 0
+                        sleep 0.1
+                    done
+                    echo "$phase" > "$WORK/join-killed"
+                    kill -KILL "$(cat "$WORK/join-pid" 2>/dev/null)" 2>/dev/null || true
+                    # the main loop starts it again and removes the marker
+                    while [ -e "$WORK/join-killed" ]; do sleep 0.2; done
+                done
+            ) &
+            JOIN_KILL_PID=$!
+            echo "${PIDS[$JOIN_NODE]}" > "$WORK/join-pid"
+        fi
+    fi
+    # the harness killed the joiner on purpose: start it again
+    if [ "$JOIN_KILL_DURING_FETCH" = 1 ] && [ -e "$WORK/join-killed" ] && [ -n "${PIDS[$JOIN_NODE]:-}" ] && ! kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null; then
+        wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || true
+        echo "join test: n$JOIN_NODE killed when it logged '$(cat "$WORK/join-killed")', started again"
+        join_kills=$(( ${join_kills:-0} + 1 ))
+        start_node "$JOIN_NODE"
+        echo "${PIDS[$JOIN_NODE]}" > "$WORK/join-pid"
+        rm -f "$WORK/join-killed"
+    fi
+    # late serving nodes: stopped long enough to leave the peers' routing tables, then serve=on
+    if [ -n "$SNAPSHOT_LATE_SERVE_NODES" ] && [ -n "${join_started:-}" ] && [ -z "${late_done:-}" ] \
+        && [ "$(date +%s)" -ge $(( join_started + JOIN_LATE_SERVE_AFTER )) ]; then
+        late_done=1
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do kill -TERM "${PIDS[$i]}" 2>/dev/null || true; done
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+            for _ in $(seq 1 60); do kill -0 "${PIDS[$i]}" 2>/dev/null || break; sleep 1; done
+            wait "${PIDS[$i]}" 2>/dev/null || true
+            sed -i 's/^fetch=off$/fetch=off\nserve=on/' "$WORK/n$i/config.ini"
+        done
+        sleep 40
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+            echo "join test: n$i starts again with serve=on"
+            start_node "$i"
+            SNAPSHOT_SERVE_NODES="$SNAPSHOT_SERVE_NODES${SNAPSHOT_SERVE_NODES:+,}$i"
+        done
     fi
     # a p2p join that stops (a refused snapshot: exit code 4, a failed bootstrap: 1) fails at once
-    if [ "$JOIN_FETCH" = p2p ] && [ -n "${PIDS[$JOIN_NODE]:-}" ] && ! kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null; then
+    if [ "$JOIN_FETCH" = p2p ] && [ -n "${PIDS[$JOIN_NODE]:-}" ] && ! kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null \
+        && ! { [ "$JOIN_KILL_DURING_FETCH" = 1 ] && [ -e "$WORK/join-killed" ]; }; then
         status=0; wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || status=$?
         echo "FAIL: n$JOIN_NODE exited with status $status while joining"
         { grep -a 'SNAPSHOT' "$WORK/n$JOIN_NODE/node.log" || true; } | tail -40
@@ -1380,6 +1466,36 @@ elif [ "$JOIN_FETCH" = p2p ]; then
     echo "p2p join: n$JOIN_NODE $(grep -a -m1 -E "STATE DIGEST #$S .* checkpoint loaded" "$jlog" | sed 's/.*STATE DIGEST/STATE DIGEST/')"
     echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: snapshot.json verified' "$jlog" | sed 's/.*SNAPSHOT: //'); $(cat "$jdir/snapshot.verified")"
     echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: started from block' "$jlog" | sed 's/.*SNAPSHOT: //'); sources: $sources"
+    key8() { echo "${KEYS[$(($1 - 1))]:0:8}"; }
+    if [ "$JOIN_KILL_DURING_FETCH" = 1 ]; then
+        [ "${join_kills:-0}" -ge 2 ] || fail_join "was killed ${join_kills:-0} times, 2 expected (during the fetch and the import)"
+        grep -aq 'SNAPSHOT: removed the files of an interrupted import' "$jdir/stdout.log" || fail_join "never removed the files of the killed import"
+        grep -aq 'left by an interrupted fetch' "$jlog" || fail_join "never removed snapshot-tmp/ of the killed fetch"
+        echo "p2p join: n$JOIN_NODE killed during the fetch and the import, cleaned up and joined"
+    fi
+    if [ "$FORGE_NODE" -gt 0 ]; then
+        grep -aqE "SNAPSHOT: minority: .*$(key8 "$FORGE_NODE")" "$jlog" || fail_join "never logged n$FORGE_NODE's forged snapshot as a minority"
+        ! grep -q "$(key8 "$FORGE_NODE")" <<<"$agreed" || fail_join "agreed on a group with n$FORGE_NODE's forged snapshot"
+        echo "p2p join: n$FORGE_NODE's forged digest: $(grep -a -m1 "SNAPSHOT: minority: .*$(key8 "$FORGE_NODE")" "$jlog" | sed 's/.*SNAPSHOT: //')"
+    fi
+    if [ "$CORRUPT_NODE" -gt 0 ]; then
+        ck=${KEYS[$((CORRUPT_NODE - 1))]}
+        grep -aq "SNAPSHOT: rejected piece .* from $ck" "$jlog" || fail_join "never rejected a corrupt piece of n$CORRUPT_NODE"
+        grep -aq "SNAPSHOT: source $ck .*not asked again" "$jlog" || fail_join "kept asking n$CORRUPT_NODE after its corrupt pieces"
+        echo "p2p join: n$CORRUPT_NODE: $(grep -ac "SNAPSHOT: rejected piece .* from $ck" "$jlog") corrupt piece(s) rejected, then not asked again"
+    fi
+    if [ -n "$SNAPSHOT_LATE_SERVE_NODES" ]; then
+        if [ "$JOIN_FALLBACK" = wait ]; then
+            grep -aq 'Waiting for more sources (fetch_fallback=wait)' "$jlog" || fail_join "never logged that it waits for more sources"
+        fi
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+            grep -aq 'SNAPSHOT: serving block' "$WORK/n$i/node.log" || fail_join "n$i never served after its restart with serve=on"
+            if [ "$JOIN_SOURCES" = file ]; then
+                grep -aq "SNAPSHOT: asking ${KEYS[$((i - 1))]} for its manifest" "$jlog" || fail_join "never asked n$i, listed in snapshot_sources.txt"
+            fi
+        done
+        echo "p2p join: n$JOIN_NODE waited for the late serving node(s) $SNAPSHOT_LATE_SERVE_NODES"
+    fi
     joiner_key=${KEYS[$((JOIN_NODE - 1))]}
     for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
         served=$({ grep -a "SNAPSHOT: served block $S to $joiner_key" "$WORK/n$i/node.log" || true; } | tail -1 | sed 's/.*SNAPSHOT: //')
