@@ -39,6 +39,8 @@ jobs:
             third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
+          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>
+          rm -f third-party/lmdbxx/VERSION
 
       - name: Install build tools
         run: choco install -y --no-progress winflexbison3
@@ -136,6 +138,8 @@ jobs:
             third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
+          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>
+          rm -f third-party/lmdbxx/VERSION
           # blake2's SSE code does not build on ARM: the reference implementation there
           git -C cscrypto apply ../ci/platform/blake2-portable.patch
 
