@@ -92,9 +92,10 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          # thrift's fallback reads the byte order from a Boost header removed in Boost 1.73
+          # thrift's fallback reads the byte order from a Boost header removed in Boost 1.73 (-D, not
+          # /D: Git Bash would read /D... as a path)
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
-            -DCMAKE_CXX_FLAGS="/D__THRIFT_BYTE_ORDER=1234 /D__THRIFT_LITTLE_ENDIAN=1234 /D__THRIFT_BIG_ENDIAN=4321 /EHsc" \
+            -DCMAKE_CXX_FLAGS="-DWIN32 -D_WINDOWS -GR -D__THRIFT_BYTE_ORDER=1234 -D__THRIFT_LITTLE_ENDIAN=1234 -D__THRIFT_BIG_ENDIAN=4321 -EHsc" \
             -DENABLE_TESTS=ON \
             -DBoost_ROOT="C:/boost" \
             -DBoost_NO_SYSTEM_PATHS=ON \
@@ -179,6 +180,7 @@ jobs:
             -DBoost_ROOT="${BOOST_PREFIX}" \
             -DBoost_NO_SYSTEM_PATHS=ON \
             -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DHAVE_CLANG_THREAD_SAFETY=OFF \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DWITH_HASKELL=OFF
 
