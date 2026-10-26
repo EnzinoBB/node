@@ -38,11 +38,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           IN_RUN: ${{ inputs.release_run }}
         run: |
+          # only runs of code from this repository: a pull request from a fork builds packages too,
+          # and those binaries are not run here
+          trusted='[.workflow_runs[] | select(.conclusion == "success" and .head_repository.full_name == $repo)]'
           run="$IN_RUN"
           if [ -z "$run" ]; then
-            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?per_page=50" \
+              | jq -r --arg repo "$GITHUB_REPOSITORY" "$trusted | .[0].id // empty")
           fi
           echo "$run" | grep -qE '^[0-9]+$' || { echo "bad run id '$run'"; exit 1; }
+          info=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run")
+          [ "$(jq -r .path <<< "$info")" = .github/workflows/release.yml ] || { echo "run $run is not a Release run"; exit 1; }
+          [ "$(jq -r .head_repository.full_name <<< "$info")" = "$GITHUB_REPOSITORY" ] || { echo "run $run built code from another repository"; exit 1; }
+          [ "$(jq -r .conclusion <<< "$info")" = success ] || { echo "run $run did not succeed"; exit 1; }
           echo "Release run $run"
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
