@@ -13,7 +13,7 @@ on:
   # a pull request that touches the packaging builds the packages as artifacts, never publishes
   pull_request:
     branches: [master]
-    paths: ['packaging/**', '.github/workflows/release.yml']
+    paths: ['packaging/**', '.github/workflows/release.yml', '.github/workflows/build-platforms.yml']
   workflow_dispatch:
     inputs:
       version:
@@ -39,6 +39,15 @@ env:
   JDK_TAG: deps-ojdkbuild-11.0.4
   JDK_ASSET: java-11-openjdk-11.0.4-linux-x64.tar.gz
   OFFICIAL_RELEASE: https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz
+  # Windows and macOS: Eclipse Temurin 11 (the official release has no JDK for them), pinned
+  TEMURIN_RELEASE: jdk-11.0.32.1+1
+  TEMURIN_WINDOWS: OpenJDK11U-jdk_x64_windows_hotspot_11.0.32.1_1.zip
+  TEMURIN_WINDOWS_SHA256: d5008f02174c1ad21c10407cbf104815cb390ec4c263d53946e8d0507d7a77f9
+  TEMURIN_MACOS: OpenJDK11U-jdk_aarch64_mac_hotspot_11.0.32.1_1.tar.gz
+  TEMURIN_MACOS_SHA256: c487a1c3a56588b3a32d0d07cdd526bf3d401c4b8422be772ca178bfcd647f3f
+  # the Windows and macOS packages join a published release only once a node on each system has
+  # matched the Linux state digests on mainnet; until then they are workflow artifacts
+  PUBLISH_PLATFORMS: 'false'
 
 jobs:
   # the node for Ubuntu 20.04 and later (glibc 2.31); the default build below needs glibc 2.38
@@ -55,6 +64,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
+      executor_tag: ${{ steps.version.outputs.executor_tag }}
     env:
       GH_TOKEN: ${{ github.token }}
 
@@ -90,7 +100,7 @@ jobs:
           echo "VERSION=$version" >> "$GITHUB_ENV"
           echo "EXECUTOR_TAG=$executor_tag" >> "$GITHUB_ENV"
           echo "PUBLISH=$publish" >> "$GITHUB_ENV"
-          printf 'version=%s\npublish=%s\n' "$version" "$publish" >> "$GITHUB_OUTPUT"
+          printf 'version=%s\npublish=%s\nexecutor_tag=%s\n' "$version" "$publish" "$executor_tag" >> "$GITHUB_OUTPUT"
           echo "version $version, executor $executor_tag, publish $publish"
 
       # the submodules the build needs, listed explicitly
@@ -227,6 +237,76 @@ jobs:
             gh release create "$tag" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --title "Community node $VERSION" --notes-file notes.md
           fi
+
+  # the node for Windows (x64) and macOS (Apple Silicon), built and tested there
+  platforms:
+    uses: ./.github/workflows/build-platforms.yml
+
+  platform-packages:
+    name: Packages for Windows and macOS
+    needs: [package, platforms]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.package.outputs.version }}
+      EXECUTOR_TAG: ${{ needs.package.outputs.executor_tag }}
+      PUBLISH: ${{ needs.package.outputs.publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download the nodes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: node-*-${{ github.sha }}
+          path: nodes
+
+      - name: Fetch contract executor
+        run: |
+          mkdir -p executor
+          for jar in contract-executor.jar sc-api-support.jar; do
+            curl -sSfL -o "executor/$jar" "https://github.com/EnzinoBB/contract-executor/releases/download/${EXECUTOR_TAG}/$jar"
+          done
+
+      # the JDK without what the executor never uses (jmods for jlink, the sources)
+      - name: Fetch JDKs
+        run: |
+          base="https://github.com/adoptium/temurin11-binaries/releases/download/${TEMURIN_RELEASE/+/%2B}"
+          curl -sSfL -o win.zip "$base/$TEMURIN_WINDOWS"
+          curl -sSfL -o mac.tar.gz "$base/$TEMURIN_MACOS"
+          echo "$TEMURIN_WINDOWS_SHA256  win.zip" | sha256sum -c
+          echo "$TEMURIN_MACOS_SHA256  mac.tar.gz" | sha256sum -c
+          mkdir -p jdk-win jdk-mac
+          unzip -q win.zip -d jdk-win
+          tar -xzf mac.tar.gz -C jdk-mac
+          win=$(find jdk-win -mindepth 1 -maxdepth 1 -type d | head -1)
+          mac=$(find jdk-mac -mindepth 3 -maxdepth 3 -type d -path '*/Contents/Home' | head -1)
+          test -x "$mac/bin/java" && test -f "$win/bin/java.exe"
+          rm -rf "$win/jmods" "$win/lib/src.zip" "$mac/jmods" "$mac/lib/src.zip"
+          echo "JDK_WIN=$win" >> "$GITHUB_ENV"
+          echo "JDK_MAC=$mac" >> "$GITHUB_ENV"
+
+      - name: Packages
+        run: |
+          chmod +x nodes/node-macos-arm64-*/node
+          PACKAGE_OS=windows PACKAGE_RUNS_ON="Windows 10 or later, x64" \
+            packaging/make-package.sh "$VERSION" nodes/node-windows-x64-*/node.exe executor "$JDK_WIN" dist
+          PACKAGE_OS=macos PACKAGE_RUNS_ON="macOS 14 or later on Apple Silicon" \
+            packaging/make-package.sh "$VERSION" nodes/node-macos-arm64-*/node executor "$JDK_MAC" dist
+          (cd dist && sha256sum * > SHA256SUMS-windows-macos && cat SHA256SUMS-windows-macos)
+          ls -la dist
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: credits-node-${{ env.VERSION }}-windows-macos
+          path: dist/
+          retention-days: 30
+
+      - name: Publish
+        if: env.PUBLISH == 'true' && env.PUBLISH_PLATFORMS == 'true'
+        run: gh release upload "community-v${VERSION}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
 
   # the Docker image of the package (the image chooses full or pruned at its first start: the
   # package provides the binaries and the configuration template)

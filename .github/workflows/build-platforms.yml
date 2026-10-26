@@ -8,9 +8,12 @@ on:
   pull_request:
     branches: [master]
   workflow_dispatch:
+  # release.yml packages what this builds
+  workflow_call:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # called from release.yml, github.workflow is the caller's name: its own group there
+  group: ${{ github.workflow }}-platforms-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:

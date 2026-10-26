@@ -5,7 +5,10 @@
 # Usage: make-package.sh <version> <node binary> <executor dir> <jdk dir> <out dir> [known_hosts]
 #   executor dir: holds contract-executor.jar and sc-api-support.jar
 #   jdk dir:      the java-11-openjdk-11.0.4 directory the release ships (the executor runs and
-#                 compiles contracts with it)
+#                 compiles contracts with it); on Windows and macOS a JDK 11 home for that system
+#   PACKAGE_OS:   linux (default), windows (node.exe, a .zip) or macos (Apple Silicon); the JDK
+#                 goes to ojdkbuild/java-11-openjdk-11.0.4 on Linux as in the official package,
+#                 to jdk/ elsewhere, and executor_command points at it
 #   known_hosts:  optional peer list to ship instead of packaging/mainnet/known_hosts.txt
 #
 # One package for full and pruned storage: config.ini runs a full node (as the official release),
@@ -17,14 +20,25 @@ set -euo pipefail
 version=$1 node=$2 executor=$3 jdk=$4 out=$5 hosts=${6:-}
 here=$(cd "$(dirname "$0")" && pwd)
 
+os=${PACKAGE_OS:-linux}
+case "$os" in
+    linux)   exe=node;     javadir=ojdkbuild/java-11-openjdk-11.0.4; java=./ojdkbuild/java-11-openjdk-11.0.4/bin/java
+             start=./node; archive="linux-x64${PACKAGE_PLATFORM:+-$PACKAGE_PLATFORM}.tar.gz" ;;
+    macos)   exe=node;     javadir=jdk; java=./jdk/bin/java
+             start=./node; archive=macos-arm64.tar.gz ;;
+    windows) exe=node.exe; javadir=jdk; java='jdk\bin\java.exe'
+             start=node.exe; archive=windows-x64.zip ;;
+    *) echo "unknown PACKAGE_OS '$os'" >&2; exit 1 ;;
+esac
+
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 dir="$stage/csnode"
-mkdir -p "$dir/ojdkbuild"
+mkdir -p "$dir/$(dirname "$javadir")"
 
-install -m 755 "$node" "$dir/node"
+install -m 755 "$node" "$dir/$exe"
 install -m 644 "$executor/contract-executor.jar" "$executor/sc-api-support.jar" "$dir/"
-cp -a "$jdk" "$dir/ojdkbuild/java-11-openjdk-11.0.4"
+cp -a "$jdk" "$dir/$javadir"
 install -m 644 "$here/mainnet/settings.properties" "$here/mainnet/default_confidants.txt" "$dir/"
 install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
 
@@ -33,12 +47,15 @@ install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
 commits=$(unzip -p "$executor/contract-executor.jar" git.properties | sed -n 's/^git.total.commit.count=//p' | tr -d '\r')
 [ -n "$commits" ] || { echo "no git.total.commit.count in contract-executor.jar" >&2; exit 1; }
 
-awk -v commits="$commits" '
+# the java path from the environment: awk -v would read the backslashes of the Windows path
+JAVA_CMD=$java awk -v commits="$commits" '
     /^\[/ { section = $0 }
     section == "[event_report]" && !/^;/ && NF { print ";" $0; next }
     /^executor_commit_max=/ { print "executor_commit_max=" commits; next }
+    /^executor_command=/ { i = index($0, " "); print "executor_command=" ENVIRON["JAVA_CMD"] substr($0, i); next }
     { print }
 ' "$here/mainnet/config.ini" > "$dir/config.ini"
+grep -qF "executor_command=$java -Xmx" "$dir/config.ini" || { echo "executor_command not rewritten" >&2; exit 1; }
 
 cp "$dir/config.ini" "$dir/config.pruned.ini"
 cat >> "$dir/config.pruned.ini" <<'INI'
@@ -82,13 +99,35 @@ Changing the block database (db_backend)
   only reads berkeleydb: convert back before running it on this folder. In Docker, use
   CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
 
-Start: cd csnode && ./node                                  (full storage, as the official node)
-  or:  cd csnode && ./node --config-file config.pruned.ini     (pruned storage)
-A pruned node can start from the published snapshot: ./node --config-file config.pruned.ini --download-snapshot
+Start: cd csnode && $start                                  (full storage, as the official node)
+  or:  cd csnode && $start --config-file config.pruned.ini     (pruned storage)
+A pruned node can start from the published snapshot: $start --config-file config.pruned.ini --download-snapshot
 EOF
+case "$os" in
+    macos) cat >> "$dir/README-COMMUNITY.txt" <<'EOF'
+
+macOS: the node and the JDK are not signed. After extracting, clear the download quarantine once:
+  xattr -dr com.apple.quarantine csnode
+The JDK in jdk/ is Eclipse Temurin 11 for Apple Silicon (the official release ships ojdkbuild 11.0.4
+for Linux only).
+EOF
+    ;;
+    windows) cat >> "$dir/README-COMMUNITY.txt" <<'EOF'
+
+Windows: run node.exe from a terminal (cmd or PowerShell) inside the csnode folder. The JDK in jdk\
+is Eclipse Temurin 11 for Windows x64 (the official release ships ojdkbuild 11.0.4 for Linux only).
+--download-snapshot needs curl, which Windows 10 and later include.
+EOF
+    ;;
+esac
 
 mkdir -p "$out"
-# PACKAGE_PLATFORM names a build for another baseline, e.g. glibc2.31 for Ubuntu 20.04 and later
-name="credits-node-$version-linux-x64${PACKAGE_PLATFORM:+-$PACKAGE_PLATFORM}.tar.gz"
-tar -C "$stage" --owner=0 --group=0 --sort=name -czf "$out/$name" csnode
+out=$(cd "$out" && pwd)
+# PACKAGE_PLATFORM names a Linux build for another baseline, e.g. glibc2.31 for Ubuntu 20.04 and later
+name="credits-node-$version-$archive"
+if [ "$os" = windows ]; then
+    (cd "$stage" && zip -qrX "$out/$name" csnode)
+else
+    tar -C "$stage" --owner=0 --group=0 --sort=name -czf "$out/$name" csnode
+fi
 echo "$out/$name"
