@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Tests the image's entrypoint with a stub node: first-start setup, kept configuration and keys,
-# snapshot restore and digest check, failures, and storage changes.
+# the snapshot download on request (--download-snapshot) and the [snapshot] settings, the refusal
+# after a snapshot mismatch, and storage changes.
 # Usage: test-entrypoint.sh <dir with mdb_copy and mdb_load>
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -23,7 +24,12 @@ printf '\n[storage]\ncheckpoint_every=100000\nblock_db=lmdb\n' >> "$pkg/config.i
 touch "$pkg/contract-executor.jar" "$pkg/sc-api-support.jar"
 cat > "$pkg/node" <<'STUB'
 #!/bin/bash
-# stub node: records its arguments, logs a start-up digest and a written sequence, stops on SIGTERM
+# stub node: --download-snapshot is recorded and exits STUB_DOWNLOAD_RC (0); otherwise it records its
+# arguments, logs a start-up digest and a written sequence, stops on SIGTERM
+if [[ " $* " == *" --download-snapshot "* ]]; then
+    echo "$@" > /data/stub-download
+    exit "${STUB_DOWNLOAD_RC:-0}"
+fi
 echo "$@" > /data/stub-args
 if [ -f /data/stub-digest ]; then read -r seq hex < /data/stub-digest
 elif [ -f /data/snapshot.json ]; then read -r seq hex < <(python3 -c 'import json; m=json.load(open("/data/snapshot.json")); print(m["seq"], m["state_digest"])')
@@ -37,20 +43,9 @@ STUB
 chmod +x "$pkg/node"
 "$here/build.sh" "$pkg" "$image" > "$work/build.log" 2>&1 || { tail -20 "$work/build.log"; fail "image build"; }
 
-# a snapshot made by the real script from a fake node
-fake="$work/fake"
-mkdir -p "$fake/qs/1000" "$fake/log" "$fake/db/lmdb" "$fake/caches/seqdb"
-for env in "$fake/db/lmdb" "$fake/caches/seqdb"; do
-    printf 'VERSION=3\nformat=print\ntype=btree\nHEADER=END\n k\n v\nDATA=END\n' | "$tools/mdb_load" -f /dev/stdin "$env"
-done
-echo x > "$fake/qs/1000/head.bin"
-echo "[t] [info] STATE DIGEST #1000 abababababababababababababababababababababababababababababababab wallets 5" > "$fake/log/log_0.txt"
-"$here/snapshot-make.sh" "$fake" "$work/snap" "$tools/mdb_copy" >/dev/null
-
 run() {  # run <data dir> [docker args...]: runs the container to its end, prints its output
     local data=$1; shift
-    docker run --rm --label credits-entrypoint-test --user "$(id -u)" -v "$data:/data" \
-        -v "$work/snap:/snap:ro" "$@" "$image" 2>&1
+    docker run --rm --label credits-entrypoint-test --user "$(id -u)" -v "$data:/data" "$@" "$image" 2>&1
 }
 newdata() { local d="$work/data-$1"; mkdir -p "$d"; echo "$d"; }
 
@@ -78,71 +73,60 @@ run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
 grep -q '; operator note' "$d/config.ini" || fail "hand edit lost"
 pass "second start keeps keys and config.ini"
 
-# 3. snapshot restore and digest check
+# 3. a pruned node's first start downloads the snapshot (github, the default), then starts
 d=$(newdata 3)
-out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
-grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "restore"; }
-[ -f "$d/snapshot.verified" ] || { echo "$out"; fail "digest not verified"; }
-[ -d "$d/db/lmdb" ] || fail "restored db missing"
-pass "snapshot restored and verified"
+out=$(run "$d")
+grep -q -- '--download-snapshot https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/snapshot.json' "$d/stub-download" \
+    || { echo "$out"; fail "no download on the first start"; }
+grep -q 'snapshot restored' <<<"$out" || { echo "$out"; fail "download result not logged"; }
+[ -f "$d/stub-args" ] || fail "node not started after the download"
+grep -q -- '--download-snapshot' "$d/stub-args" && fail "the normal start downloads"
+grep -q '^serve=on' "$d/config.ini" && grep -q '^fetch=auto' "$d/config.ini" || fail "[snapshot] serve=on, fetch=auto"
+pass "first start downloads the snapshot, then starts"
 
-# 4. digest mismatch stops the node, and the next start is refused
+# 4. a failed download: the node starts anyway (it tries its neighbours, then block 0)
 d=$(newdata 4)
-echo "1000 $(printf 'f%.0s' $(seq 1 64))" > "$d/stub-digest"
-start=$(date +%s)
-out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=60)
-grep -q 'SNAPSHOT DIGEST MISMATCH' <<<"$out" || { echo "$out"; fail "mismatch not reported"; }
-[ $(( $(date +%s) - start )) -lt 40 ] || fail "mismatch did not stop the node"
-set +e; out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json); rc=$?; set -e
-[ "$rc" = 4 ] || { echo "$out"; fail "start after mismatch: exit $rc, expected 4"; }
-pass "digest mismatch stops and blocks the node"
+out=$(run "$d" -e STUB_DOWNLOAD_RC=2)
+grep -q 'no snapshot downloaded (exit 2)' <<<"$out" || { echo "$out"; fail "failed download not reported"; }
+[ -f "$d/stub-args" ] || fail "node not started after a failed download"
+pass "a failed download still starts the node"
 
-# 5. unreachable snapshot: sync from block 0
-d=$(newdata 5)
-out=$(run "$d" -e CREDITS_SNAPSHOT_URL=http://127.0.0.1:9/latest.json)
-grep -q 'syncing from block 0 instead' <<<"$out" || { echo "$out"; fail "fallback"; }
-[ -f "$d/stub-args" ] || fail "node not started after a failed restore"
-[ -e "$d/db" ] && fail "db created by a failed restore"
-pass "unreachable snapshot falls back to a sync"
+# 5. the next start with data does not download
+rm -f "$d/stub-download"
+mkdir -p "$d/db/x"; touch "$d/db/x/data"
+run "$d" >/dev/null
+[ -e "$d/stub-download" ] && fail "downloaded again on a node with data"
+pass "no download once the node has data"
 
-# 6. a leftover .restore-tmp is wiped
-d=$(newdata 6)
-mkdir -p "$d/.restore-tmp/x"
+# 6. p2p: no download, fetch=auto; off: no download, fetch=off; an old latest.json address and the
+# old value auto still work; serving off and min_sources on request
+d=$(newdata 6p)
+run "$d" -e CREDITS_SNAPSHOT=p2p -e CREDITS_SNAPSHOT_MIN_SOURCES=3 >/dev/null
+[ -e "$d/stub-download" ] && fail "p2p downloads"
+grep -q '^fetch=auto' "$d/config.ini" && grep -q '^min_sources=3' "$d/config.ini" || fail "p2p settings"
+d=$(newdata 6o)
+run "$d" -e CREDITS_SNAPSHOT=off -e CREDITS_SERVE_SNAPSHOT=off >/dev/null
+[ -e "$d/stub-download" ] && fail "off downloads"
+grep -q '^fetch=off' "$d/config.ini" && grep -q '^serve=off' "$d/config.ini" || fail "off settings"
+d=$(newdata 6a)
+run "$d" -e CREDITS_SNAPSHOT=auto -e CREDITS_SNAPSHOT_URL=https://example.org/rel/latest.json >/dev/null
+grep -q -- '--download-snapshot https://example.org/rel/snapshot.json' "$d/stub-download" || fail "old latest.json address"
+pass "p2p, off, serve and the old values"
+
+# 6b. a full node does not download and does not fetch (a snapshot holds recent blocks only)
+d=$(newdata 6f)
+run "$d" -e CREDITS_STORAGE=full >/dev/null
+[ -e "$d/stub-download" ] && fail "a full node downloads"
+grep -q '^fetch=off' "$d/config.ini" || fail "a full node fetches"
+pass "a full node syncs from block 0"
+
+# 6c. a snapshot mismatch reported by the node: the next start is refused
+d=$(newdata 6m)
 run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
-[ -e "$d/.restore-tmp" ] && fail ".restore-tmp left"
-pass "leftover restore directory wiped"
-
-# 6b. a restore that stops while it moves its files: the node is not started on part of a snapshot,
-# and the next start removes that part and restores again
-if [ "$(id -u)" = 0 ]; then
-    echo "skipped: interrupted restore (as root chmod cannot block the move)"
-else
-d=$(newdata 6b)
-mkdir -p "$d/caches/blocker"
-touch "$d/caches/blocker/f"
-chmod 555 "$d/caches/blocker"     # db is moved first, then caches cannot be replaced
-set +e; out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json); rc=$?; set -e
-chmod 755 "$d/caches/blocker"
-[ "$rc" = 5 ] || { echo "$out"; fail "interrupted restore: exit $rc, expected 5"; }
-grep -q 'stopped while it moved its files' <<<"$out" || { echo "$out"; fail "interrupted restore not reported"; }
-grep -q 'CREDITS_RESET' <<<"$out" && { echo "$out"; fail "an interrupted restore suggests a reset"; }
-[ -f "$d/stub-args" ] && fail "the node was started on part of a snapshot"
-out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
-grep -q 'removing it to restore again' <<<"$out" || { echo "$out"; fail "the partial restore was not removed"; }
-grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "no second restore"; }
-[ -f "$d/snapshot.verified" ] || { echo "$out"; fail "second restore not verified"; }
-[ -e "$d/.restore-incomplete" ] && fail "restore marker left"
-pass "interrupted restore redone at the next start"
-fi
-
-# 6c. an older run's log naming the same block with another digest does not count
-d=$(newdata 6c)
-mkdir -p "$d/log"
-echo "[2026-01-01 00:00:00.000000] [info] STATE DIGEST #1000 $(printf 'e%.0s' $(seq 1 64)) wallets 3" > "$d/log/log_1.txt"
-out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
-grep -q 'SNAPSHOT DIGEST MISMATCH' <<<"$out" && { echo "$out"; fail "a stale log line was taken for the start-up digest"; }
-[ -f "$d/snapshot.verified" ] || { echo "$out"; fail "digest not verified with a stale log around"; }
-pass "stale digest lines in old logs are ignored"
+touch "$d/snapshot.mismatch"
+set +e; out=$(run "$d"); rc=$?; set -e
+[ "$rc" = 4 ] || { echo "$out"; fail "start after a mismatch: exit $rc, expected 4"; }
+pass "snapshot.mismatch refused"
 
 # storage changes, on a node with data
 withdata() { local d; d=$(newdata "$1"); run "$d" -e CREDITS_SNAPSHOT=off "${@:2}" >/dev/null; mkdir -p "$d/db/x"; touch "$d/db/x/data"; echo "$d"; }
@@ -180,15 +164,6 @@ out=$(run "$d" -e CREDITS_STORAGE=full -e CREDITS_SNAPSHOT=off)
 grep -q 'warning: CREDITS_STORAGE=full, but config.ini runs a pruned node' <<<"$out" || { echo "$out"; fail ".env warning"; }
 pass ".env differing from config.ini reported"
 
-# 12. a snapshot.json with a block number bash would evaluate: refused, nothing run
-d=$(newdata 12)
-run "$d" -e CREDITS_SNAPSHOT=off >/dev/null
-printf '{"seq": "a[$(touch /data/pwned)]", "state_digest": "%s"}' "$(printf 'a%.0s' $(seq 1 64))" > "$d/snapshot.json"
-set +e; out=$(run "$d"); rc=$?; set -e
-[ "$rc" = 4 ] || { echo "$out"; fail "malicious snapshot.json: exit $rc, expected 4"; }
-[ -e "$d/pwned" ] && fail "malicious snapshot.json ran a command"
-pass "malicious snapshot.json refused"
-
 # 13. backend change without CREDITS_CONVERT_DB: refused, with the hint
 d=$(withdata 13)
 sed -i 's/^db_backend=.*/db_backend=rocksdb/' "$d/config.ini"
@@ -213,12 +188,12 @@ run "$d" >/dev/null
 grep -q -- '--convert-db' "$d/stub-args" && fail "--convert-db passed without CREDITS_CONVERT_DB"
 pass "CREDITS_CONVERT_DB=yes always passes --convert-db, without it never"
 
-# 16. db/.lock alone is no data: the snapshot restore still runs
+# 16. db/.lock alone is no data: the download still runs
 d=$(newdata 16)
 mkdir -p "$d/db"
 touch "$d/db/.lock"
-out=$(run "$d" -e CREDITS_SNAPSHOT_URL=/snap/latest.json -e STUB_SECONDS=8)
-grep -q 'snapshot restored: block 1000' <<<"$out" || { echo "$out"; fail "restore over db/.lock"; }
+run "$d" >/dev/null
+[ -e "$d/stub-download" ] || fail "no download over db/.lock alone"
 pass "db/.lock alone does not count as data"
 
 echo "PASS: entrypoint"
