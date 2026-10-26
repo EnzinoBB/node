@@ -194,6 +194,15 @@ jobs:
       - name: Build
         run: cmake --build build -j"$(sysctl -n hw.ncpu)"
 
+      # a packaged node runs on machines without Homebrew: system libraries only
+      - name: Check linked libraries
+        run: |
+          otool -L build/client/node
+          if otool -L build/client/node | tail -n +2 | grep -vE '^\s+/(usr/lib|System/Library)/'; then
+            echo "the node links a library outside the system" >&2
+            exit 1
+          fi
+
       - name: Test
         working-directory: build
         timeout-minutes: 30
