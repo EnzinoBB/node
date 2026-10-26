@@ -1,0 +1,200 @@
+name: Platform consensus check
+
+# The packages of one Release run on Linux, Windows and macOS (Apple Silicon) each restore the
+# published pruned snapshot with --download-snapshot and sync mainnet up to its head, with the
+# executor running as the packages ship it. Every node logs its state digest each 1000 blocks: the
+# three systems must log the same digests for the same blocks. The Windows and macOS packages are
+# published only after this check has passed (PUBLISH_PLATFORMS in release.yml).
+on:
+  # a platform-sync-* tag checks the latest successful Release run (a manual run needs the workflow
+  # on the default branch)
+  push:
+    tags: ['platform-sync-*']
+  workflow_dispatch:
+    inputs:
+      release_run:
+        description: 'Id of a Release workflow run whose artifacts hold the Linux, Windows and macOS packages (empty = the latest successful one)'
+        default: ''
+      timeout_min:
+        description: 'Minutes each node has to reach the head'
+        default: '180'
+      min_common:
+        description: 'Blocks with a digest from all three systems needed to pass'
+        default: '5'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      run: ${{ steps.run.outputs.run }}
+    steps:
+      - name: Release run
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IN_RUN: ${{ inputs.release_run }}
+        run: |
+          run="$IN_RUN"
+          if [ -z "$run" ]; then
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow release.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+          fi
+          echo "$run" | grep -qE '^[0-9]+$' || { echo "bad run id '$run'"; exit 1; }
+          echo "Release run $run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+  sync:
+    name: Sync (${{ matrix.os }})
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            package: '*-linux-x64.tar.gz'
+            node: ./node
+          - os: windows
+            runner: windows-2022
+            package: '*-windows-x64.zip'
+            node: ./node.exe
+          - os: macos
+            runner: macos-14
+            package: '*-macos-arm64.tar.gz'
+            node: ./node
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init -- third-party/thrift-interface-definitions
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python packages
+        run: python -m pip install --quiet thriftpy2 base58 pynacl
+
+      - name: Download the packages
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ needs.resolve.outputs.run }}
+          github-token: ${{ github.token }}
+          pattern: credits-node-*
+          merge-multiple: true
+          path: packages
+
+      - name: Unpack
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          ls -la packages
+          pkg=$(ls packages/$PACKAGE | grep -v glibc | head -1)
+          test -n "$pkg"
+          echo "package $pkg"
+          case "$pkg" in
+            *.zip) unzip -q "$pkg" ;;
+            *) tar -xzf "$pkg" ;;
+          esac
+          cp csnode/config.pruned.ini csnode/config.ini
+          # the executor of an earlier run on the same machine is not looked for
+          sed -i.bak 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
+          [ "${{ matrix.os }}" != macos ] || xattr -dr com.apple.quarantine csnode 2>/dev/null || true
+          python ci/testnet/gen_keys.py 1 keys >/dev/null
+          cp keys/n1/NodePublic.txt keys/n1/NodePrivate.txt csnode/
+
+      - name: Restore the published snapshot
+        working-directory: csnode
+        run: ${{ matrix.node }} --config-file config.ini --download-snapshot </dev/null
+
+      - name: Sync to the head
+        env:
+          TIMEOUT_MIN: ${{ inputs.timeout_min || '180' }}
+        run: |
+          cd csnode
+          ${{ matrix.node }} --config-file config.ini </dev/null > stdout.log 2>&1 &
+          echo "NODE_PID=$!" >> "$GITHUB_ENV"
+          cd ..
+          python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min "$TIMEOUT_MIN"
+
+      - name: Stop and collect the digests
+        if: always()
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          if [ "$OS" = windows ]; then
+            taskkill //F //IM node.exe >/dev/null 2>&1 || true
+            taskkill //F //IM java.exe >/dev/null 2>&1 || true
+          else
+            [ -z "${NODE_PID:-}" ] || kill -TERM "$NODE_PID" 2>/dev/null || true
+            for _ in $(seq 1 120); do [ -z "${NODE_PID:-}" ] || kill -0 "$NODE_PID" 2>/dev/null || break; sleep 1; done
+            pkill -f '[c]ontract-executor[.]jar' || true
+          fi
+          mkdir -p result
+          cat csnode/log/log_*.txt 2>/dev/null | grep -a "STATE DIGEST #" > "result/digests-$OS.txt" || true
+          cat csnode/log/log_*.txt 2>/dev/null | grep -aE "counted transactions is different|Couldn't save block|is not on this chain|but its caches already hold block|snapshot.verified|snapshot.mismatch" | head -50 > "result/problems-$OS.txt" || true
+          tail -c 2000000 csnode/stdout.log > "result/stdout-$OS.log" 2>/dev/null || true
+          echo "$(wc -l < "result/digests-$OS.txt") digest lines"; tail -3 "result/digests-$OS.txt"
+
+      - name: Upload the digests
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.os }}
+          path: result/
+          retention-days: 30
+
+  compare:
+    name: Compare the digests
+    needs: sync
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: result
+
+      - name: Compare
+        env:
+          MIN_COMMON: ${{ inputs.min_common || '5' }}
+        run: |
+          python3 -I - result "$MIN_COMMON" <<'EOF'
+          import os, re, sys
+          root, need = sys.argv[1], int(sys.argv[2])
+          line = re.compile(r"STATE DIGEST #(\d+) ([0-9A-Fa-f]{64}) wallets (\d+)")
+          seen = {}
+          for os_name in ("linux", "windows", "macos"):
+              d = {}
+              path = os.path.join(root, f"digests-{os_name}.txt")
+              if os.path.exists(path):
+                  for text in open(path, encoding="utf-8", errors="replace"):
+                      m = line.search(text)
+                      if m:
+                          d[int(m.group(1))] = (m.group(2).lower(), int(m.group(3)))   # the last one logged
+              seen[os_name] = d
+              print(f"{os_name}: {len(d)} blocks with a digest" + (f", {min(d)}..{max(d)}" if d else ""))
+          bad = 0
+          for seq in sorted(set().union(*seen.values())):
+              values = {o: d[seq] for o, d in seen.items() if seq in d}
+              if len(set(values.values())) > 1:
+                  bad += 1
+                  print(f"MISMATCH at block {seq}: {values}")
+          common = set.intersection(*(set(d) for d in seen.values()))
+          print(f"{len(common)} blocks with a digest from all three systems, {bad} mismatches")
+          if bad or len(common) < need:
+              sys.exit(1)
+          print("the three systems agree")
+          EOF
