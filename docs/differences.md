@@ -225,7 +225,8 @@ rounds for both).
 
 ## Packages and Docker
 
-- **Release packages.** Each release has full and pruned packages, in two builds:
+- **Release packages.** Each release has one package for full and pruned storage (until
+  community.13, a full and a pruned package), in two builds:
   - `linux-x64` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
   - `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later.
 
@@ -239,7 +240,8 @@ rounds for both).
     (`skip block validation`) and stored, instead of stopping the node at it for good. See
     "Contract states while syncing";
   - `sync_contract_execution=true` (the default), with a comment;
-  - the pruned package adds a `[storage]` section.
+  - next to it, `config.pruned.ini` is the same file with a `[storage]` section for pruned storage
+    on LMDB: `./node --config-file config.pruned.ini`.
 
   The executor listens on 127.0.0.1 only.
 - **Known hosts.** `known_hosts.txt` is refreshed weekly from a verified list of seed nodes.
