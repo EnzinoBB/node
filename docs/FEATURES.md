@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Items marked *(next release)* are merged and not yet in a published release.
+Everything listed here is in release 4.2.532-community.13 or earlier.
 
 ## Storage
 
@@ -40,12 +40,14 @@ Items marked *(next release)* are merged and not yet in a published release.
 - **Published snapshot, downloaded on request.** A snapshot of mainnet is published every 12 hours;
   `--download-snapshot` downloads and restores it.
   [#41](https://github.com/EnzinoBB/node/pull/41), [#107](https://github.com/EnzinoBB/node/pull/107)
-  *(next release)*, [#108](https://github.com/EnzinoBB/node/pull/108) *(next release)*
-- **Snapshots shared between nodes over p2p** *(next release)*. Community nodes serve snapshots of
+ , [#108](https://github.com/EnzinoBB/node/pull/108)
+- **Snapshots shared between nodes over p2p.** Community nodes serve snapshots of
   their checkpoints to their neighbours, within bandwidth limits (halved while they are confidants).
   A new node with an empty database fetches one from several independent neighbours that agree on
   it, checks every piece against the signed manifest, imports it and joins, with no central server;
-  without agreement it falls back to syncing from block 0.
+  without agreement it falls back to syncing from block 0. Stress tests with four nodes joining at
+  once, packet loss and a slow confidant kept the block rate and the round time of the serving
+  confidants within a few percent.
   [#99](https://github.com/EnzinoBB/node/pull/99), [#100](https://github.com/EnzinoBB/node/pull/100),
   [#101](https://github.com/EnzinoBB/node/pull/101), [#102](https://github.com/EnzinoBB/node/pull/102),
   [#104](https://github.com/EnzinoBB/node/pull/104), [#105](https://github.com/EnzinoBB/node/pull/105),
@@ -117,7 +119,7 @@ the storage engines (a full disk, a failed write) that hung or stopped the node.
   published snapshot (or fetches one from its neighbours), the node serves snapshots, and a database
   conversion is one variable.
   [#41](https://github.com/EnzinoBB/node/pull/41), [#51](https://github.com/EnzinoBB/node/pull/51),
-  [#109](https://github.com/EnzinoBB/node/pull/109) *(next release)*
+  [#109](https://github.com/EnzinoBB/node/pull/109)
 - **Drop-in upgrade.** An official node's folder upgrades to the community node and back.
   [#43](https://github.com/EnzinoBB/node/pull/43), [#44](https://github.com/EnzinoBB/node/pull/44)
 
