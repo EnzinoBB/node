@@ -1693,13 +1693,19 @@ if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
     wait "${PIDS[$observer]}" 2>/dev/null || true
     [ -f "$WORK/n$observer/known_peers.json" ] || { echo "FAIL: n$observer wrote no known_peers.json"; exit 1; }
     serving=""
-    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do serving="$serving ${KEYS[$((i - 1))]}"; done
-    python3 - "$WORK/n$observer/known_peers.json" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
+    late=""
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        # a late serving node announced the capability only at its restart, and peers keep the value
+        # they first saw (the routing table is not refreshed, design 4.1, plan P9): either value is fine
+        if [[ ",$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]]; then late="$late,${KEYS[$((i - 1))]}"; else serving="$serving ${KEYS[$((i - 1))]}"; fi
+    done
+    python3 - "$WORK/n$observer/known_peers.json" "$late" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
 import json, sys
 peers = {p["id"]: p for p in json.load(open(sys.argv[1]))}
-serving = set(sys.argv[2:])
+late = set(k for k in sys.argv[2].split(",") if k)
+serving = set(sys.argv[3:])
 bad = [k for k in serving if peers.get(k, {}).get("capabilities") != 1]
-extra = [k for k, p in peers.items() if k not in serving and p["capabilities"] != 0]
+extra = [k for k, p in peers.items() if k not in serving and k not in late and p["capabilities"] != 0]
 community = sum(1 for p in peers.values() if p["minor"] > 0)
 print(f"capabilities: {len(peers)} known peers, {len(serving) - len(bad)} of {len(serving)} serving nodes announce snapshots, "
       f"{len(extra)} others do, {community} announce a community version")
