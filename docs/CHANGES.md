@@ -20,6 +20,9 @@ lines under the new release.
 - **Safety fixes.** Remote crashes and out-of-bounds reads in network and block parsing are fixed,
   and so are races in the smart-contract solver. Quick-start checkpoints are checked against the
   chain, and governance state now survives a quick start.
+- **Snapshots.** A node builds, verifies and restores signed snapshots itself, downloads the one
+  published on GitHub on request, and shares snapshots with its p2p neighbours, so that a new node
+  starts in minutes from several independent sources. See [snapshots.md](snapshots.md).
 - **Wallet state digest.** A digest of all wallet state, logged every 1000 blocks, lets different
   nodes and builds compare their state.
 - **Continuous integration.**
@@ -31,6 +34,10 @@ lines under the new release.
   - release packages and the Docker image.
 
 ## Not released yet
+
+Nothing yet.
+
+## community.13 — 2026-10-26
 
 | PR | Change |
 |---|---|
@@ -45,6 +52,21 @@ lines under the new release.
 | #107 | client: `--download-snapshot [url]` downloads a published format-2 snapshot with `curl` (no shell, http(s) only, resumable), checks every file against the signed manifest and restores it; scenarios `snapshot-download` and `snapshot-download-corrupt` |
 | #108 | ci(snapshot): the 12-hour snapshot workflow also publishes format 2 (the node's `--export-snapshot` of its latest periodic checkpoint: `snapshot.json` and its files as `s<seq>-<name>`, the 3 newest sequences), checked file by file before upload; format 1 stays for one release; `publish=false` for a test run |
 | #109 | docker: `CREDITS_SNAPSHOT=github|p2p|off` (default github; the old `auto` still works): a pruned node's first start runs `node --download-snapshot` explicitly, then starts whatever the result (the node then tries its neighbours, then block 0); `[snapshot] serve=on` by default (`CREDITS_SERVE_SNAPSHOT`), `CREDITS_SNAPSHOT_MIN_SOURCES`; the restore script and the digest wait of the entrypoint are gone (the node verifies the snapshot itself); an old `latest.json` address points to the format-2 `snapshot.json` next to it |
+| #110 | ci: stress scenarios for the confidants that serve snapshots (four nodes joining at once, a kill during the fetch and the import, a 2 Mbit/s link or 5 % loss on a serving confidant and a joiner, contracts running): the block rate and the round times while serving are compared with the same window before the joins (`STRESS_WINDOW`, at most 10 % / 20 % worse); `JOIN_EXTRA`, `NET_FAULT=rate` |
+
+Snapshots shared between nodes (#99–#110): a community node with `serve=on` builds a snapshot of
+each periodic checkpoint and serves it to its p2p neighbours; a new node with an empty LMDB or
+RocksDB database fetches one from several independent neighbours that agree on it, checks every
+piece against the signed manifest, imports it and joins, and falls back to syncing from block 0
+without agreement (`fetch_wait`, 10 minutes). `--download-snapshot` restores the snapshot published
+on GitHub, now also in format 2 (#107, #108); the Docker image calls it on a pruned node's first
+start and serves snapshots by default (#109). Serving does not slow the consensus down measurably:
+the stress runs (#110) kept the block rate within 3–9 % and the round time within 3 % with four
+nodes joining at once, a killed join, packet loss and a slow confidant. New p2p messages are
+ignored by official nodes; the CI now runs official 4.2.532 nodes in its test networks (#103).
+Until community nodes serving snapshots exist on mainnet, a new LMDB or RocksDB node started with
+the default `fetch=auto` waits `fetch_wait` before syncing from block 0; the packaged and Docker
+first starts download the GitHub snapshot instead.
 
 ## community.12 — 2026-10-24
 

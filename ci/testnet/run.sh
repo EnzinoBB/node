@@ -57,7 +57,14 @@
 #        order 9 across a quick start): official behaviour, so restarts after DPOS_AT are refused for
 #        even nodes
 #        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
-#        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
+#        JOIN_EXTRA (default 0, with JOIN_FETCH=p2p): that many more joining nodes, started with the first
+#        one and configured like it; each must start from a snapshot (or fall back as JOIN_EXPECT says)
+#        and reach the target. STRESS_WINDOW (seconds, default 0 = off): the block rate and the round
+#        times of n1 in that many seconds before the joins and after they started are compared; the
+#        run fails when the rate falls by more than 10 % or the 95th percentile of the round time rises
+#        by more than 20 %
+#        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate, partition,
+#        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
 #        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up
@@ -287,13 +294,23 @@ HASHDB_DAMAGE_NODE=${HASHDB_DAMAGE_NODE:-3}
 HASHDB_DAMAGE=${HASHDB_DAMAGE:-zero}
 MDB_COPY=${MDB_COPY:-$REPO/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
-ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
+JOIN_EXTRA=${JOIN_EXTRA:-0}
+[ "$JOIN_EXTRA" -eq 0 ] || [ "$JOIN_FETCH" = p2p ] || { echo "JOIN_EXTRA needs JOIN_FETCH=p2p"; exit 1; }
+# the even nodes run BIN_ALT: a second joining node would be one of them
+[ "$JOIN_EXTRA" -eq 0 ] || [ -z "$BIN_ALT" ] || { echo "FAIL: JOIN_EXTRA with BIN_ALT: the even joining nodes would run BIN_ALT"; exit 1; }
+ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo $((JOIN_NODE + JOIN_EXTRA)) || echo "$NODES")
+# the joining nodes: the first one and the JOIN_EXTRA others after it
+is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
+EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
+STRESS_WINDOW=${STRESS_WINDOW:-0}
 declare -a STORE_BACKEND STORE_PRUNED
 if [ -n "$NODE_STORAGE" ]; then
     IFS=, read -r -a entries <<<"$NODE_STORAGE"
-    [ "${#entries[@]}" -eq "$ALL_NODES" ] || { echo "NODE_STORAGE needs $ALL_NODES entries, has ${#entries[@]}"; exit 1; }
+    # the other joining nodes (JOIN_EXTRA) take the first one's entry
+    listed=$((ALL_NODES - JOIN_EXTRA))
+    [ "${#entries[@]}" -eq "$listed" ] || { echo "NODE_STORAGE needs $listed entries, has ${#entries[@]}"; exit 1; }
     for i in $(seq 1 "$ALL_NODES"); do
-        e=${entries[$((i - 1))]}
+        e=${entries[$(( (i > listed ? listed : i) - 1 ))]}
         [[ "$e" =~ ^(berkeleydb|lmdb|rocksdb)(:pruned)?$ ]] || { echo "bad NODE_STORAGE entry '$e'"; exit 1; }
         STORE_BACKEND[$i]=${e%%:*}
         STORE_PRUNED[$i]=$([ "$e" != "${e%:pruned}" ] && echo 1 || echo 0)
@@ -301,7 +318,7 @@ if [ -n "$NODE_STORAGE" ]; then
 fi
 # every node with pruned storage: the PRUNE_NODE, the joining node, and those of NODE_STORAGE
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
-    if [ "$i" -eq "$PRUNE_NODE" ] || { [ "$i" -eq "$JOIN_NODE" ] && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
+    if [ "$i" -eq "$PRUNE_NODE" ] || { is_joiner "$i" && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
@@ -329,6 +346,7 @@ case "$NET_FAULT" in
     reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50% duplicate 5%" ;;
     duplicate) NETEM="duplicate ${NET_FAULT_PCT}%" ;;
     partition) NETEM="loss 100%" ;;
+    rate) NETEM="rate ${NET_FAULT_RATE:-2mbit}" ;;
     *) echo "bad NET_FAULT '$NET_FAULT'"; exit 1 ;;
 esac
 [ -z "$NET_FAULT" ] || [ -n "$NET_FAULT_NODES" ] || { echo "NET_FAULT needs NET_FAULT_NODES"; exit 1; }
@@ -457,7 +475,9 @@ storage_section() {
         *) backend=$DB_BACKEND ;;
     esac
     if [ -n "$NODE_STORAGE" ]; then
-        backend=${STORE_BACKEND[$i]}
+        backend=${STORE_BACKEND[$i]:-}
+        # the other joining nodes, past the list: as the first one
+        if [ -z "$backend" ] && is_joiner "$i"; then backend=${STORE_BACKEND[$JOIN_NODE]:-}; fi
     fi
     if [[ " $PRUNED_NODES " == *" $i "* ]]; then
         [ -z "$NODE_STORAGE" ] && { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
@@ -490,7 +510,7 @@ snapshot_section() {
     local i=$1
     official_node "$i" && return 0
     printf "\n[snapshot]\n"
-    if [ "$JOIN_FETCH" = p2p ] && [ "$i" -eq "$JOIN_NODE" ]; then
+    if [ "$JOIN_FETCH" = p2p ] && is_joiner "$i"; then
         printf "fetch=auto\nmin_sources=%s\nfetch_wait=%s\nfetch_fallback=%s\n" "$JOIN_MIN_SOURCES" "$JOIN_WAIT" "$JOIN_FALLBACK"
         [ "$JOIN_FETCH_RATE" -eq 0 ] || printf "fetch_rate_kbps=%s\n" "$JOIN_FETCH_RATE"
         if [ "$JOIN_SOURCES" = keys ]; then
@@ -780,6 +800,12 @@ while :; do
     if [ "$JOIN_NODE" -gt 0 ] && [ -n "${PIDS[$JOIN_NODE]:-}" ]; then
         join_seq=$(seq_of "$JOIN_NODE"); join_seq=${join_seq:-0}
         line+=" n$JOIN_NODE=$join_seq(joined)"
+        # the lowest of all joining nodes counts for the target
+        for i in $EXTRA_JOINERS; do
+            s=$(seq_of "$i"); s=${s:-0}
+            line+=" n$i=$s(joined)"
+            [ "$s" -ge "$join_seq" ] || join_seq=$s
+        done
     fi
     echo "$line"
     echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
@@ -791,6 +817,10 @@ while :; do
             echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
         fi
         start_node "$JOIN_NODE"
+        for i in $EXTRA_JOINERS; do
+            echo "join test: n$i starts on an empty database at the same time"
+            start_node "$i"
+        done
         join_started=$(date +%s)
         if [ "$JOIN_KILL_DURING_FETCH" = 1 ]; then
             # the joiner's fetch and import take seconds: a watcher kills it at those lines (node.log
@@ -846,6 +876,14 @@ while :; do
         { grep -a 'SNAPSHOT' "$WORK/n$JOIN_NODE/node.log" || true; } | tail -40
         exit 1
     fi
+    for i in $EXTRA_JOINERS; do
+        if [ -n "${PIDS[$i]:-}" ] && ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
+            echo "FAIL: n$i exited with status $status while joining"
+            { grep -a 'SNAPSHOT' "$WORK/n$i/node.log" || true; } | tail -40
+            exit 1
+        fi
+    done
 
     # repeated SIGKILL of one node: odd kills right after it saves a checkpoint, even ones at any moment
     if [ "$CRASH_NODE" -gt 0 ] && [ "$crashes" -lt "$CRASH_TIMES" ] && [ "$min" -ge "$CRASH_FROM" ] \
@@ -1644,6 +1682,64 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# the other joining nodes: each started from a snapshot (or fell back, as JOIN_EXPECT says)
+for i in $EXTRA_JOINERS; do
+    log_i="$WORK/n$i/node.log"
+    if [ "$JOIN_EXPECT" = fallback ]; then
+        grep -aq 'SNAPSHOT: started with an empty database after' "$log_i" || { echo "FAIL: n$i did not fall back to block 0"; exit 1; }
+    else
+        grep -aq 'SNAPSHOT: started from block ' "$log_i" || { echo "FAIL: n$i did not start from a snapshot"; { grep -a 'SNAPSHOT' "$log_i" || true; } | tail -20; exit 1; }
+        grep -aq 'SNAPSHOT: snapshot.json verified' "$log_i" || { echo "FAIL: n$i did not verify its snapshot"; exit 1; }
+    fi
+    [ ! -e "$WORK/n$i/snapshot.mismatch" ] || { echo "FAIL: n$i has snapshot.mismatch"; exit 1; }
+    echo "p2p join: n$i $({ grep -a -m1 'SNAPSHOT: started' "$log_i" || true; } | sed 's/.*SNAPSHOT: //' | cut -c1-120)"
+done
+
+# the consensus while the snapshots are served: n1's block rate and round times in the same number of
+# seconds before the joins and after they started
+if [ "$STRESS_WINDOW" -gt 0 ] && [ -n "${join_started:-}" ]; then
+    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
+import re, sys, datetime
+log, start, window = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
+def t(line):
+    m = stamp.match(line)
+    return datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() if m else None
+rounds, seqs = [], []
+for line in open(log, errors="replace"):
+    if " R-" in line and "=====" in line:
+        x = t(line)
+        if x is not None:
+            rounds.append(x)
+    elif "Last written sequence = " in line:
+        x = t(line)
+        m = re.search(r"Last written sequence = ([0-9']+)", line)
+        if x is not None and m:
+            seqs.append((x, int(m.group(1).replace("'", ""))))
+def window_stats(a, b):
+    r = [y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b]
+    s = [q for x, q in seqs if a <= x < b]
+    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    r.sort()
+    p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
+    return rate, p95, len(r)
+base = window_stats(start - window, start)
+load = window_stats(start, start + window)
+print(f"consensus: before the joins {base[0]:.2f} blocks/s, round p95 {base[1]:.2f} s ({base[2]} rounds); "
+      f"while serving {load[0]:.2f} blocks/s, round p95 {load[1]:.2f} s ({load[2]} rounds)")
+ok = base[2] > 10 and load[2] > 10
+if not ok:
+    print("FAIL: too few rounds in a window to compare")
+elif load[0] < 0.9 * base[0]:
+    print(f"FAIL: block rate fell by {100 * (1 - load[0] / base[0]):.0f} % (10 % allowed)")
+    ok = False
+elif load[1] > 1.2 * base[1]:
+    print(f"FAIL: round time p95 rose by {100 * (load[1] / base[1] - 1):.0f} % (20 % allowed)")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+
 # official nodes: the same block hashes as n1 (every 100th sequence up to the lowest head)
 if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     ports=""
@@ -1654,7 +1750,7 @@ if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
         if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
     done
     # pruned nodes, and a node that joined from a snapshot, lack the oldest blocks
-    partial=$(for i in $PRUNED_NODES $({ [ "$JOIN_FETCH" = p2p ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo "$JOIN_NODE"); do echo "$i"; done | sort -u | paste -sd, -)
+    partial=$(for i in $PRUNED_NODES $({ [ "$JOIN_FETCH" = p2p ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo "$JOIN_NODE" $EXTRA_JOINERS); do echo "$i"; done | sort -u | paste -sd, -)
     (cd "$HERE" && python3 blockhashes.py --head "$head" --partial "$partial" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
 fi
 
