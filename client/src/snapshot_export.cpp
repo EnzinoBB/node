@@ -225,10 +225,10 @@ std::string findCurl() {
 // runs curl with these arguments, no shell in between; its exit code, or -1 when it did not run
 int runCurl(const std::string& curl, const std::vector<std::string>& args) {
     std::vector<std::string> all;
-    // -q first: no ~/.curlrc; only http(s), also through redirects
+    // -q first: no ~/.curlrc; https only, also through redirects (http only to this machine, for tests)
     all.push_back(curl);
     all.push_back("-q");
-    all.insert(all.end(), {"--proto", "=https,http", "--proto-redir", "=https,http"});
+    all.insert(all.end(), {"--proto", "=https,http", "--proto-redir", "=https"});
     all.insert(all.end(), args.begin(), args.end());
     std::vector<char*> argv;
     for (auto& a : all) {
@@ -282,8 +282,12 @@ std::string fileSha256(const fs::path& file) {
 int runDownload(const Config& config, const std::string& urlArg) {
     auto say = []() -> std::ostream& { return std::cout << "download-snapshot: "; };
     const std::string url = urlArg.empty() ? kDefaultSnapshotUrl : urlArg;
-    if ((url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0) || url.find_first_of(" \t\r\n") != std::string::npos) {
-        say() << "not an http(s) address: " << url << std::endl;
+    // the manifest is signed by the key of the node that built it, which proves its consistency, not
+    // who published it: the trust is the https address (by default the project's release page), so
+    // plain http only to this machine (tests)
+    const bool local = url.rfind("http://127.0.0.1", 0) == 0 || url.rfind("http://localhost", 0) == 0;
+    if ((url.rfind("https://", 0) != 0 && !local) || url.find_first_of(" \t\r\n") != std::string::npos) {
+        say() << "not an https address: " << url << std::endl;
         return 2;
     }
     const std::string dbPath = config.getPathToDB();
@@ -352,7 +356,9 @@ int runDownload(const Config& config, const std::string& urlArg) {
         }
         const std::string fileUrl = base + "s" + std::to_string(manifest->seq) + "-" + f.name;
         say() << f.name << ": " << f.size / 1024 << " KB from " << fileUrl << std::endl;
-        if (const int rc = runCurl(curl, {"-fL", "-sS", "-C", "-", "--max-time", "3600", "--retry", "3", "-o", target.string(), fileUrl}); rc != 0) {
+        // never more than the manifest declares
+        if (const int rc = runCurl(curl, {"-fL", "-sS", "-C", "-", "--max-time", "3600", "--retry", "3", "--max-filesize",
+                                          std::to_string(f.size), "-o", target.string(), fileUrl}); rc != 0) {
             say() << f.name << ": download failed (curl exit " << rc << "); run it again to resume" << std::endl;
             return 2;
         }

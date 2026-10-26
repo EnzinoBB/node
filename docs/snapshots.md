@@ -81,7 +81,9 @@ its first start.
 `./node --download-snapshot` (in the node's folder, node stopped, empty database) downloads the
 snapshot published on GitHub every 12 hours with `curl`, checks every file against its manifest and
 restores it; `./node --download-snapshot <url>/snapshot.json` takes another one laid out the same
-way (the files next to the manifest as `s<block>-<name>`). It exits 0 when restored, 2 otherwise;
+way (the files next to the manifest as `s<block>-<name>`, https only). The manifest's signature
+proves that the files are those its builder packaged, not who that builder is: the trust is the
+https address, so give another address only when you trust whoever publishes there. It exits 0 when restored, 2 otherwise;
 a download that stops is resumed by running it again (`snapshot-download/`). The node's normal
 start never downloads from GitHub.
 
