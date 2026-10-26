@@ -301,14 +301,16 @@ JOIN_EXTRA=${JOIN_EXTRA:-0}
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo $((JOIN_NODE + JOIN_EXTRA)) || echo "$NODES")
 # the joining nodes: the first one and the JOIN_EXTRA others after it
 is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
-EXTRA_JOINERS=$([ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr '\n' ' ')
+EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
 declare -a STORE_BACKEND STORE_PRUNED
 if [ -n "$NODE_STORAGE" ]; then
     IFS=, read -r -a entries <<<"$NODE_STORAGE"
-    [ "${#entries[@]}" -eq "$ALL_NODES" ] || { echo "NODE_STORAGE needs $ALL_NODES entries, has ${#entries[@]}"; exit 1; }
+    # the other joining nodes (JOIN_EXTRA) take the first one's entry
+    listed=$((ALL_NODES - JOIN_EXTRA))
+    [ "${#entries[@]}" -eq "$listed" ] || { echo "NODE_STORAGE needs $listed entries, has ${#entries[@]}"; exit 1; }
     for i in $(seq 1 "$ALL_NODES"); do
-        e=${entries[$((i - 1))]}
+        e=${entries[$(( (i > listed ? listed : i) - 1 ))]}
         [[ "$e" =~ ^(berkeleydb|lmdb|rocksdb)(:pruned)?$ ]] || { echo "bad NODE_STORAGE entry '$e'"; exit 1; }
         STORE_BACKEND[$i]=${e%%:*}
         STORE_PRUNED[$i]=$([ "$e" != "${e%:pruned}" ] && echo 1 || echo 0)
