@@ -80,6 +80,7 @@ jobs:
             -DENABLE_TESTS=ON \
             -DBoost_ROOT="C:/boost" \
             -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DWITH_HASKELL=OFF
 
       - name: Build
@@ -158,6 +159,7 @@ jobs:
             -DBoost_ROOT="${BOOST_PREFIX}" \
             -DBoost_NO_SYSTEM_PATHS=ON \
             -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DWITH_HASKELL=OFF
 
       - name: Build
