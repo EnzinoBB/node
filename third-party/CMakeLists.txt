@@ -51,7 +51,9 @@ if(_csdb_need_rocksdb)
     if(APPLE)
         set(lz4_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/lz4" CACHE PATH "" FORCE)
         set(lz4_LIBRARIES lz4 CACHE STRING "" FORCE)
-        add_library(lz4::lz4 ALIAS lz4)
+        # imported, so that rocksdb's install(EXPORT) does not ask for lz4 in an export set
+        add_library(lz4::lz4 INTERFACE IMPORTED GLOBAL)
+        set_target_properties(lz4::lz4 PROPERTIES INTERFACE_LINK_LIBRARIES lz4)
     endif()
 
     # rocksdb env_win.cc needs Win8+ (FILE_ID_INFO); shadow project's 0x0601.
