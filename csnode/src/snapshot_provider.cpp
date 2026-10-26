@@ -364,6 +364,16 @@ snapshot_p2p::PieceReply SnapshotProvider::onPieceRequest(const cs::PublicKey& s
             onPeerCompleted(sender, p.seq, p.bytes, std::chrono::duration_cast<std::chrono::seconds>(now - p.firstPiece));
         }
     }
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-corrupt-pieces makes this node flip a byte of every third
+    // piece it serves (ci/testnet/run.sh CORRUPT_NODE): the manifest's chunk hash is right, the bytes
+    // are not
+    static const bool corrupt = static_cast<bool>(std::ifstream("testnet-corrupt-pieces"));
+    static uint64_t served = 0;
+    if (corrupt && ++served % 3 == 0 && !reply.data.empty()) {
+        reply.data[reply.data.size() / 2] ^= 0x5a;
+    }
+#endif
     reply.status = PieceStatus::Ok;
     return reply;
 }

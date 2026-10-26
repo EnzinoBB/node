@@ -326,6 +326,34 @@ jobs:
           - name: snapshot-p2p-fallback
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb SNAPSHOT_SERVE_NODES=3 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=2 JOIN_WAIT=60 JOIN_FALLBACK=sync JOIN_EXPECT=fallback TARGET_SEQ=3300
             fixed: true
+          # two serving nodes, a third one (n7) starts serving later: the joiner waits (fetch_fallback=wait).
+          # Manual until plan P9: peers keep the capability bit they first saw for n7 (the p2p routing
+          # table is not refreshed), so the joiner finds n7 only through snapshot_sources.txt (-wait-file)
+          - name: snapshot-p2p-wait
+            manual: true
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5 SNAPSHOT_LATE_SERVE_NODES=7 JOIN_MIN_SOURCES=3 JOIN_WAIT=60 JOIN_FALLBACK=wait TARGET_SEQ=3300
+            fixed: true
+          # the same with the serving nodes listed in the joiner's snapshot_sources.txt
+          - name: snapshot-p2p-wait-file
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5 SNAPSHOT_LATE_SERVE_NODES=7 JOIN_SOURCES=file JOIN_MIN_SOURCES=3 JOIN_WAIT=60 JOIN_FALLBACK=wait TARGET_SEQ=3300
+            fixed: true
+          # the joiner killed during its fetch and during its import: it cleans up and joins
+          - name: snapshot-p2p-dropped
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5,7 JOIN_MIN_SOURCES=3 JOIN_FETCH_RATE=100 JOIN_KILL_DURING_FETCH=1 TARGET_SEQ=3300
+            fixed: true
+          # n7 declares a forged digest, n5 serves corrupt pieces: the honest majority wins, n5 is dropped
+          - name: snapshot-p2p-forged
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=1,3,5,7 FORGE_NODE=7 CORRUPT_NODE=5 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # every node on 127.0.0.1 (one /24): only the serving nodes trusted by key make up min_sources
+          - name: snapshot-p2p-sources
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5,7 JOIN_SOURCES=keys JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # a join while contracts run
+          - name: snapshot-p2p-contracts
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5,7 JOIN_MIN_SOURCES=3 CONTRACTS=1 CONTRACTS_AFTER_AT=2400 TARGET_SEQ=3300
+            fixed: true
+            contracts: true
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
           - name: storage-switch
             official: 'no'   # needs a feature of this fork on an even node

@@ -47,6 +47,8 @@ quick-starts after a conversion.
 
 ### Snapshots built and restored by the node
 
+What an operator sees and sets is in [snapshots.md](snapshots.md).
+
 - `--export-snapshot <dir>`, on a stopped node of any backend, pruned or full, builds a snapshot
   of its latest periodic checkpoint: the checkpoint files, the blocks before it as a hash chain
   ending at the checkpoint's block, and the contract data, compressed, with a SHA-256 for every
