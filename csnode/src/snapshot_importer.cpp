@@ -4,9 +4,9 @@
 #include <fstream>
 #include <vector>
 
-#include <fcntl.h>
 #include <sodium.h>
-#include <unistd.h>
+
+#include <lib/system/platform.hpp>
 
 #include <csdb/database.hpp>
 #include <csdb/storage_backend.hpp>
@@ -74,11 +74,7 @@ bool fileMatches(const fs::path& path, const SnapshotFile& f, uint64_t chunkSize
 
 // on disk before the next step relies on it: a power cut must not leave a truncated checkpoint
 void syncPath(const fs::path& path, bool directory) {
-    const int fd = ::open(path.c_str(), directory ? O_RDONLY | O_DIRECTORY : O_RDONLY);
-    if (fd >= 0) {
-        ::fsync(fd);
-        ::close(fd);
-    }
+    cs::platform::syncPath(path, directory);
 }
 
 bool stopped(const std::atomic<bool>* stop) {

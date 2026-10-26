@@ -11,11 +11,6 @@
 #include <sstream>
 #include <vector>
 
-#include <spawn.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
-#include <unistd.h>
-
 #include <sodium.h>
 
 #include <config.hpp>
@@ -23,6 +18,7 @@
 
 #include <csdb/database.hpp>
 #include <csdb/storage_backend.hpp>
+#include <lib/system/platform.hpp>
 #include <csnode/snapshot_bootstrap.hpp>
 #include <csnode/snapshot_builder.hpp>
 #include <csnode/snapshot_importer.hpp>
@@ -210,16 +206,7 @@ int runImport(const Config& config, const std::string& manifestFile) {
 namespace {
 // curl on the PATH, as an executable file; empty when there is none
 std::string findCurl() {
-    const char* path = std::getenv("PATH");
-    std::stringstream dirs(path ? path : "");
-    std::string dir;
-    while (std::getline(dirs, dir, ':')) {
-        const std::string candidate = (dir.empty() ? std::string(".") : dir) + "/curl";
-        if (::access(candidate.c_str(), X_OK) == 0) {
-            return candidate;
-        }
-    }
-    return {};
+    return cs::platform::findExecutable("curl");
 }
 
 // runs curl with these arguments, no shell in between; its exit code, or -1 when it did not run
@@ -230,22 +217,7 @@ int runCurl(const std::string& curl, const std::vector<std::string>& args) {
     all.push_back("-q");
     all.insert(all.end(), {"--proto", "=https,http", "--proto-redir", "=https"});
     all.insert(all.end(), args.begin(), args.end());
-    std::vector<char*> argv;
-    for (auto& a : all) {
-        argv.push_back(a.data());
-    }
-    argv.push_back(nullptr);
-    pid_t pid = 0;
-    if (::posix_spawn(&pid, curl.c_str(), nullptr, nullptr, argv.data(), ::environ) != 0) {
-        return -1;
-    }
-    int status = 0;
-    while (::waitpid(pid, &status, 0) < 0) {
-        if (errno != EINTR) {
-            return -1;
-        }
-    }
-    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    return cs::platform::runProcess(all);
 }
 
 // SHA-256 of a whole file in hex, empty when it cannot be read

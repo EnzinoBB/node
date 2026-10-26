@@ -5,9 +5,7 @@
 #include <fstream>
 #include <sstream>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <lib/system/platform.hpp>
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -65,33 +63,8 @@ std::string jsonEscape(const std::string& s) {
 }
 
 // a small file written in full or not at all, readable by the owner only
-bool writeFile(const fs::path& path, const std::string& content, mode_t mode = 0644) {
-    const fs::path tmp = path.string() + ".tmp";
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, mode);
-    if (fd < 0) {
-        return false;
-    }
-    size_t done = 0;
-    while (done < content.size()) {
-        const auto n = ::write(fd, content.data() + done, content.size() - done);
-        if (n <= 0) {
-            ::close(fd);
-            std::error_code ec;
-            fs::remove(tmp, ec);
-            return false;
-        }
-        done += static_cast<size_t>(n);
-    }
-    ::fchmod(fd, mode);
-    ::fsync(fd);
-    ::close(fd);
-    std::error_code ec;
-    fs::rename(tmp, path, ec);
-    if (ec) {
-        fs::remove(tmp, ec);
-        return false;
-    }
-    return true;
+bool writeFile(const fs::path& path, const std::string& content, unsigned mode = 0644) {
+    return cs::platform::writeFileAtomically(path, content, mode, true);
 }
 
 }  // namespace

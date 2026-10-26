@@ -164,7 +164,7 @@ private:
         size_t missing = 0;           // chunks not on disk yet
         uint64_t doneBytes = 0;
         std::map<uint32_t, InFlight> inFlight;
-        int fd = -1;
+        intptr_t fd = -1;   // a cs::platform::Handle (-1: none)
         bool verifyPending = false;
         bool verified = false;
         std::shared_ptr<HashState> hashing;   // whole-file SHA-256 in progress, kHashBytesPerTick per tick

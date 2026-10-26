@@ -5,8 +5,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
-#include <fcntl.h>
-#include <unistd.h>
+#include <lib/system/platform.hpp>
 
 #if defined(CSDB_USE_ROCKSDB) && defined(CSDB_USE_BERKELEYDB)
 #include <csdb/database_berkeleydb.hpp>
@@ -47,12 +46,7 @@ bool hasBlocks(const std::string& name, const std::string& dir) {
 }
 
 bool syncWrite(const fs::path& path, const std::string& text) {
-    const auto tmp = path.string() + ".tmp";
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-    bool ok = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size()) && ::fsync(fd) == 0;
-    ::close(fd);
-    return ok && std::rename(tmp.c_str(), path.c_str()) == 0;
+    return cs::platform::writeFileAtomically(path, text);
 }
 }  // namespace
 

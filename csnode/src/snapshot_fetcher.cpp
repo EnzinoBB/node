@@ -7,9 +7,7 @@
 #include <fstream>
 #include <sstream>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <lib/system/platform.hpp>
 
 #include <base58.h>
 #include <sodium.h>
@@ -751,7 +749,7 @@ bool SnapshotFetcher::chooseTarget(uint64_t t) {
 }
 
 bool SnapshotFetcher::openFile(FileState& f, bool truncate) {
-    if (f.fd >= 0) {
+    if (f.fd != -1) {
         return true;
     }
     // the name comes from a manifest fromJson accepted, so it is one of the snapshot's fixed file
@@ -762,11 +760,12 @@ bool SnapshotFetcher::openFile(FileState& f, bool truncate) {
     std::error_code ec;
     fs::create_directories(tmpDir_, ec);
     const auto path = tmpDir_ / f.file.name;
-    f.fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW | (truncate ? O_TRUNC : 0), 0600);
-    if (f.fd < 0) {
+    const auto h = cs::platform::openFile(path, cs::platform::Open::ReadWrite, true, 0600);
+    if (!cs::platform::valid(h)) {
         return false;
     }
-    if (::ftruncate(f.fd, static_cast<off_t>(f.file.size)) != 0) {
+    f.fd = cs::platform::toInt(h);
+    if ((truncate && !cs::platform::resize(h, 0)) || !cs::platform::resize(h, f.file.size)) {
         closeFile(f);
         return false;
     }
@@ -774,8 +773,8 @@ bool SnapshotFetcher::openFile(FileState& f, bool truncate) {
 }
 
 void SnapshotFetcher::closeFile(FileState& f) {
-    if (f.fd >= 0) {
-        ::close(f.fd);
+    if (f.fd != -1) {
+        cs::platform::closeFile(cs::platform::fromInt(f.fd));
         f.fd = -1;
     }
 }
@@ -952,7 +951,7 @@ void SnapshotFetcher::onPieceReply(const cs::PublicKey& sender, snapshot_p2p::Pi
             const uint64_t offset = uint64_t(reply.chunk) * target_->chunkSize;
             size_t done = 0;
             while (done < reply.data.size()) {
-                const auto n = ::pwrite(f.fd, reply.data.data() + done, reply.data.size() - done, static_cast<off_t>(offset + done));
+                const auto n = cs::platform::writeAt(cs::platform::fromInt(f.fd), reply.data.data() + done, reply.data.size() - done, offset + done);
                 if (n <= 0) {
                     log("SNAPSHOT: cannot write " + (tmpDir_ / f.file.name).string() + ": syncing from block 0", true);
                     clearInFlight();
@@ -1141,13 +1140,13 @@ void SnapshotFetcher::verifyFiles(uint64_t t) {
             crypto_hash_sha256_init(&f.hashing->state);
             f.hashed = 0;
         }
-        bool ok = f.fd >= 0;
+        bool ok = f.fd != -1;
         while (ok && f.hashed < f.file.size && budget != 0) {
             if (buffer.empty()) {
                 buffer.resize(1u << 20);
             }
             const auto want = static_cast<size_t>(std::min<uint64_t>({buffer.size(), f.file.size - f.hashed, budget}));
-            const auto n = ::pread(f.fd, buffer.data(), want, static_cast<off_t>(f.hashed));
+            const auto n = cs::platform::readAt(cs::platform::fromInt(f.fd), buffer.data(), want, f.hashed);
             if (n <= 0) {
                 ok = false;
                 break;
