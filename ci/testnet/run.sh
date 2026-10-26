@@ -1681,7 +1681,8 @@ if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
     done
     # known_peers.json is written at a clean stop: stop one node of this build that does not serve
     observer=0
-    for i in $(seq 1 "$NODES"); do
+    # the joining node too: with every odd node serving and official even nodes it is the only one left
+    for i in $(seq 1 "$ALL_NODES"); do
         [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && continue
         [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
         observer=$i; break
