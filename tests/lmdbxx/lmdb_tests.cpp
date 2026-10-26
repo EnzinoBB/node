@@ -204,7 +204,9 @@ TEST(Lmdbxx, TestAutoMapSizeIncrease) {
     });
 
     db->setMapSize(9000);
-    db->setIncreaseSize(50000);
+    // a step of several pages also with 16 KB pages (Apple Silicon): 50000 bytes are three pages
+    // there, less than one insert may need while the map grows
+    db->setIncreaseSize(1 << 20);
     db->open();
 
     std::string key = "Key";

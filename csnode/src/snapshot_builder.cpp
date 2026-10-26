@@ -254,7 +254,11 @@ bool forEachSnapshotBlock(const std::filesystem::path& blocksFile, const std::fu
     return ok && pending.empty();
 }
 
-SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::filesystem::path& outRoot, const cs::PrivateKey& key) {
+namespace {
+// a failed build asks for <S>.tmp to be removed, which buildSnapshot does once the files written
+// here are closed (Windows does not remove open files)
+SnapshotBuildResult buildInto(const SnapshotBuildInput& input, const std::filesystem::path& outRoot, const cs::PrivateKey& key,
+                              bool& removeTmp) {
     SnapshotBuildResult result;
     const cs::Sequence S = input.seq;
     const auto tmp = outRoot / (std::to_string(S) + ".tmp");
@@ -262,7 +266,7 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     std::error_code ec;
 
     auto failWith = [&](const std::string& reason) {
-        std::filesystem::remove_all(tmp, ec);
+        removeTmp = true;
         result.ok = false;
         result.error = reason;
         return result;
@@ -459,6 +463,17 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     }
     result.ok = true;
     result.dir = final;
+    return result;
+}
+}  // namespace
+
+SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::filesystem::path& outRoot, const cs::PrivateKey& key) {
+    bool removeTmp = false;
+    auto result = buildInto(input, outRoot, key, removeTmp);
+    if (removeTmp) {
+        std::error_code ec;
+        std::filesystem::remove_all(outRoot / (std::to_string(input.seq) + ".tmp"), ec);
+    }
     return result;
 }
 
