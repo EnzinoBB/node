@@ -6,7 +6,9 @@
 #include <string>
 #include <vector>
 
+#ifndef _WIN32
 #include <sys/stat.h>
+#endif
 
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/property_tree/ptree.hpp>
@@ -295,9 +297,11 @@ TEST(SnapshotBootstrap, SourcesRoundTrip) {
     used[1].key.fill(2);
     used[1].address = "2001:db8::1";
     ASSERT_TRUE(sb::writeSources(dir, used));
+#ifndef _WIN32
     struct stat st {};
     ASSERT_EQ(::stat((dir / sb::kSourcesFile).c_str(), &st), 0);
     EXPECT_EQ(st.st_mode & 0777, 0600u);
+#endif
 
     boost::property_tree::ptree tree;
     std::istringstream in(readAll(dir / sb::kSourcesFile));

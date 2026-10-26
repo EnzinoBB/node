@@ -166,7 +166,8 @@ TEST(Lmdbxx, TestMappedSize) {
     });
 
     cs::Console::writeLine("Db map size ", db->mapSize());
-    ASSERT_TRUE(db->mapSize() == 9000);
+    // LMDB rounds the map size up to whole pages (16 KB on Apple Silicon)
+    ASSERT_TRUE(db->mapSize() >= 9000 && db->mapSize() < 9000 + 65536);
 
     std::string key = "key";
     std::string value = "SuperAndLargeValue";
