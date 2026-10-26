@@ -2,20 +2,20 @@
 # Assemble a ready-to-run mainnet package of the community node, laid out like the official
 # release (csnode/ with the node, the contract executor, its JDK and the configuration).
 #
-# Usage: make-package.sh <full|pruned> <version> <node binary> <executor dir> <jdk dir> <out dir> [known_hosts]
+# Usage: make-package.sh <version> <node binary> <executor dir> <jdk dir> <out dir> [known_hosts]
 #   executor dir: holds contract-executor.jar and sc-api-support.jar
 #   jdk dir:      the java-11-openjdk-11.0.4 directory the release ships (the executor runs and
 #                 compiles contracts with it)
 #   known_hosts:  optional peer list to ship instead of packaging/mainnet/known_hosts.txt
 #
-# Full and pruned packages hold the same binaries; only config.ini differs. Compared with the
-# official config.ini: [event_report] is commented out (it reports node events to a fixed address),
-# executor_commit_max accepts the community executor build, and the pruned package adds [storage].
+# One package for full and pruned storage: config.ini runs a full node (as the official release),
+# config.pruned.ini the same with [storage] for pruned storage on LMDB. Compared with the official
+# config.ini: [event_report] is commented out (it reports node events to a fixed address) and
+# executor_commit_max accepts the community executor build.
 set -euo pipefail
 
-variant=$1 version=$2 node=$3 executor=$4 jdk=$5 out=$6 hosts=${7:-}
+version=$1 node=$2 executor=$3 jdk=$4 out=$5 hosts=${6:-}
 here=$(cd "$(dirname "$0")" && pwd)
-case "$variant" in full|pruned) ;; *) echo "variant must be full or pruned" >&2; exit 2 ;; esac
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
@@ -40,8 +40,8 @@ awk -v commits="$commits" '
     { print }
 ' "$here/mainnet/config.ini" > "$dir/config.ini"
 
-if [ "$variant" = pruned ]; then
-    cat >> "$dir/config.ini" <<'INI'
+cp "$dir/config.ini" "$dir/config.pruned.ini"
+cat >> "$dir/config.pruned.ini" <<'INI'
 
 [storage]
 ; pruned storage: the node syncs from block 0 by itself and keeps only recent blocks
@@ -51,10 +51,9 @@ checkpoint_keep=2
 prune_keep_blocks=1000
 block_db=lmdb
 INI
-fi
 
 cat > "$dir/README-COMMUNITY.txt" <<EOF
-Credits node, community build $version ($variant storage)
+Credits node, community build $version
 
 Built from https://github.com/EnzinoBB/node and https://github.com/EnzinoBB/contract-executor.
 Node protocol version 532, compatible with the mainnet release 4.2.532.
@@ -62,7 +61,8 @@ Runs on: ${PACKAGE_RUNS_ON:-Linux x86-64 with glibc 2.38 or later (Ubuntu 24.04,
 
 Differences from the official package:
 - config.ini: [event_report] is commented out; executor_commit_max=$commits accepts the
-  community executor (build $commits instead of 1518).$( [ "$variant" = pruned ] && printf '\n- config.ini: [storage] runs the node with pruned storage on LMDB.' )
+  community executor (build $commits instead of 1518).
+- config.pruned.ini: the same with [storage] for pruned storage on LMDB (only recent blocks).
 - The executor listens on 127.0.0.1 only (contract.executor.host in settings.properties
   changes it). Keep port 9080 closed to other hosts anyway.
 - The node itself: same protocol and database format by default, new opt-in storage options,
@@ -82,11 +82,13 @@ Changing the block database (db_backend)
   only reads berkeleydb: convert back before running it on this folder. In Docker, use
   CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
 
-Start: cd csnode && ./node
+Start: cd csnode && ./node                                  (full storage, as the official node)
+  or:  cd csnode && ./node --config-file config.pruned.ini     (pruned storage)
+A pruned node can start from the published snapshot: ./node --config-file config.pruned.ini --download-snapshot
 EOF
 
 mkdir -p "$out"
 # PACKAGE_PLATFORM names a build for another baseline, e.g. glibc2.31 for Ubuntu 20.04 and later
-name="credits-node-$version-linux-x64${PACKAGE_PLATFORM:+-$PACKAGE_PLATFORM}-$variant.tar.gz"
+name="credits-node-$version-linux-x64${PACKAGE_PLATFORM:+-$PACKAGE_PLATFORM}.tar.gz"
 tar -C "$stage" --owner=0 --group=0 --sort=name -czf "$out/$name" csnode
 echo "$out/$name"

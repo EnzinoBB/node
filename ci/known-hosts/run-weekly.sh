@@ -36,10 +36,12 @@ cd "$WORK/run"
 tag=$(gh release list --repo "$REPO" --limit 50 --json tagName,isDraft \
     --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
 echo "$tag" | grep -qE '^community-v[0-9A-Za-z._-]+$' || { echo "no community release found"; exit 1; }
-gh release download "$tag" --repo "$REPO" --pattern '*-linux-x64-pruned.tar.gz' --pattern SHA256SUMS
+gh release download "$tag" --repo "$REPO" --pattern '*-linux-x64.tar.gz' --pattern '*-linux-x64-pruned.tar.gz' --pattern SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
-tar -xzf ./*-linux-x64-pruned.tar.gz
-rm -f ./*-linux-x64-pruned.tar.gz
+tar -xzf "$(ls ./*-linux-x64.tar.gz ./*-linux-x64-pruned.tar.gz 2>/dev/null | head -1)"
+rm -f ./*-linux-x64.tar.gz ./*-linux-x64-pruned.tar.gz
+# one package since community.14: the pruned configuration is config.pruned.ini
+[ ! -f csnode/config.pruned.ini ] || cp csnode/config.pruned.ini csnode/config.ini
 echo "package $tag"
 
 # start from every peer we know: the shipped list, the last published one and the repository's

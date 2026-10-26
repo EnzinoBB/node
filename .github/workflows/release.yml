@@ -1,7 +1,7 @@
 name: Release
 
-# Ready-to-run mainnet packages of the community node, in two variants that differ only in
-# config.ini: full storage (as the official release) and pruned storage on LMDB. Each holds the node
+# Ready-to-run mainnet packages of the community node, one for full and pruned storage: config.ini
+# runs a full node (as the official release), config.pruned.ini a pruned one on LMDB. Each holds the node
 # built here, the contract executor of an EnzinoBB/contract-executor release, the JDK the official
 # release ships, and the official configuration files kept in packaging/mainnet.
 #
@@ -185,14 +185,12 @@ jobs:
       - name: Packages
         run: |
           chmod +x compat/node
-          for variant in full pruned; do
-            packaging/make-package.sh "$variant" "$VERSION" build/client/node executor \
-              jdk/java-11-openjdk-11.0.4 dist
-            PACKAGE_PLATFORM=glibc2.31 \
-            PACKAGE_RUNS_ON="Linux x86-64 with glibc 2.31 or later (Ubuntu 20.04, Debian 11 and later)" \
-              packaging/make-package.sh "$variant" "$VERSION" compat/node executor \
-              jdk/java-11-openjdk-11.0.4 dist
-          done
+          packaging/make-package.sh "$VERSION" build/client/node executor \
+            jdk/java-11-openjdk-11.0.4 dist
+          PACKAGE_PLATFORM=glibc2.31 \
+          PACKAGE_RUNS_ON="Linux x86-64 with glibc 2.31 or later (Ubuntu 20.04, Debian 11 and later)" \
+            packaging/make-package.sh "$VERSION" compat/node executor \
+            jdk/java-11-openjdk-11.0.4 dist
           (cd dist && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS)
           ls -la dist
 
@@ -214,7 +212,8 @@ jobs:
           - contract executor: EnzinoBB/contract-executor release ${EXECUTOR_TAG}
           - JDK: ojdkbuild 11.0.4, the one the official release ships
 
-          Full or pruned storage: the packages differ only in config.ini (pruned storage runs on LMDB).
+          One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
+          (\`./node --config-file config.pruned.ini\`).
           Two builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
           \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
           each package. Verify with SHA256SUMS.
@@ -229,8 +228,8 @@ jobs:
               --title "Community node $VERSION" --notes-file notes.md
           fi
 
-  # the Docker image of the pruned package (the image chooses full or pruned at its first start, so
-  # the package variant only provides the binaries and the configuration template)
+  # the Docker image of the package (the image chooses full or pruned at its first start: the
+  # package provides the binaries and the configuration template)
   image:
     name: Docker image
     needs: package
@@ -256,7 +255,7 @@ jobs:
       - name: Build image
         run: |
           mkdir pkg
-          tar -xzf dist/credits-node-${VERSION}-linux-x64-pruned.tar.gz -C pkg
+          tar -xzf dist/credits-node-${VERSION}-linux-x64.tar.gz -C pkg
           echo "$VERSION" > pkg/csnode/VERSION
           packaging/docker/build.sh pkg/csnode "$IMAGE:$VERSION"
           docker image ls "$IMAGE"
