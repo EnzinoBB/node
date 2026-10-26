@@ -146,17 +146,20 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE: pruned-snapshot
     steps:
+      # into its own folder: the artifact comes from the job that ran the node and is not trusted
       - name: Download snapshot
         uses: actions/download-artifact@v4
         with:
           name: snapshot
-          path: .
+          path: artifact
 
       # the manifest comes from the job that ran the node: check its form and the archive's checksum
       - name: Check
+        working-directory: artifact
         run: |
+          for e in *; do case "$e" in out|out2) ;; *) echo "FAIL: unexpected $e in the artifact"; exit 1 ;; esac; done
           ls -la out
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import json, os, re, hashlib
           m = json.load(open("out/latest.json"))
           assert set(m) == {"seq", "state_digest", "wallets", "checkpoint", "created", "node", "file", "size", "sha256", "run"}, m.keys()
@@ -174,7 +177,7 @@ jobs:
           print("snapshot", m["file"], "block", m["seq"], "digest", m["state_digest"])
           PY
           # format 2: the manifest's shape, every file's size and SHA-256, names from the fixed table
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import json, os, re, hashlib
           seqs = [d for d in os.listdir("out2")] if os.path.isdir("out2") else []
           if not seqs:
@@ -201,6 +204,7 @@ jobs:
 
       - name: Publish
         if: inputs.publish != 'false'
+        working-directory: artifact
         run: |
           gh release upload "$RELEASE" out/credits-pruned-*.tar.zst --repo "$GITHUB_REPOSITORY"
           gh release upload "$RELEASE" out/latest.json --clobber --repo "$GITHUB_REPOSITORY"
