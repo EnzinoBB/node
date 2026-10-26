@@ -46,6 +46,13 @@ if(_csdb_need_rocksdb)
     set(ENV{LZ4_INCLUDE}     "${CMAKE_CURRENT_SOURCE_DIR}/lz4")
     set(ENV{LZ4_LIB_DEBUG}   "lz4")
     set(ENV{LZ4_LIB_RELEASE} "lz4")
+    # elsewhere rocksdb looks lz4 up with find_package: on macOS that finds Homebrew's dylib, which
+    # a packaged node cannot rely on, so it gets the internal one there too
+    if(APPLE)
+        set(lz4_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/lz4" CACHE PATH "" FORCE)
+        set(lz4_LIBRARIES lz4 CACHE STRING "" FORCE)
+        add_library(lz4::lz4 ALIAS lz4)
+    endif()
 
     # rocksdb env_win.cc needs Win8+ (FILE_ID_INFO); shadow project's 0x0601.
     if(WIN32)
