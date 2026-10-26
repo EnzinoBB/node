@@ -213,6 +213,7 @@ The first community release: everything from the fork point up to the release pa
 | #8 | csnode: fix the swapped mining and staking flags on restore; warn about dropped rewards |
 | #9 | csnode: don't keep an uncertain block's rewards when the trusted mask differs |
 | #10 | csnode: check quick-start checkpoints against the chain before loading them |
+| #108 | ci(snapshot): the 12-hour snapshot workflow also publishes format 2 (the node's `--export-snapshot` of its latest periodic checkpoint: `snapshot.json` and its files as `s<seq>-<name>`, the 3 newest sequences), checked file by file before upload; format 1 stays for one release; `publish=false` for a test run |
 | #11 | csnode: make the revert of a timed delegation mirror its apply |
 | #12 | csnode: give BlockChain's consensus-settings members defined defaults |
 | #14 | Wallet state digest (ECMH over ristretto255), logged every 1000 blocks |
