@@ -292,6 +292,14 @@ jobs:
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_ALL_AT=2500 NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=2,6 TARGET_SEQ=3300
             fixed: true
           # a node joining from a snapshot taken after the first pruning, and from a truncated one
+          # the joining node downloads the snapshot with --download-snapshot from a web server laid out
+          # as the GitHub release; then with a truncated file: refused (exit 2), nothing in db/
+          - name: snapshot-download
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_VIA=download TARGET_SEQ=3100
+          - name: snapshot-download-corrupt
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_VIA=download SNAPSHOT_CORRUPT=1 TARGET_SEQ=3100
           - name: snapshot-join
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100

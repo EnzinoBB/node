@@ -237,6 +237,10 @@ JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
+# SNAPSHOT_VIA=download (format 2): the joining node runs --download-snapshot against a local web
+# server laid out as the GitHub release (snapshot.json, s<seq>-<name>) instead of --import-snapshot
+SNAPSHOT_VIA=${SNAPSHOT_VIA:-import}
+case "$SNAPSHOT_VIA" in import|download) ;; *) echo "SNAPSHOT_VIA must be import or download, got '$SNAPSHOT_VIA'"; exit 1 ;; esac
 SNAPSHOT_SERVE_NODES=${SNAPSHOT_SERVE_NODES:-}
 if [ -n "$BIN_ALT" ]; then
     for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
@@ -957,6 +961,31 @@ PY
                 > "$WORK/restore.log" 2>&1 || rc=$?
         else
             manifest=$(ls "$WORK"/snapshot2/*/snapshot.json)
+            if [ "$SNAPSHOT_VIA" = download ]; then
+                # the release layout: the manifest, and each file as s<seq>-<name>
+                seq=$(basename "$(dirname "$manifest")")
+                mkdir -p "$WORK/release"
+                cp "$manifest" "$WORK/release/snapshot.json"
+                for f in "$(dirname "$manifest")"/*; do
+                    [ "$(basename "$f")" = snapshot.json ] || cp "$f" "$WORK/release/s$seq-$(basename "$f")"
+                done
+                if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+                    f="$WORK/release/s$seq-blocks.bin.lz4"
+                    head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+                    echo "snapshot test: s$seq-blocks.bin.lz4 truncated on the web server"
+                fi
+                python3 -m http.server 18080 --bind 127.0.0.1 --directory "$WORK/release" > "$WORK/http.log" 2>&1 &
+                http_pid=$!
+                for _ in $(seq 1 20); do curl -fs -o /dev/null http://127.0.0.1:18080/snapshot.json && break; sleep 0.5; done
+                (cd "$WORK/n$JOIN_NODE" && exec "$BIN" --db-path db --config-file config.ini --download-snapshot http://127.0.0.1:18080/snapshot.json) \
+                    > "$WORK/restore.log" 2>&1 || rc=$?
+                kill "$http_pid" 2>/dev/null || true
+                grep -a 'download-snapshot:\|import-snapshot:' "$WORK/restore.log" > "$WORK/restore.short" || true
+                mv "$WORK/restore.short" "$WORK/restore.log"
+                if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ -n "$(ls -A "$WORK/n$JOIN_NODE/db" 2>/dev/null | grep -v '^\.lock$')" ]; then
+                    echo "FAIL: a refused download left files in db/: $(ls -A "$WORK/n$JOIN_NODE/db")"; exit 1
+                fi
+            else
             if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
                 f="$(dirname "$manifest")/blocks.bin.lz4"
                 head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
@@ -967,6 +996,7 @@ PY
                 > "$WORK/restore.log" 2>&1 || rc=$?
             grep -a 'import-snapshot:' "$WORK/restore.log" > "$WORK/restore.short" || true
             mv "$WORK/restore.short" "$WORK/restore.log"
+            fi
         fi
         sed 's/^/snapshot test: /' "$WORK/restore.log"
         echo "snapshot test: restore exit $rc; n$JOIN_NODE joins at sequence $min"

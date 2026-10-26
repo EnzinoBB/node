@@ -5,7 +5,18 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <cerrno>
+#include <cstdlib>
 #include <iostream>
+#include <sstream>
+#include <vector>
+
+#include <spawn.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <sodium.h>
 
 #include <config.hpp>
 #include <version.hpp>
@@ -196,4 +207,169 @@ int runImport(const Config& config, const std::string& manifestFile) {
     return 0;
 }
 
+namespace {
+// curl on the PATH, as an executable file; empty when there is none
+std::string findCurl() {
+    const char* path = std::getenv("PATH");
+    std::stringstream dirs(path ? path : "");
+    std::string dir;
+    while (std::getline(dirs, dir, ':')) {
+        const std::string candidate = (dir.empty() ? std::string(".") : dir) + "/curl";
+        if (::access(candidate.c_str(), X_OK) == 0) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
+// runs curl with these arguments, no shell in between; its exit code, or -1 when it did not run
+int runCurl(const std::string& curl, const std::vector<std::string>& args) {
+    std::vector<std::string> all;
+    // -q first: no ~/.curlrc; only http(s), also through redirects
+    all.push_back(curl);
+    all.push_back("-q");
+    all.insert(all.end(), {"--proto", "=https,http", "--proto-redir", "=https,http"});
+    all.insert(all.end(), args.begin(), args.end());
+    std::vector<char*> argv;
+    for (auto& a : all) {
+        argv.push_back(a.data());
+    }
+    argv.push_back(nullptr);
+    pid_t pid = 0;
+    if (::posix_spawn(&pid, curl.c_str(), nullptr, nullptr, argv.data(), ::environ) != 0) {
+        return -1;
+    }
+    int status = 0;
+    while (::waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+// SHA-256 of a whole file in hex, empty when it cannot be read
+std::string fileSha256(const fs::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        return {};
+    }
+    crypto_hash_sha256_state state;
+    crypto_hash_sha256_init(&state);
+    std::vector<char> buffer(1 << 20);
+    while (in) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto n = in.gcount();
+        if (n > 0) {
+            crypto_hash_sha256_update(&state, reinterpret_cast<const unsigned char*>(buffer.data()), static_cast<unsigned long long>(n));
+        }
+    }
+    if (in.bad()) {
+        return {};
+    }
+    unsigned char out[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256_final(&state, out);
+    static const char* digits = "0123456789abcdef";
+    std::string hex;
+    for (unsigned char c : out) {
+        hex.push_back(digits[c >> 4]);
+        hex.push_back(digits[c & 15]);
+    }
+    return hex;
+}
+}  // namespace
+
+int runDownload(const Config& config, const std::string& urlArg) {
+    auto say = []() -> std::ostream& { return std::cout << "download-snapshot: "; };
+    const std::string url = urlArg.empty() ? kDefaultSnapshotUrl : urlArg;
+    if ((url.rfind("https://", 0) != 0 && url.rfind("http://", 0) != 0) || url.find_first_of(" \t\r\n") != std::string::npos) {
+        say() << "not an http(s) address: " << url << std::endl;
+        return 2;
+    }
+    const std::string dbPath = config.getPathToDB();
+    {
+        std::error_code ec;
+        fs::create_directories(dbPath, ec);
+    }
+    if (dbcheck::lockedByAnotherProcess(dbPath)) {
+        say() << "a node is running on " << dbPath << ": stop it first" << std::endl;
+        return 2;
+    }
+    if (!csdb::backend::detect(dbPath, true).empty()) {
+        say() << dbPath << " already holds a database: nothing downloaded" << std::endl;
+        return 2;
+    }
+    const std::string curl = findCurl();
+    if (curl.empty()) {
+        say() << "curl not found: install curl, or download the files by hand and run --import-snapshot" << std::endl;
+        return 2;
+    }
+    const fs::path dir = "snapshot-download";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const fs::path manifestFile = dir / "snapshot.json";
+    say() << "manifest " << url << std::endl;
+    // always fetched again: a newer snapshot replaces the files of an older one below
+    fs::remove(manifestFile, ec);
+    if (const int rc = runCurl(curl, {"-fsSL", "--max-time", "60", "--retry", "3", "--max-filesize", "1048576", "-o", manifestFile.string(), url}); rc != 0) {
+        say() << "cannot download the manifest (curl exit " << rc << ")" << std::endl;
+        return 2;
+    }
+    std::ifstream in(manifestFile, std::ios::binary);
+    const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string error;
+    const auto manifest = cs::SnapshotManifest::fromJson(json, &error);
+    if (!manifest) {
+        say() << "the manifest is refused: " << error << std::endl;
+        return 2;
+    }
+    if (!manifest->verify()) {
+        say() << "the manifest's signature does not verify" << std::endl;
+        return 2;
+    }
+    const std::string base = url.substr(0, url.rfind('/') + 1);
+    // files of another snapshot left by an earlier run: not this one's
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        const auto name = entry.path().filename().string();
+        if (name != "snapshot.json" && !manifest->file(name)) {
+            fs::remove_all(entry.path(), ec);
+        }
+    }
+    uint64_t total = 0;
+    for (const auto& f : manifest->files) {
+        total += f.size;
+    }
+    say() << "block " << manifest->seq << ": " << manifest->files.size() << " files, " << total / (1u << 20) << " MB" << std::endl;
+    for (const auto& f : manifest->files) {
+        const fs::path target = dir / f.name;   // a name from the manifest's fixed table, never a path
+        const auto have = fs::exists(target, ec) ? fs::file_size(target, ec) : 0;
+        if (have == f.size && fileSha256(target) == f.sha256) {
+            say() << f.name << ": already here" << std::endl;
+            continue;
+        }
+        if (have > f.size) {
+            fs::remove(target, ec);
+        }
+        const std::string fileUrl = base + "s" + std::to_string(manifest->seq) + "-" + f.name;
+        say() << f.name << ": " << f.size / 1024 << " KB from " << fileUrl << std::endl;
+        if (const int rc = runCurl(curl, {"-fL", "-sS", "-C", "-", "--max-time", "3600", "--retry", "3", "-o", target.string(), fileUrl}); rc != 0) {
+            say() << f.name << ": download failed (curl exit " << rc << "); run it again to resume" << std::endl;
+            return 2;
+        }
+        const auto got = fs::file_size(target, ec);
+        if (ec || got != f.size || fileSha256(target) != f.sha256) {
+            fs::remove(target, ec);
+            say() << f.name << ": the file does not match the manifest (" << got << " bytes); removed, run it again" << std::endl;
+            return 2;
+        }
+    }
+    const int rc = runImport(config, manifestFile.string());
+    if (rc == 0) {
+        fs::remove_all(dir, ec);
+        say() << "done: the node starts from block " << manifest->seq << std::endl;
+    }
+    return rc;
+}
+
 }  // namespace snapshot_export
+
