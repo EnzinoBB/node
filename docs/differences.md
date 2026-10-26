@@ -53,6 +53,9 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   of its latest periodic checkpoint: the checkpoint files, the blocks before it as a hash chain
   ending at the checkpoint's block, and the contract data, compressed, with a SHA-256 for every
   file and every 4 MB piece, in a `snapshot.json` signed with the node's key.
+- `--download-snapshot [url]` downloads the snapshot published on GitHub (or the one at `url`) with
+  `curl`, checks it and restores it as `--import-snapshot` does; run by hand or by the Docker
+  entrypoint, never by a normal start.
 - `--import-snapshot <snapshot.json>` restores such a snapshot into an empty database of the
   configured backend (LMDB or RocksDB). Every file is checked against the manifest and every
   block before it is written: its signatures against its confidants, the confirmations of the

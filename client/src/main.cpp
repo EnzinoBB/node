@@ -65,6 +65,7 @@ int main(int argc, char* argv[]) {
         ("convert-batch", po::value<uint32_t>()->default_value(100000), "blocks per conversion batch (1 to 1000000)")
         ("export-snapshot", po::value<std::string>(), "build the snapshot of the latest periodic checkpoint into the given folder, then exit (the node must be stopped)")
         ("import-snapshot", po::value<std::string>(), "restore the snapshot of the given snapshot.json into this node's empty database, then exit")
+        ("download-snapshot", po::value<std::string>()->implicit_value(""), "download the published snapshot (or the snapshot.json at the given address) with curl, check it and restore it into this node's empty database, then exit")
         ("config-file", po::value<std::string>(), "path to configuration file (default: \"config.ini\")")
         ("public-key-file", po::value<std::string>(), "path to public key file (default: \"NodePublic.txt\")")
         ("private-key-file", po::value<std::string>(), "path to private key file (default: \"NodePrivate.txt\")")
@@ -221,6 +222,9 @@ int main(int argc, char* argv[]) {
     }
 
     // no keys needed: the import writes only the database, the caches and the checkpoint
+    if (vm.count("download-snapshot") > 0) {
+        return snapshot_export::runDownload(config, vm["download-snapshot"].as<std::string>());
+    }
     if (vm.count("import-snapshot") > 0) {
         return snapshot_export::runImport(config, vm["import-snapshot"].as<std::string>());
     }
