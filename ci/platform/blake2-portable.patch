@@ -1,0 +1,25 @@
+--- a/third-party/blake2/CMakeLists.txt
++++ b/third-party/blake2/CMakeLists.txt
+@@ -2,6 +2,22 @@
+ 
+ project (blake2)
+ 
++# not x86 (Apple Silicon, ARM servers): the portable reference implementation, same API and output
++if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|i.86|x86)$")
++  add_library(blake2
++    ref/blake2-impl.h
++    ref/blake2.h
++    ref/blake2b-ref.c
++    ref/blake2bp-ref.c
++    ref/blake2s-ref.c
++    ref/blake2sp-ref.c
++    ref/blake2xb-ref.c
++    ref/blake2xs-ref.c )
++  target_include_directories(blake2 PUBLIC ref)
++  set_target_properties(blake2 PROPERTIES POSITION_INDEPENDENT_CODE ON)
++  return()
++endif()
++
+ if (MSVC)
+   add_definitions(-D__SSE4_1__)
+ else()

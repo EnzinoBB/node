@@ -43,6 +43,22 @@ jobs:
       - name: Install build tools
         run: choco install -y --no-progress winflexbison3
 
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # cscrypto builds libsodium through a Visual Studio 2019 retargeting patch that does not apply
+      # to the libsodium it pins; the VS2022 solution of libsodium itself builds the same static
+      # library (static runtime), placed where cscrypto imports it from
+      - name: Build libsodium
+        shell: bash
+        working-directory: cscrypto/third-party/libsodium
+        run: |
+          MSBuild.exe builds/msvc/vs2022/libsodium.sln -m -p:Configuration=StaticRelease -p:Platform=x64 -v:minimal
+          lib=$(find bin/x64/Release -path '*static*' -name libsodium.lib | head -1)
+          test -n "$lib"
+          mkdir -p Build/Release/x64
+          cp "$lib" Build/Release/x64/libsodium.lib
+
       - name: Restore Boost
         id: cache-boost
         uses: actions/cache/restore@v4
@@ -76,7 +92,9 @@ jobs:
       - name: Configure
         shell: bash
         run: |
+          # thrift's fallback reads the byte order from a Boost header removed in Boost 1.73
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_CXX_FLAGS="/D__THRIFT_BYTE_ORDER=1234 /D__THRIFT_LITTLE_ENDIAN=1234 /D__THRIFT_BIG_ENDIAN=4321 /EHsc" \
             -DENABLE_TESTS=ON \
             -DBoost_ROOT="C:/boost" \
             -DBoost_NO_SYSTEM_PATHS=ON \
@@ -117,6 +135,8 @@ jobs:
             third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
+          # blake2's SSE code does not build on ARM: the reference implementation there
+          git -C cscrypto apply ../ci/platform/blake2-portable.patch
 
       - name: Install build tools
         run: |
