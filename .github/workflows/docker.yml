@@ -44,9 +44,9 @@ jobs:
         run: |
           tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft \
             --jq '[.[] | select(.isDraft | not) | .tagName | select(startswith("community-v"))][0]')
-          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64-pruned.tar.gz' --pattern SHA256SUMS
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern '*-linux-x64.tar.gz' --pattern '*-linux-x64-pruned.tar.gz' --pattern SHA256SUMS
           sha256sum -c --ignore-missing SHA256SUMS
-          mkdir pkg && tar -xzf *-linux-x64-pruned.tar.gz -C pkg
+          mkdir pkg && tar -xzf "$(ls ./*-linux-x64.tar.gz ./*-linux-x64-pruned.tar.gz 2>/dev/null | head -1)" -C pkg
           echo "${tag#community-v}" > pkg/csnode/VERSION
           packaging/docker/build.sh pkg/csnode credits-node:smoke
           echo "built from $tag"

@@ -35,7 +35,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #113 | packaging: one package per build for full and pruned storage (`config.ini` full, `config.pruned.ini` pruned on LMDB), half the release size; the workflows that take the latest package accept both layouts |
 
 ## community.13 — 2026-10-26
 

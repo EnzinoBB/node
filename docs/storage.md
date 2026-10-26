@@ -41,7 +41,7 @@ official node.
 | Backend | Use it for | Notes |
 |---|---|---|
 | `berkeleydb` | A folder the official node must also be able to open | The official node's format. Its block table does not reuse the space of pruned blocks, so it is a poor fit for pruned storage. A pruned database cannot be converted to it. |
-| `lmdb` | Pruned nodes (the pruned package and Docker default) | Reuses the space of removed blocks; `data.mdb` never shrinks. |
+| `lmdb` | Pruned nodes (`config.pruned.ini` of the package, and the Docker default) | Reuses the space of removed blocks; `data.mdb` never shrinks. |
 | `rocksdb` | The smallest full node | Compressed: about a third of the berkeleydb size on mainnet (9.6 GB to 3.1 GB on the first 4.4 M blocks). |
 
 The official node reads berkeleydb only. On a folder converted to another backend it would not
@@ -53,7 +53,7 @@ Going from full to pruned keeps the database: set `prune_keep_blocks` and the ol
 removed at the next checkpoints. Going from pruned to full is not possible, the removed blocks are
 gone: start over from an empty `db/`.
 
-The pruned package writes this section:
+The package's `config.pruned.ini` has this section:
 
 ```ini
 [storage]
