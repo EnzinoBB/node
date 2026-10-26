@@ -51,8 +51,9 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
 
 - `--export-snapshot <dir>`, on a stopped node of any backend, pruned or full, builds a snapshot
   of its latest periodic checkpoint: the checkpoint files, the blocks before it as a hash chain
-  ending at the checkpoint's block, and the contract data, compressed, with a SHA-256 for every
-  file and every 4 MB piece, in a `snapshot.json` signed with the node's key.
+  ending at the checkpoint's block, compressed, with a SHA-256 for every file and every 512 KiB
+  piece, in a `snapshot.json` signed with the node's key (the checkpoint carries the contract
+  states at its block).
 - `--download-snapshot [url]` downloads the snapshot published on GitHub (or the one at `url`) with
   `curl`, checks it and restores it as `--import-snapshot` does; run by hand or by the Docker
   entrypoint, never by a normal start.
@@ -67,6 +68,12 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   start: `serve`, `serve_rate_kbps`, `serve_max_peers`, `snapshot_blocks`, `fetch`,
   `fetch_wait`, `fetch_fallback`, `min_sources`, `sources`, `sources_file`, `fetch_rate_kbps`).
   A key that is not one of these is logged and ignored.
+- **Serving snapshots to the neighbours.** With `[snapshot] serve=on` the node builds the snapshot
+  of each periodic checkpoint into `snapshot/<block>/` at low priority and answers the snapshot
+  requests of its p2p neighbours while it is synced with the network, within `serve_rate_kbps`
+  (KB/s, all peers together; half for one peer), `serve_max_peers` peers within 30 s, and half of
+  that while it is a confidant or the writer. It announces it in its p2p host data at start, with
+  its community version. Official nodes neither see nor answer these messages.
 - **A first start fetches a snapshot from the network.** A node whose `db/` holds no database,
   with no checkpoint in `qs/`, `db_backend` `lmdb` or `rocksdb` and `fetch=auto` (the default),
   starts its p2p transport without opening the chain and looks for neighbours that serve
