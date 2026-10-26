@@ -72,18 +72,18 @@ write_config() {
         section == "[api]" && /^executor_multi_instance=/ { print "executor_multi_instance=true"; next }
         { print }
     ' "$OPT/config.ini.template" > config.ini.new
+    # snapshots, before [storage] (which stays the last section): served to the neighbours
+    # (CREDITS_SERVE_SNAPSHOT); fetched from them at a first start by a pruned node unless
+    # CREDITS_SNAPSHOT=off (a full node syncs from block 0: a snapshot holds only recent blocks)
+    local fetch=auto
+    { [ "$SNAPSHOT" = off ] || [ "$STORAGE" = full ]; } && fetch=off
+    printf '\n[snapshot]\nserve=%s\nfetch=%s\n' "$SERVE" "$fetch" >> config.ini.new
+    [ -z "$MIN_SOURCES" ] || printf 'min_sources=%s\n' "$MIN_SOURCES" >> config.ini.new
     if [ "$STORAGE" = pruned ]; then
         printf '\n[storage]\n; pruned storage: only recent blocks are kept, from the last checkpoint but one\ncheckpoint_every=100000\ncheckpoint_keep=2\nprune_keep_blocks=1000\ndb_backend=%s\n' "$BACKEND" >> config.ini.new
     else
         printf '\n[storage]\ndb_backend=%s\n' "$BACKEND" >> config.ini.new
     fi
-    # snapshots: served to the neighbours (CREDITS_SERVE_SNAPSHOT); fetched from them at a first start
-    # by a pruned node unless CREDITS_SNAPSHOT=off (a full node syncs from block 0: a snapshot holds
-    # only recent blocks)
-    local fetch=auto
-    { [ "$SNAPSHOT" = off ] || [ "$STORAGE" = full ]; } && fetch=off
-    printf '\n[snapshot]\nserve=%s\nfetch=%s\n' "$SERVE" "$fetch" >> config.ini.new
-    [ -z "$MIN_SOURCES" ] || printf 'min_sources=%s\n' "$MIN_SOURCES" >> config.ini.new
     mv config.ini.new config.ini
     log "config.ini written: $STORAGE storage on $BACKEND, p2p port $P2P_PORT, API $API, executor $EXECUTOR, snapshots: serve $SERVE, fetch $fetch"
 }

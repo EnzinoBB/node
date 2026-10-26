@@ -58,8 +58,7 @@ quick-starts from the checkpoint and syncs from there like any node.
 When no agreement is reached within `fetch_wait` seconds, `fetch_fallback=sync` opens an empty
 database and syncs from block 0; `fetch_fallback=wait` keeps waiting (a line every 5 minutes). Both
 lines name the manual way: stop the node and run `./node --download-snapshot` in its folder (Docker:
-`CREDITS_SNAPSHOT=github`), then start it again. `--download-snapshot` is not in this release yet:
-until it is, download the published snapshot and restore it with `--import-snapshot` (below).
+`CREDITS_SNAPSHOT=github`), then start it again.
 
 A BerkeleyDB node cannot start above block 0 and never fetches. `fetch=off` turns fetching off;
 nodes of a private network that starts from block 0 should set it, or each waits `fetch_wait` at
@@ -76,6 +75,17 @@ its first start.
 | `snapshot-tmp/` | a fetch in progress; removed at the next start |
 | `db/.importing` | an import in progress; at the next start the partial database is removed and the fetch starts again |
 | `snapshot/<block>/` | snapshots this node built and serves (`serve=on`) |
+
+## Downloading the published snapshot
+
+`./node --download-snapshot` (in the node's folder, node stopped, empty database) downloads the
+snapshot published on GitHub every 12 hours with `curl`, checks every file against its manifest and
+restores it; `./node --download-snapshot <url>/snapshot.json` takes another one laid out the same
+way (the files next to the manifest as `s<block>-<name>`, https only). The manifest's signature
+proves that the files are those its builder packaged, not who that builder is: the trust is the
+https address, so give another address only when you trust whoever publishes there. It exits 0 when restored, 2 otherwise;
+a download that stops is resumed by running it again (`snapshot-download/`). The node's normal
+start never downloads from GitHub.
 
 ## Exporting and importing by hand
 

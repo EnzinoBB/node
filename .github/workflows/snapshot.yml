@@ -1,14 +1,20 @@
 name: Pruned snapshot
 
 # Every 12 hours: start a pruned node from the last published snapshot, bring it to the chain head,
-# check it, and publish its state as the new snapshot (release pruned-snapshot: latest.json and the
-# 3 newest archives). A Docker container of a pruned node restores the latest one on its first start.
+# check it, and publish its state as the new snapshot (release pruned-snapshot). Two formats for one
+# release: format 1 (latest.json and the 3 newest archives, for the Docker images of earlier releases)
+# and format 2 (snapshot.json, signed, with its files as s<seq>-<name>, the 3 newest sequences; built
+# by the node's --export-snapshot from its latest periodic checkpoint, restored by --download-snapshot).
 # Nothing is published when a check fails; the previous snapshot stays. See
 # docs/specs/2026-10-16-docker-and-pruned-snapshots-design.md.
 on:
   schedule:
     - cron: '37 5,17 * * *'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: 'false = build and check both formats without uploading anything (a test run)'
+        default: 'true'
 
 # the job that runs the node holds no write token: the node talks to untrusted peers, so a token in
 # its environment or in .git/config could be read by a compromised node. Publishing is a separate
@@ -89,6 +95,27 @@ jobs:
           [ -z "$bad" ] || { echo "$bad" | head -20; echo "FAIL: the node logged a state problem"; exit 1; }
           echo "head digest: $(ci/snapshot/digest_offline.sh csnode)"
 
+      # format 2: the node packages its latest periodic checkpoint itself; skipped when that checkpoint
+      # is the one the run started from (nothing new to publish)
+      - name: Package (format 2)
+        if: env.SKIP != '1'
+        run: |
+          published=$(curl -fsSL "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE/snapshot.json" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["seq"])' 2>/dev/null || echo 0)
+          rc=0
+          (cd csnode && ./node --db-path db --config-file config.ini --export-snapshot ../out2) > export.log 2>&1 || rc=$?
+          cat export.log
+          mkdir -p out2
+          seq=$(ls out2 | grep -E '^[0-9]+$' | head -1)
+          if [ "$rc" != 0 ] || [ -z "$seq" ]; then
+            # no periodic checkpoint with a state digest yet: format 1 is still published
+            echo "format 2: nothing exported (exit $rc)"; rm -rf out2; mkdir -p out2
+          elif [ "$seq" = "$published" ]; then
+            echo "format 2: block $seq is already published"; rm -rf out2; mkdir -p out2
+          else
+            echo "format 2: block $seq (published: $published)"
+          fi
+
       - name: Package
         if: env.SKIP != '1'
         run: |
@@ -103,7 +130,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: snapshot
-          path: out/
+          path: |
+            out/
+            out2/
           retention-days: 2
 
   publish:
@@ -117,17 +146,20 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE: pruned-snapshot
     steps:
+      # into its own folder: the artifact comes from the job that ran the node and is not trusted
       - name: Download snapshot
         uses: actions/download-artifact@v4
         with:
           name: snapshot
-          path: out
+          path: artifact
 
       # the manifest comes from the job that ran the node: check its form and the archive's checksum
       - name: Check
+        working-directory: artifact
         run: |
+          for e in *; do case "$e" in out|out2) ;; *) echo "FAIL: unexpected $e in the artifact"; exit 1 ;; esac; done
           ls -la out
-          python3 - <<'PY'
+          python3 -I - <<'PY'
           import json, os, re, hashlib
           m = json.load(open("out/latest.json"))
           assert set(m) == {"seq", "state_digest", "wallets", "checkpoint", "created", "node", "file", "size", "sha256", "run"}, m.keys()
@@ -144,8 +176,35 @@ jobs:
           assert h.hexdigest() == m["sha256"], "checksum"
           print("snapshot", m["file"], "block", m["seq"], "digest", m["state_digest"])
           PY
+          # format 2: the manifest's shape, every file's size and SHA-256, names from the fixed table
+          python3 -I - <<'PY'
+          import json, os, re, hashlib
+          seqs = [d for d in os.listdir("out2")] if os.path.isdir("out2") else []
+          if not seqs:
+              print("format 2: nothing new")
+              raise SystemExit(0)
+          assert len(seqs) == 1 and seqs[0].isdigit(), seqs
+          d = os.path.join("out2", seqs[0])
+          m = json.load(open(os.path.join(d, "snapshot.json")))
+          assert m["format"] == 2 and m["seq"] == int(seqs[0]), (m["format"], m["seq"])
+          assert re.fullmatch(r"[0-9a-f]{64}", m["state_digest"]) and re.fullmatch(r"[0-9a-f]+", m["signature"])
+          names = {f["name"] for f in m["files"]}
+          assert sorted(os.listdir(d)) == sorted(names | {"snapshot.json"}), os.listdir(d)
+          for f in m["files"]:
+              assert re.fullmatch(r"(blocks|contracts)\.bin\.lz4|qs-[A-Za-z0-9_.]+\.lz4", f["name"]), f["name"]
+              path = os.path.join(d, f["name"])
+              assert os.path.getsize(path) == f["size"] < 2_000_000_000, f["name"]
+              h = hashlib.sha256()
+              with open(path, "rb") as fh:
+                  for chunk in iter(lambda: fh.read(1 << 20), b""):
+                      h.update(chunk)
+              assert h.hexdigest() == f["sha256"], f["name"]
+          print("format 2: block", m["seq"], "digest", m["state_digest"], len(m["files"]), "files")
+          PY
 
       - name: Publish
+        if: inputs.publish != 'false'
+        working-directory: artifact
         run: |
           gh release upload "$RELEASE" out/credits-pruned-*.tar.zst --repo "$GITHUB_REPOSITORY"
           gh release upload "$RELEASE" out/latest.json --clobber --repo "$GITHUB_REPOSITORY"
@@ -154,3 +213,21 @@ jobs:
             | grep -E '^credits-pruned-[0-9]+\.tar\.zst$' | sort -t- -k3 -n | head -n -3 \
             | while read -r old; do gh release delete-asset "$RELEASE" "$old" --yes --repo "$GITHUB_REPOSITORY"; done
           echo "published $(ls out/*.tar.zst)"
+          # format 2: the files first, then the manifest that names them; the 3 newest sequences kept
+          if [ -d out2 ] && [ -n "$(ls out2)" ]; then
+            seq=$(ls out2)
+            mkdir -p pub2
+            for f in out2/"$seq"/*; do
+              name=$(basename "$f")
+              [ "$name" = snapshot.json ] || cp "$f" "pub2/s$seq-$name"
+            done
+            gh release upload "$RELEASE" pub2/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$RELEASE" out2/"$seq"/snapshot.json --clobber --repo "$GITHUB_REPOSITORY"
+            gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+              | sed -nE 's/^s([0-9]+)-.*/\1/p' | sort -un | head -n -3 \
+              | while read -r old; do
+                  gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+                    | grep -E "^s$old-" | while read -r a; do gh release delete-asset "$RELEASE" "$a" --yes --repo "$GITHUB_REPOSITORY"; done
+                done
+            echo "published format 2: block $seq"
+          fi
