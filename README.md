@@ -18,6 +18,7 @@ This repository is the community continuation of [CREDITSCOM/node](https://githu
 
 | | |
 |---|---|
+| What the community node adds, in short | [docs/FEATURES.md](docs/FEATURES.md) |
 | What changes from the official node | [docs/differences.md](docs/differences.md) |
 | Every change, pull request by pull request | [docs/CHANGES.md](docs/CHANGES.md) |
 | Block database, pruned storage, conversion | [docs/storage.md](docs/storage.md) |
