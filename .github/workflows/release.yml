@@ -221,7 +221,7 @@ jobs:
 
           - node: ${GITHUB_REPOSITORY}@${GITHUB_SHA}
           - contract executor: EnzinoBB/contract-executor release ${EXECUTOR_TAG}
-          - JDK: ojdkbuild 11.0.4, the one the official release ships
+          - JDK: ojdkbuild 11.0.4, the one the official release ships (Linux); Eclipse Temurin 11 (Windows, macOS)
 
           One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
           (\`./node --config-file config.pruned.ini\`).
