@@ -7,6 +7,7 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <csnode/archive_stream.hpp>
 #include <boost/serialization/map.hpp>
 #include <boost/serialization/string.hpp>
 
@@ -69,7 +70,8 @@ void BlockChain_Serializer::clear(const std::filesystem::path& rootDir) {
 
 void BlockChain_Serializer::save(const std::filesystem::path& rootDir) {
     std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_oarchive oa(ofs);
+    cs::ArchiveOutput out(ofs);   // the same header bytes on every system
+    boost::archive::binary_oarchive oa(out);
     oa << *previousNonEmpty_;
     oa << *lastNonEmptyBlock_;
     oa << *totalTransactionsCount_;
@@ -88,7 +90,8 @@ void BlockChain_Serializer::save(const std::filesystem::path& rootDir) {
 
 void BlockChain_Serializer::savePending(const std::filesystem::path& rootDir) {
     std::ofstream ofs(rootDir / kPendingFileName, std::ios::binary);
-    boost::archive::binary_oarchive oa(ofs);
+    cs::ArchiveOutput out(ofs);   // the same header bytes on every system
+    boost::archive::binary_oarchive oa(out);
     oa << kPendingFormat;
     oa << *pendingRound_;
     oa << *pendingStakingOn_ << *pendingMiningOn_;
@@ -105,7 +108,8 @@ void BlockChain_Serializer::loadPending(const std::filesystem::path& rootDir) {
         return;
     }
     std::ifstream ifs(path, std::ios::binary);
-    boost::archive::binary_iarchive ia(ifs);
+    cs::ArchiveInput in(ifs);   // also a checkpoint written on another system
+    boost::archive::binary_iarchive ia(in);
     uint8_t format = 0;
     ia >> format;
     if (format != 1 && format != kPendingFormat) {
@@ -146,7 +150,8 @@ void BlockChain_Serializer::resetPending() {
 
 void BlockChain_Serializer::load(const std::filesystem::path& rootDir) {
     std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_iarchive ia(ifs);
+    cs::ArchiveInput in(ifs);   // also a checkpoint written on another system
+    boost::archive::binary_iarchive ia(in);
     ia >> *previousNonEmpty_;
     ia >> *lastNonEmptyBlock_;
     ia >> *totalTransactionsCount_;

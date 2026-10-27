@@ -39,6 +39,7 @@ lines under the new release.
 |---|---|
 | #113 | packaging: one package per build for full and pruned storage (`config.ini` full, `config.pruned.ini` pruned on LMDB), half the release size; the workflows that take the latest package accept both layouts |
 | #114 | the node builds and passes its tests on Windows (MSVC, x64) and macOS (Apple Silicon): POSIX-only code behind `lib/system/platform.hpp`, the database lock now also on Windows, a new `build-platforms.yml` workflow; the release workflow also makes a Windows `.zip` and a macOS package (with Eclipse Temurin 11), kept as artifacts until a mainnet state-digest check on each system |
+| #115 | Windows and macOS nodes load the checkpoints and snapshots of Linux and sync mainnet with the same state digests: the binary checkpoint header records `long` as 8 bytes on every system (`cs::ArchiveOutput`, read back by `cs::ArchiveInput`), checkpoint text files are read and written in binary mode, macOS Boost is built as C++17; `Transport` releases the routing table with the p2p host, fixing a use-after-free at exit (a crash on macOS); a platform consensus check in CI |
 | #116 | snapshot: `node --survey-snapshots [seconds]` asks the neighbours for the snapshots they serve without opening the chain and prints what they declared; the weekly known-hosts job turns it into `snapshots.md` and `snapshot_sources.txt` (shipped in the packages when present) |
 
 ## community.13 — 2026-10-26

@@ -157,7 +157,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.BOOST_PREFIX }}
-          key: boost-${{ env.BOOST_VERSION }}-static-macos-14-v1
+          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-14-v1
 
       - name: Build Boost
         if: steps.cache-boost.outputs.cache-hit != 'true'
@@ -168,8 +168,11 @@ jobs:
           tar xjf boost.tar.bz2
           cd "boost_${v}"
           ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          # cxxstd=17: Apple clang compiles C++ as C++98 unless told otherwise; Boost built that way
+          # holds definitions of header templates (Asio in Boost.Log's syslog backend) that differ from
+          # the node's C++17 ones, and the linker keeps one of each
           ./b2 -j"$(sysctl -n hw.ncpu)" -d0 toolset=clang variant=release link=static threading=multi \
-            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            cxxstd=17 cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
             install --prefix="${BOOST_PREFIX}"
 
       - name: Save Boost

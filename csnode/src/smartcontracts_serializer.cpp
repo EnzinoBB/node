@@ -7,6 +7,7 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <csnode/archive_stream.hpp>
 
 #include <solver/smartcontracts.hpp>
 #include <csnode/smartcontracts_serializer.hpp>
@@ -32,7 +33,8 @@ void SmartContracts_Serializer::clear(const std::filesystem::path& rootDir) {
 
 void SmartContracts_Serializer::save(const std::filesystem::path& rootDir) {
     std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_oarchive oa(ofs);
+    cs::ArchiveOutput out(ofs);   // the same header bytes on every system
+    boost::archive::binary_oarchive oa(out);
     csdebug() << kLogPrefix << __func__;
     contracts_->printClassInfo();
     oa << contracts_->serialize();
@@ -60,7 +62,8 @@ void SmartContracts_Serializer::save(const std::filesystem::path& rootDir) {
 
 void SmartContracts_Serializer::load(const std::filesystem::path& rootDir) {
     std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_iarchive ia(ifs);
+    cs::ArchiveInput in(ifs);   // also a checkpoint written on another system
+    boost::archive::binary_iarchive ia(in);
     csdebug() << kLogPrefix << __func__;
     Bytes data;
     ia >> data;

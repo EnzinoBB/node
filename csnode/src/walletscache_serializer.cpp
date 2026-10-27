@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <fstream>
+#include <locale>
 #include <sstream>
 
 #include <boost/archive/text_oarchive.hpp>
@@ -63,7 +64,8 @@ void WalletsCache_Serializer::save(const std::filesystem::path& rootDir) {
 
 ::cscrypto::Hash WalletsCache_Serializer::hash() {
     {
-      std::ofstream ofs(kTmpDataFile);
+      std::ofstream ofs(kTmpDataFile, std::ios::binary);   // text mode on Windows would write \r\n and change the hash
+      ofs.imbue(std::locale::classic());   // with no_codecvt the archive formats numbers in the stream's locale
       boost::archive::text_oarchive oa(
         ofs,
         boost::archive::no_header | boost::archive::no_codecvt
