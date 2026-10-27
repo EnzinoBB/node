@@ -87,6 +87,27 @@ https address, so give another address only when you trust whoever publishes the
 a download that stops is resumed by running it again (`snapshot-download/`). The node's normal
 start never downloads from GitHub.
 
+## Seeing who serves what
+
+`./node --survey-snapshots [seconds]` (default 600, 10 to 86400; the node stopped) starts the node
+without opening its chain, whatever its folder holds, asks the neighbours that announce snapshots
+for their manifests for that long, prints what they declared and exits with 0. Nothing is fetched or
+imported, and nothing in the folder changes except the node's `known_hosts.txt` and `known_peers.json`.
+The output is one line per snapshot, strongest first, then the serving peers that gave no manifest:
+
+```
+SURVEY group seq=186600000 head=<hex> state=<hex> settings=<hex> sources=<key>@<address>@<created>,...
+SURVEY silent <key>@<address>
+SURVEY end groups=1 serving=3 silent=1
+```
+
+The weekly known-hosts job runs it after its collection and turns it, with `known_peers.json`, into
+`snapshots.md` (the snapshots seen, who declares them, how many independent networks serve: what the
+`min_sources` setting depends on) and `snapshot_sources.txt` (the serving nodes that answered a
+verified manifest, at most three per /24 or /48), both in the release `known-hosts`. The sources
+file goes to the packages through a reviewed pull request, and only says which peers to bring into
+the neighbour table first: the node finds every serving peer anyway.
+
 ## Exporting and importing by hand
 
 `./node --export-snapshot <dir>` on a stopped node builds a snapshot of its latest checkpoint;

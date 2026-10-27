@@ -327,6 +327,11 @@ jobs:
           - name: snapshot-p2p-join
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
             fixed: true
+          # `node --survey-snapshots` from the joined node's folder, at the end of the same run: the three
+          # serving nodes in one group, and the sources file the weekly job makes from it
+          - name: snapshot-p2p-survey
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 JOIN_SURVEY=1 TARGET_SEQ=3300
+            fixed: true
           - name: snapshot-p2p-join-full
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
             fixed: true

@@ -66,6 +66,7 @@ int main(int argc, char* argv[]) {
         ("export-snapshot", po::value<std::string>(), "build the snapshot of the latest periodic checkpoint into the given folder, then exit (the node must be stopped)")
         ("import-snapshot", po::value<std::string>(), "restore the snapshot of the given snapshot.json into this node's empty database, then exit")
         ("download-snapshot", po::value<std::string>()->implicit_value(""), "download the published snapshot (or the snapshot.json at the given address) with curl, check it and restore it into this node's empty database, then exit")
+        ("survey-snapshots", po::value<uint32_t>()->implicit_value(600), "ask the neighbours for the snapshots they serve for this many seconds (default 600; 10 to 86400), print what they declared and stop; no chain is opened, whatever this folder holds")
         ("config-file", po::value<std::string>(), "path to configuration file (default: \"config.ini\")")
         ("public-key-file", po::value<std::string>(), "path to public key file (default: \"NodePublic.txt\")")
         ("private-key-file", po::value<std::string>(), "path to private key file (default: \"NodePrivate.txt\")")
@@ -251,6 +252,15 @@ int main(int argc, char* argv[]) {
             cslog() << "Keys dumped to " << fName;
             return EXIT_SUCCESS;
         }
+    }
+
+    if (vm.count("survey-snapshots") > 0) {
+        const auto seconds = vm["survey-snapshots"].as<uint32_t>();
+        if (seconds < 10 || seconds > 86400) {
+            std::cerr << "--survey-snapshots takes 10 to 86400 seconds" << std::endl;
+            return EXIT_FAILURE;
+        }
+        Node::setSurvey(seconds);
     }
 
     cs::Peer peer(kServiceName, config, vm);

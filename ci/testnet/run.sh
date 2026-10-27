@@ -267,6 +267,10 @@ JOIN_LATE_SERVE_AFTER=${JOIN_LATE_SERVE_AFTER:-90}
 JOIN_SOURCES=${JOIN_SOURCES:-}
 case "$JOIN_SOURCES" in ""|keys|file) ;; *) echo "JOIN_SOURCES must be keys, file or empty, got '$JOIN_SOURCES'"; exit 1 ;; esac
 JOIN_KILL_DURING_FETCH=${JOIN_KILL_DURING_FETCH:-0}
+# JOIN_SURVEY=1 (with JOIN_FETCH=p2p): at the end the joining node is stopped and `node --survey-snapshots`
+# runs from its folder: the serving nodes must be listed in one group, and snapshot_sources.py must
+# turn the output into a sources file that names them
+JOIN_SURVEY=${JOIN_SURVEY:-0}
 FORGE_NODE=${FORGE_NODE:-0}
 CORRUPT_NODE=${CORRUPT_NODE:-0}
 for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ } $FORGE_NODE $CORRUPT_NODE; do
@@ -1839,5 +1843,33 @@ print(f"capabilities: {len(peers)} known peers, {len(serving) - len(bad)} of {le
 sys.exit(1 if bad or extra else 0)
 PY
     PIDS[$observer]=""
+fi
+if [ "$JOIN_SURVEY" = 1 ]; then
+    [ "$JOIN_FETCH" = p2p ] || { echo "JOIN_SURVEY needs JOIN_FETCH=p2p"; exit 1; }
+    sdir="$WORK/n$JOIN_NODE"
+    fail_survey() { echo "FAIL: survey from n$JOIN_NODE: $1"; tail -n 20 "$sdir/survey.txt" "$sdir/survey.err" 2>/dev/null || true; exit 1; }
+    # the folder's node must be stopped: it holds db/.lock and the p2p port
+    kill -TERM "${PIDS[$JOIN_NODE]}" 2>/dev/null || true
+    for _ in $(seq 1 120); do kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null || break; sleep 1; done
+    kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null && fail_survey "the node did not stop"
+    wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || true
+    rm -f "$sdir/known_peers.json"
+    (cd "$sdir" && timeout 240 "$BIN" --db-path db --config-file config.ini --survey-snapshots 60 </dev/null > survey.txt 2> survey.err) \
+        || fail_survey "the survey run failed or took more than 240 s"
+    grep -aq '^SURVEY end groups=' "$sdir/survey.txt" || fail_survey "no summary line"
+    ngroups=$(sed -nE 's/^SURVEY end groups=([0-9]+) .*/\1/p' "$sdir/survey.txt")
+    [ "${ngroups:-0}" -ge 1 ] || fail_survey "no snapshot declared"
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        grep -aq "^SURVEY group .*sources=.*${KEYS[$((i - 1))]}@" "$sdir/survey.txt" || fail_survey "n$i, which serves, is in no group"
+    done
+    # the file is a node's own: the log, the pidfile and the chain are untouched; known_peers.json is fresh
+    [ -s "$sdir/known_peers.json" ] || fail_survey "known_peers.json was not written at the stop"
+    python3 "$HERE/../known-hosts/snapshot_sources.py" "$sdir/survey.txt" "$sdir/known_peers.json" "$sdir/survey-out" || fail_survey "snapshot_sources.py failed"
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        grep -q " ${KEYS[$((i - 1))]}\$" "$sdir/survey-out/snapshot_sources.txt" || fail_survey "snapshot_sources.txt does not list n$i"
+    done
+    ! grep -aq 'SNAPSHOT: importing\|SNAPSHOT: fetched block' "$sdir/survey.err" "$sdir/survey.txt" || fail_survey "the survey fetched or imported a snapshot"
+    echo "survey: $(grep -a '^SURVEY end' "$sdir/survey.txt"); $(grep -vc '^#' "$sdir/survey-out/snapshot_sources.txt") source(s) listed"
+    PIDS[$JOIN_NODE]=""
 fi
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

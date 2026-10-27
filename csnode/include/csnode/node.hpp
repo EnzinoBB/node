@@ -34,6 +34,8 @@
 
 class Transport;
 
+struct SnapshotData;   // client/config/config.hpp
+
 namespace cs {
 class SnapshotFetcher;
 class SnapshotProvider;
@@ -104,6 +106,11 @@ public:
     // does not match its digest, 1 when a bootstrap from the network fails (main.cpp returns it)
     static int exitCode() {
         return exitCode_.load();
+    }
+    // node --survey-snapshots [seconds]: the node does no chain work; it asks its neighbours for
+    // snapshot manifests for that long, prints what they declared and stops (0: a normal start)
+    static void setSurvey(uint32_t seconds) {
+        surveySeconds_ = seconds;
     }
 
     bool isStopRequested() const {
@@ -472,6 +479,10 @@ private:
     // chain is not open, every message but the two snapshot replies is dropped. Processor thread,
     // except bootstrapWork()
     bool startBootstrap();
+    // the survey: the bootstrap's discovery and manifest phases, no agreement, fetch or import
+    bool startSurvey(uint32_t seconds);
+    void finishSurvey();
+    std::unique_ptr<cs::SnapshotFetcher> makeFetcher(const SnapshotData& cfg, bool dryRun);
     void onSnapshotTick();
     void startBootstrapWorker(bool import);
     // the worker thread: the import (snapshot set) or nothing (the fallback), then initChain() and
@@ -579,6 +590,8 @@ private:
     std::string bootstrapDbPath_;                 // read once at the start: the worker reads no config
     std::string bootstrapBackend_;
     inline static std::atomic<int> exitCode_{0};
+    inline static std::atomic<uint32_t> surveySeconds_{0};
+    bool surveying_ = false;
 
     uint32_t startPacketRequestPoint_ = 0;
 
