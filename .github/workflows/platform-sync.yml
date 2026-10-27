@@ -123,7 +123,12 @@ jobs:
 
       - name: Restore the published snapshot
         working-directory: csnode
-        run: ${{ matrix.node }} --config-file config.ini --download-snapshot </dev/null
+        # the import prints hundreds of thousands of debug lines to the console (the job log would be
+        # cut before the next steps): only the node's own report lines are kept in the log
+        run: |
+          ${{ matrix.node }} --config-file config.ini --download-snapshot </dev/null > download.log 2>&1 || { tail -n 60 download.log | cut -c1-300; exit 1; }
+          grep -aE '^(download-snapshot|import-snapshot|snapshot)' download.log | cut -c1-250
+          tail -n 3 download.log | cut -c1-250
 
       - name: Sync to the head
         env:
@@ -142,7 +147,7 @@ jobs:
           # that ends, has no API after 4 minutes or moves at less than a tenth of that speed is
           # looked at at once, not after the timeout
           python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min "$TIMEOUT_MIN" \
-            --exit-file csnode/node-exit.txt --api-grace-min 4 --min-rate 3000 --window-min 2 || {
+            --exit-file csnode/node-exit.txt --api-grace-min 4 --min-rate 3000 --window-min 2 2>&1 | tee csnode/waithead.txt || {
             echo "---- the end of the node's output"; tail -n 60 csnode/stdout.log
             exit 1
           }
@@ -169,7 +174,10 @@ jobs:
           cat csnode/log/log_*.txt 2>/dev/null | grep -aE "counted transactions is different|Couldn't save block|is not on this chain|but its caches already hold block|snapshot.verified|snapshot.mismatch" | head -50 > "result/problems-$OS.txt" || true
           tail -c 2000000 csnode/stdout.log > "result/stdout-$OS.log" 2>/dev/null || true
           cat csnode/node-exit.txt 2>/dev/null | tee result/exit-$OS.txt || true
+          cp csnode/waithead.txt "result/waithead-$OS.txt" 2>/dev/null || true
+          cp csnode/download.log "result/download-$OS.log" 2>/dev/null || true
           if [ "$OS" = macos ]; then
+            sleep 15   # the crash report is written a moment after the process ends
             cp ~/Library/Logs/DiagnosticReports/node*.ips result/ 2>/dev/null || true
             ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head || true
           fi
