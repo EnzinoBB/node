@@ -162,6 +162,19 @@
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
 set -euo pipefail
 
+# the system this runs on: every scenario on Linux; the default scenario also on macOS and on Windows
+# (Git Bash), see .github/workflows/testnet-platforms.yml. What needs Linux stays behind these checks
+case "$(uname -s)" in
+    Linux) OS_KIND=linux ;;
+    Darwin) OS_KIND=macos ;;
+    MINGW*|MSYS*|CYGWIN*) OS_KIND=windows ;;
+    *) OS_KIND=other ;;
+esac
+if [ "$OS_KIND" != linux ]; then
+    # mapfile, ${var,,}: macOS ships bash 3.2 (the workflow installs a newer one)
+    [ "${BASH_VERSINFO[0]}" -ge 4 ] || { echo "FAIL: run.sh needs bash 4 or later, this is $BASH_VERSION"; exit 1; }
+fi
+
 BIN=$(realpath "$1")
 # mixed nodes: the even nodes run BIN_ALT, built from another ref
 BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
@@ -358,6 +371,54 @@ WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
 declare -a PIDS KEYS REPORTED_DOWN
+
+if [ "$OS_KIND" != linux ]; then
+    # sudo, tc netem, iptables, cgroups, tmpfs and /proc are Linux only
+    not_here() { echo "FAIL: $1 needs Linux (this is $OS_KIND)"; exit 1; }
+    [ -z "$NET_FAULT" ] || not_here "NET_FAULT (tc netem, iptables)"
+    [ -z "$SLOW_NODES" ] || not_here "SLOW_NODES (cgroups)"
+    [ "$DISK_FULL_NODE" -eq 0 ] || not_here "DISK_FULL_NODE (tmpfs)"
+    [ "$NODE_NETS" != 1 ] || not_here "NODE_NETS=1 (iptables SNAT, JOIN_FETCH=p2p without JOIN_SOURCES=keys)"
+    if [ "$SAMPLE_SECONDS" -gt 0 ]; then
+        echo "sampler: off on $OS_KIND (sampler.py reads /proc)"
+        SAMPLE_SECONDS=0
+    fi
+fi
+if [ "$OS_KIND" = windows ]; then
+    # the executor is started through executor.sh, and executors are found by name (pkill)
+    [ "$CONTRACTS" != 1 ] || not_here "CONTRACTS"
+    # Python's "\r\n" line ends would stay in what bash reads from it (keys, master key)
+    export PYTHONPATH="$(cygpath -w "$HERE/windows")${PYTHONPATH:+;$PYTHONPATH}"
+    # Git Bash has no pkill: the only processes looked up by name are executors, refused above
+    pkill() { return 1; }
+    # the node of PIDS[i] (the pid of its winproc.py launcher), by its Windows pid
+    node_winpid_of() {
+        local i
+        for i in "${!PIDS[@]}"; do
+            if [ "${PIDS[$i]}" = "$1" ]; then cat "$WORK/n$i/node.winpid" 2>/dev/null || true; return; fi
+        done
+    }
+    # a signal from Git Bash ends a native process at once: SIGTERM to a node becomes Ctrl-Break on
+    # its console (its graceful stop, as SIGTERM on Linux), SIGKILL also ends it with taskkill; other
+    # signals and other processes as before
+    kill() {
+        local sig=$1 rc=0 p w
+        case "$sig" in -TERM|-KILL) ;; *) builtin kill "$@"; return ;; esac
+        shift
+        for p in "$@"; do
+            w=$(node_winpid_of "$p")
+            if [ -z "$w" ] || ! builtin kill -0 "$p" 2>/dev/null; then
+                builtin kill "$sig" "$p" || rc=$?
+            elif [ "$sig" = -TERM ]; then
+                python3 "$HERE/winproc.py" stop "$w" || rc=$?
+            else
+                taskkill //F //PID "$w" > /dev/null 2>&1 || true
+                builtin kill -KILL "$p" 2>/dev/null || true
+            fi
+        done
+        return $rc
+    }
+fi
 
 # official even nodes: refuse what they cannot take part in (see BIN_ALT_OFFICIAL above)
 official_node() { [ "$BIN_ALT_OFFICIAL" = 1 ] && [ $(( $1 % 2 )) -eq 0 ]; }
@@ -591,6 +652,14 @@ start_node() {
     local bin=$BIN
     if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then bin=$BIN_ALT; fi
     local extra_var="EXTRA_ARGS_$i"
+    if [ "$OS_KIND" = windows ]; then
+        # a console of its own, so that it can be stopped gracefully (see kill above); PIDS[i] is the
+        # launcher's pid, which ends with the node's exit code
+        rm -f "$WORK/n$i/node.winpid"
+        (cd "$WORK/n$i" && exec python3 "$HERE/winproc.py" run node.winpid "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
+        PIDS[$i]=$!
+        return 0
+    fi
     (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
