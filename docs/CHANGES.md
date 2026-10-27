@@ -23,6 +23,8 @@ lines under the new release.
 - **Snapshots.** A node builds, verifies and restores signed snapshots itself, downloads the one
   published on GitHub on request, and shares snapshots with its p2p neighbours, so that a new node
   starts in minutes from several independent sources. See [snapshots.md](snapshots.md).
+- **Windows and macOS.** Packages for Windows (x64) and macOS (Apple Silicon), with a mainnet check
+  that the three systems agree on the state.
 - **Wallet state digest.** A digest of all wallet state, logged every 1000 blocks, lets different
   nodes and builds compare their state.
 - **Continuous integration.**
@@ -35,6 +37,10 @@ lines under the new release.
 
 ## Not released yet
 
+Nothing yet.
+
+## community.14 — 2026-10-27
+
 | PR | Change |
 |---|---|
 | #113 | packaging: one package per build for full and pruned storage (`config.ini` full, `config.pruned.ini` pruned on LMDB), half the release size; the workflows that take the latest package accept both layouts |
@@ -42,6 +48,22 @@ lines under the new release.
 | #115 | Windows and macOS nodes load the checkpoints and snapshots of Linux and sync mainnet with the same state digests: the binary checkpoint header records `long` as 8 bytes on every system (`cs::ArchiveOutput`, read back by `cs::ArchiveInput`), checkpoint text files are read and written in binary mode, macOS Boost is built as C++17; `Transport` releases the routing table with the p2p host, fixing a use-after-free at exit (a crash on macOS); a platform consensus check in CI |
 | #116 | snapshot: `node --survey-snapshots [seconds]` asks the neighbours for the snapshots they serve without opening the chain and prints what they declared; the weekly known-hosts job turns it into `snapshots.md` and `snapshot_sources.txt` (shipped in the packages when present) |
 | #117 | client: `--download-snapshot`, `--import-snapshot` and `--export-snapshot` start the logger with the configured levels; they printed every debug and trace record of the import to the console (about 684,000 lines for one `--download-snapshot`, the Docker first start included) |
+| — | release: the version announced to peers (`MINOR_NODE_VERSION`) is 14; the packages and the Docker image carry a `VERSION` file with the release's version, which the node puts in the snapshots it builds |
+
+Windows and macOS (#113–#115). The release has a package for Windows (x64, a `.zip`) and for macOS
+(Apple Silicon) next to the Linux ones, each with its own JDK (Eclipse Temurin 11); the Linux
+package is one for full and pruned storage now (`config.ini`, `config.pruned.ini`), half the size
+of the two it replaces. A Windows or macOS node loads the checkpoints and snapshots a Linux node
+wrote and the other way round, and syncs mainnet with the same state digests: three nodes, one on
+each system, restored the published snapshot and logged identical digests for 91 blocks, at 26,000
+to 51,000 blocks per minute from the snapshot to the head. On Linux the checkpoint and snapshot
+files are byte for byte what they were. A use-after-free at exit (the routing table outliving the
+p2p host) is fixed; it crashed the macOS node at every stop and was undefined behaviour on the
+other systems.
+
+Snapshots (#116, #117). `node --survey-snapshots` shows which neighbours serve which snapshot,
+and a weekly job publishes it with a list of serving nodes. `--download-snapshot` and the other
+snapshot commands no longer print every debug record of the import to the console.
 
 ## community.13 — 2026-10-26
 
