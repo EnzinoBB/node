@@ -1,0 +1,195 @@
+name: macOS start-up crash (debug)
+
+# Diagnostics for the SIGBUS of the macOS node in UdpSocket::Open (RoutingTable construction).
+# "current": Boost as cached by build-platforms.yml; "cxx17": Boost built with cxxstd=17.
+on:
+  push:
+    branches: ['debug/macos-udp-crash']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+
+jobs:
+  macos:
+    name: macOS (${{ matrix.boost }})
+    runs-on: macos-14
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - boost: current
+            cache_key: boost-1.83.0-static-macos-14-v1
+            b2_std: ''
+          - boost: cxx17
+            cache_key: boost-1.83.0-static-cxx17-macos-14-v1
+            b2_std: cxxstd=17
+    env:
+      BOOST_PREFIX: /Users/runner/boost
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+          rm -f third-party/lmdbxx/VERSION
+          git -C cscrypto apply ../ci/platform/blake2-portable.patch
+
+      - name: Install build tools
+        run: |
+          brew install ninja bison flex autoconf automake libtool
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Compiler defaults
+        run: |
+          clang++ --version
+          echo | clang++ -x c++ -dM -E - | grep -E '__cplusplus|__clang_version__'
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ matrix.cache_key }}
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | shasum -a 256 -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(sysctl -n hw.ncpu)" -d0 toolset=clang variant=release link=static threading=multi \
+            ${{ matrix.b2_std }} cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true' && matrix.boost != 'current'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
+      - name: Boost.Log objects with a UDP socket open
+        run: |
+          ls "$BOOST_PREFIX/lib"
+          for a in "$BOOST_PREFIX"/lib/libboost_log*.a; do
+            echo "== $a"
+            nm -m "$a" 2>/dev/null | c++filt | awk '
+              /\(.*\.o\):$/ { member = $0; next }
+              /reactive_socket_service<boost::asio::ip::udp>::open|basic_socket<boost::asio::ip::udp, boost::asio::any_io_executor>::open/ { print member " " $0 }' | head -40
+          done
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,-map,${GITHUB_WORKSPACE}/node.map" \
+            -DHAVE_CLANG_THREAD_SAFETY=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_HASKELL=OFF
+
+      - name: Build
+        run: cmake --build build --target client -j"$(sysctl -n hw.ncpu)"
+
+      - name: Which objects define the UDP socket open
+        run: |
+          mkdir -p result
+          cp node.map result/ || true
+          sym_open='__ZN5boost4asio12basic_socketINS0_2ip3udpENS0_15any_io_executorEE4openERKS3_'
+          python3 -I - node.map <<'EOF' | tee result/map-open.txt
+          import re, sys
+          objs, in_objs, in_syms = {}, False, False
+          for line in open(sys.argv[1], errors="replace"):
+              if line.startswith("# Object files:"):
+                  in_objs = True; continue
+              if line.startswith("# Sections:"):
+                  in_objs = False
+              if line.startswith("# Symbols:"):
+                  in_syms = True; continue
+              if in_objs:
+                  m = re.match(r"\[\s*(\d+)\]\s+(.*)", line)
+                  if m: objs[m.group(1)] = m.group(2).strip()
+              elif in_syms and ("ip3udp" in line and ("4open" in line)):
+                  m = re.match(r"(0x[0-9A-F]+)\s+(0x[0-9A-F]+)\s+\[\s*(\d+)\]\s+(.*)", line)
+                  if m:
+                      print(m.group(1), m.group(2), objs.get(m.group(3)), m.group(4).strip())
+          EOF
+          nm -m build/client/node | c++filt | grep -E "reactive_socket_service<boost::asio::ip::udp>::open|basic_socket<boost::asio::ip::udp, boost::asio::any_io_executor>::open" | tee result/nm-open.txt
+
+      - name: Prepare a node directory
+        run: |
+          python3 -m pip install --quiet --break-system-packages base58 pynacl || python3 -m pip install --quiet base58 pynacl
+          mkdir run
+          cp build/client/node run/
+          cp packaging/mainnet/known_hosts.txt packaging/mainnet/settings.properties packaging/mainnet/default_confidants.txt run/
+          awk '/^\[/ { section = $0 } section == "[event_report]" && !/^;/ && NF { print ";" $0; next } { print }' \
+            packaging/mainnet/config.ini > run/config.ini
+          python3 ci/testnet/gen_keys.py 1 keys >/dev/null
+          cp keys/n1/NodePublic.txt keys/n1/NodePrivate.txt run/
+
+      - name: Run the node under lldb
+        if: matrix.boost == 'current'
+        working-directory: run
+        run: |
+          sudo DevToolsSecurity -enable || true
+          perl -e 'alarm shift; exec @ARGV' 240 lldb --batch \
+            -o 'process handle SIGPIPE -n true -p true -s false' \
+            -o 'run' \
+            -k 'thread backtrace' \
+            -k 'register read' \
+            -k 'disassemble -p -c 4' \
+            -k 'disassemble -f' \
+            -k 'image lookup -v -a $x20' \
+            -k 'memory region $x20' \
+            -k 'kill' -k 'quit' \
+            -- ./node --config-file config.ini > ../result/lldb.txt 2>&1 || true
+          pkill -9 -f 'node --config-file' || true
+          tail -c 200000 ../result/lldb.txt | grep -v '^\[' | tail -400 || true
+
+      - name: Run the node
+        working-directory: run
+        run: |
+          rm -rf log db* 2>/dev/null || true
+          ( ./node --config-file config.ini </dev/null > ../result/stdout.log 2>&1; echo "exit $?" > ../result/exit.txt ) &
+          ok=0
+          for _ in $(seq 1 120); do
+            if grep -aq "Start listen on port 9510" ../result/stdout.log log/* 2>/dev/null; then ok=1; break; fi
+            [ -f ../result/exit.txt ] && break
+            sleep 1
+          done
+          sleep 20
+          pkill -TERM -f 'node --config-file' || true
+          sleep 10
+          pkill -9 -f 'node --config-file' || true
+          pkill -9 -f 'contract-executor' || true
+          cat ../result/exit.txt 2>/dev/null || true
+          grep -a -m5 -E "UPnP|Start listen|opened successfully" ../result/stdout.log log/* 2>/dev/null || true
+          cp ~/Library/Logs/DiagnosticReports/node*.ips ../result/ 2>/dev/null || true
+          echo "reached listen: $ok"
+          [ "$ok" = 1 ]
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-debug-${{ matrix.boost }}
+          path: result/
+          retention-days: 14
