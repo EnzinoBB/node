@@ -1,25 +1,53 @@
 name: Platform consensus check
 
-# The packages of one Release run on Linux, Windows and macOS (Apple Silicon) each restore the
-# published pruned snapshot with --download-snapshot and sync mainnet up to its head, with the
-# executor running as the packages ship it. Every node logs its state digest each 1000 blocks: the
-# three systems must log the same digests for the same blocks. The Windows and macOS packages are
-# published only after this check has passed (PUBLISH_PLATFORMS in release.yml).
+# The packages for Linux, Windows and macOS (Apple Silicon) each restore the published pruned
+# snapshot with --download-snapshot and sync mainnet up to its head, with the executor running as the
+# packages ship it. Every node logs its state digest each 1000 blocks: the three systems must log the
+# same digests for the same blocks, reach the head at a speed in line with Linux, and stop cleanly
+# (Linux and macOS exit with status 0, macOS leaves no crash report).
+#
+# Where the packages come from:
+#   - release.yml calls this workflow on the packages of its own run (release_run = its run id), and
+#     publishes the Windows and macOS packages only if it passes;
+#   - a scheduled run (weekly) and a manual run without inputs take the latest published community
+#     release, so that what users download is what is checked;
+#   - a manual run with release_run takes the packages of that Release run (a pull request's too).
 on:
-  # a platform-sync-* tag checks the latest successful Release run (a manual run needs the workflow
-  # on the default branch)
+  schedule:
+    - cron: '0 5 * * 0'   # Sunday 05:00 UTC
+  # a platform-sync-* tag checks the latest published release (a manual run needs the workflow on
+  # the default branch)
   push:
     tags: ['platform-sync-*']
   workflow_dispatch:
     inputs:
       release_run:
-        description: 'Id of a Release workflow run whose artifacts hold the Linux, Windows and macOS packages (empty = the latest successful one)'
+        description: 'Id of a Release workflow run whose artifacts hold the Linux, Windows and macOS packages (empty = the latest published community release)'
+        default: ''
+      tag:
+        description: 'A published release to check, e.g. community-v4.2.532-community.14 (empty = the latest)'
         default: ''
       timeout_min:
         description: 'Minutes each node has to reach the head (Linux needs about 5)'
         default: '30'
       min_common:
         description: 'Blocks with a digest from all three systems needed to pass'
+        default: '5'
+  workflow_call:
+    inputs:
+      release_run:
+        description: 'Id of the Release run whose artifacts hold the packages: the calling run itself'
+        type: string
+        default: ''
+      current_run:
+        description: 'release_run is the calling run, still running: it is not checked for success'
+        type: boolean
+        default: false
+      timeout_min:
+        type: string
+        default: '30'
+      min_common:
+        type: string
         default: '5'
 
 permissions:
@@ -30,29 +58,40 @@ jobs:
   resolve:
     runs-on: ubuntu-24.04
     outputs:
-      run: ${{ steps.run.outputs.run }}
+      mode: ${{ steps.src.outputs.mode }}
+      run: ${{ steps.src.outputs.run }}
+      tag: ${{ steps.src.outputs.tag }}
     steps:
-      - name: Release run
-        id: run
+      - name: Where the packages come from
+        id: src
         env:
           GH_TOKEN: ${{ github.token }}
           IN_RUN: ${{ inputs.release_run }}
+          IN_TAG: ${{ inputs.tag }}
+          CURRENT_RUN: ${{ inputs.current_run }}
         run: |
-          # only runs of code from this repository: a pull request from a fork builds packages too,
-          # and those binaries are not run here
-          trusted='[.workflow_runs[] | select(.conclusion == "success" and .head_repository.full_name == $repo)]'
-          run="$IN_RUN"
-          if [ -z "$run" ]; then
-            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs?per_page=50" \
-              | jq -r --arg repo "$GITHUB_REPOSITORY" "$trusted | .[0].id // empty")
+          if [ -n "$IN_RUN" ]; then
+            echo "$IN_RUN" | grep -qE '^[0-9]+$' || { echo "bad run id '$IN_RUN'"; exit 1; }
+            if [ "$CURRENT_RUN" != true ]; then
+              # only runs of code from this repository: a pull request from a fork builds packages too,
+              # and those binaries are not run here
+              info=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$IN_RUN")
+              [ "$(jq -r .path <<< "$info")" = .github/workflows/release.yml ] || { echo "run $IN_RUN is not a Release run"; exit 1; }
+              [ "$(jq -r .head_repository.full_name <<< "$info")" = "$GITHUB_REPOSITORY" ] || { echo "run $IN_RUN built code from another repository"; exit 1; }
+              [ "$(jq -r .conclusion <<< "$info")" = success ] || { echo "run $IN_RUN did not succeed"; exit 1; }
+            fi
+            echo "the packages of Release run $IN_RUN"
+            printf 'mode=run\nrun=%s\ntag=\n' "$IN_RUN" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
-          echo "$run" | grep -qE '^[0-9]+$' || { echo "bad run id '$run'"; exit 1; }
-          info=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run")
-          [ "$(jq -r .path <<< "$info")" = .github/workflows/release.yml ] || { echo "run $run is not a Release run"; exit 1; }
-          [ "$(jq -r .head_repository.full_name <<< "$info")" = "$GITHUB_REPOSITORY" ] || { echo "run $run built code from another repository"; exit 1; }
-          [ "$(jq -r .conclusion <<< "$info")" = success ] || { echo "run $run did not succeed"; exit 1; }
-          echo "Release run $run"
-          echo "run=$run" >> "$GITHUB_OUTPUT"
+          tag="$IN_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 50 --json tagName,isDraft,isPrerelease \
+              --jq '[.[] | select((.isDraft or .isPrerelease) | not) | .tagName | select(startswith("community-v"))][0]')
+          fi
+          echo "$tag" | grep -qE '^community-v[0-9A-Za-z._-]+$' || { echo "no published community release found ('$tag')"; exit 1; }
+          echo "the packages of the published release $tag"
+          printf 'mode=tag\nrun=\ntag=%s\n' "$tag" >> "$GITHUB_OUTPUT"
 
   sync:
     name: Sync (${{ matrix.os }})
@@ -93,7 +132,8 @@ jobs:
       - name: Python packages
         run: python -m pip install --quiet thriftpy2 base58 pynacl
 
-      - name: Download the packages
+      - name: Download the packages of the run
+        if: needs.resolve.outputs.mode == 'run'
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ needs.resolve.outputs.run }}
@@ -101,6 +141,36 @@ jobs:
           pattern: credits-node-*
           merge-multiple: true
           path: packages
+
+      # what users download: the package of this system and the checksum files, checked here
+      - name: Download the packages of the release
+        if: needs.resolve.outputs.mode == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir packages
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir packages --pattern "$PACKAGE" --pattern 'SHA256SUMS*'
+          python -I - packages <<'PY'
+          import glob, hashlib, os, sys
+          root = sys.argv[1]
+          sums = {}
+          for f in glob.glob(os.path.join(root, "SHA256SUMS*")):
+              for line in open(f):
+                  parts = line.split()
+                  if len(parts) == 2:
+                      sums[parts[1].lstrip("*")] = parts[0]
+          checked = 0
+          for f in glob.glob(os.path.join(root, "credits-node-*")):
+              name = os.path.basename(f)
+              h = hashlib.sha256(open(f, "rb").read()).hexdigest()
+              if sums.get(name) != h:
+                  sys.exit(f"{name}: checksum {h} is not the published one {sums.get(name)}")
+              checked += 1
+              print(f"{name}: checksum ok")
+          sys.exit(0 if checked else "no package downloaded")
+          PY
 
       - name: Unpack
         env:
@@ -235,4 +305,20 @@ jobs:
           if bad or len(common) < need:
               sys.exit(1)
           print("the three systems agree")
+          # a clean stop: Linux and macOS exit with status 0 (Windows is stopped by taskkill: no status to
+          # read), and macOS leaves no crash report (the stop of a macOS node crashed once)
+          unclean = []
+          for os_name in ("linux", "macos"):
+              path = os.path.join(root, f"exit-{os_name}.txt")
+              text = open(path, errors="replace").read().strip() if os.path.exists(path) else "no exit status recorded"
+              print(f"{os_name}: {text}")
+              if not text.endswith("status 0"):
+                  unclean.append(f"{os_name}: {text}")
+          reports = [f for f in os.listdir(root) if f.endswith(".ips")]
+          if reports:
+              unclean.append("crash reports: " + ", ".join(reports))
+          if unclean:
+              print("NOT A CLEAN STOP: " + "; ".join(unclean))
+              sys.exit(1)
+          print("the nodes stopped cleanly")
           EOF

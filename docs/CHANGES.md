@@ -37,7 +37,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #119 | ci: the release checks the Windows and macOS packages on mainnet before publishing them (a node of each system restores the published snapshot, syncs to the head, logs the same state digests as Linux and stops cleanly), and the same check runs weekly on the latest published release |
 
 ## community.14 — 2026-10-27
 

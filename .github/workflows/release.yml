@@ -6,7 +6,8 @@ name: Release
 # release ships, and the official configuration files kept in packaging/mainnet.
 #
 # A tag community-v<version> publishes a release; a manual run builds the packages as workflow
-# artifacts and publishes only when asked.
+# artifacts and publishes only when asked. The Linux packages are published at once; the Windows and
+# macOS ones follow when the platform consensus check (platform-sync.yml) has passed on them.
 on:
   push:
     tags: ['community-v*']
@@ -45,10 +46,6 @@ env:
   TEMURIN_WINDOWS_SHA256: d5008f02174c1ad21c10407cbf104815cb390ec4c263d53946e8d0507d7a77f9
   TEMURIN_MACOS: OpenJDK11U-jdk_aarch64_mac_hotspot_11.0.32.1_1.tar.gz
   TEMURIN_MACOS_SHA256: c487a1c3a56588b3a32d0d07cdd526bf3d401c4b8422be772ca178bfcd647f3f
-  # the Windows and macOS packages join a published release: a node of each system matched the Linux
-  # state digests on mainnet (platform-sync.yml, run on the packages of this commit before the tag).
-  # 'false': they stay workflow artifacts
-  PUBLISH_PLATFORMS: 'true'
 
 jobs:
   # the node for Ubuntu 20.04 and later (glibc 2.31); the default build below needs glibc 2.38
@@ -221,7 +218,7 @@ jobs:
 
           - node: ${GITHUB_REPOSITORY}@${GITHUB_SHA}
           - contract executor: EnzinoBB/contract-executor release ${EXECUTOR_TAG}
-          - JDK: ojdkbuild 11.0.4, the one the official release ships
+          - JDK: ojdkbuild 11.0.4, the one the official release ships (Linux); Eclipse Temurin 11 (Windows, macOS)
 
           One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
           (\`./node --config-file config.pruned.ini\`).
@@ -306,9 +303,45 @@ jobs:
           path: dist/
           retention-days: 30
 
+  # a node of each system, started from these packages, restores the published snapshot and syncs
+  # mainnet to its head: the state digests of the three systems must be the same, and the nodes must
+  # stop cleanly. A macOS job that finds no runner is cancelled by GitHub after 15 minutes: run the
+  # failed jobs again
+  platform-check:
+    name: Platform consensus check
+    needs: [package, platform-packages]
+    # a pull request that touches the packaging builds the packages only; a release (or a manual run)
+    # checks them against mainnet
+    if: needs.package.outputs.publish == 'true' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/platform-sync.yml
+    with:
+      release_run: ${{ github.run_id }}
+      current_run: true
+
+  # the Windows and macOS packages join the published release only once the check has passed
+  publish-platforms:
+    name: Publish the Windows and macOS packages
+    needs: [package, platform-check]
+    if: needs.package.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - name: Download the packages
+        uses: actions/download-artifact@v4
+        with:
+          name: credits-node-${{ env.VERSION }}-windows-macos
+          path: dist
+
       - name: Publish
-        if: env.PUBLISH == 'true' && env.PUBLISH_PLATFORMS == 'true'
-        run: gh release upload "community-v${VERSION}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          ls -la dist
+          gh release upload "community-v${VERSION}" dist/* --clobber --repo "$GITHUB_REPOSITORY"
 
   # the Docker image of the package (the image chooses full or pruned at its first start: the
   # package provides the binaries and the configuration template)
