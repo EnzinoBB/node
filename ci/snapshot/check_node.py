@@ -59,7 +59,6 @@ def monitor(path):
 
 
 def wait_head(args):
-    node = None
     started = time.time()
     deadline = started + args.timeout_min * 60
     near_since = None
@@ -71,14 +70,19 @@ def wait_head(args):
             print(f"FAIL: {open(args.exit_file).read().strip()}", flush=True)
             return 1
         try:
-            # the node opens its API only once its database is loaded: connect (again) until it does
-            node = node or client(args.api)
-            s = node.SyncStateGet()
+            # a new connection for every poll: the node closes a connection idle for its
+            # server_receive_timeout (30 s), the interval of these polls, and a kept connection would
+            # race that close (lost on macOS every time, sometimes on Windows: "TSocket read 0 bytes").
+            # The node opens its API only once its database is loaded: connect until it does.
+            node = client(args.api)
+            try:
+                s = node.SyncStateGet()
+            finally:
+                node.close()
             gap = s.currRound - s.lastBlock
             api_up_since = api_up_since or time.time()
         except Exception as e:  # the node may still be starting
             print(f"sync state unavailable: {e}", flush=True)
-            node = None
             gap = None
             if api_up_since is None and args.api_grace_min and time.time() - started > args.api_grace_min * 60:
                 print(f"FAIL: the node's API is not up {args.api_grace_min} min after the start", flush=True)
