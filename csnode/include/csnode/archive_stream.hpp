@@ -19,7 +19,10 @@ namespace cs {
 // macOS, 4 on Windows, so a checkpoint (or a snapshot made of one) from one system did not load on
 // the other. No checkpoint field is a long: 64-bit fields are int64_t/uint64_t, written as 8 bytes
 // on every system, and boost writes its own counts as 8-byte size_t on 64-bit systems. The size of
-// long in the header is the only difference, and it is read here as this system's own.
+// long in the header is the only difference. Archives are written with 8 there on every system
+// (ArchiveOutput), so only Windows has anything to change on read: it takes an 8 as its own 4. On
+// Linux and macOS the input is passed through untouched, the plain read, and boost keeps refusing
+// an archive of a 32-bit system.
 //
 // Header of boost 1.83: size_t length (22) | "serialization::archive" | uint16 library version |
 // sizeof(int) | sizeof(long) | sizeof(float) | sizeof(double) | int 1 (byte order). Anything else is
@@ -70,8 +73,7 @@ private:
         auto byteAt = [this](size_t i) { return static_cast<unsigned char>(head_[i]); };
         const bool sizesAsExpected = byteAt(kLongSizeOffset - 1) == sizeof(int32_t) && byteAt(kLongSizeOffset + 1) == sizeof(float) &&
                                      byteAt(kLongSizeOffset + 2) == sizeof(double);
-        const auto longSize = byteAt(kLongSizeOffset);
-        if (sizesAsExpected && (longSize == 4 || longSize == 8)) {
+        if (sizesAsExpected && sizeof(long) == 4 && byteAt(kLongSizeOffset) == 8) {
             head_[kLongSizeOffset] = static_cast<char>(sizeof(long));
         }
     }

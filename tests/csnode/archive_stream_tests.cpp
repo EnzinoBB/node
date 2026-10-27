@@ -64,15 +64,39 @@ void expectSample(const Data& d) {
 }
 }  // namespace
 
-// a checkpoint from Windows (long of 4 bytes) on Linux/macOS, and from Linux/macOS on Windows
-TEST(ArchiveInput, ReadsTheHeaderOfEitherSystem) {
+// A checkpoint is written with a long of 8 bytes everywhere: Windows (long of 4) reads it, and
+// Linux/macOS read it as they always did. A header with a 4 is refused where long is 8, as by the
+// plain reader: nothing is rewritten there.
+TEST(ArchiveInput, ReadsTheHeaderTheNodeWrites) {
     for (unsigned char longSize : {4, 8}) {
         std::istringstream source(archiveWithLongSize(longSize), std::ios::binary);
         cs::ArchiveInput in(source);
+        const bool accepted = longSize == sizeof(long) || (sizeof(long) == 4 && longSize == 8);
+        if (!accepted) {
+            EXPECT_THROW(boost::archive::binary_iarchive ia(in), boost::archive::archive_exception) << int(longSize);
+            continue;
+        }
         boost::archive::binary_iarchive ia(in);
         Data d;
         ia >> d;
         expectSample(d);
+    }
+}
+
+// where long is 8 bytes the input is the plain one: the same result for a header of any long size
+TEST(ArchiveInput, PassesTheHeaderThroughWhereLongIsEightBytes) {
+    if (sizeof(long) != 8) {
+        GTEST_SKIP() << "long is 4 bytes here";
+    }
+    for (unsigned char longSize : {1, 2, 4, 8, 16}) {
+        const auto bytes = archiveWithLongSize(longSize);
+        std::istringstream plainSource(bytes, std::ios::binary);
+        std::istringstream wrappedSource(bytes, std::ios::binary);
+        cs::ArchiveInput in(wrappedSource);
+        bool plainThrew = false, wrappedThrew = false;
+        try { boost::archive::binary_iarchive ia(plainSource); } catch (const boost::archive::archive_exception&) { plainThrew = true; }
+        try { boost::archive::binary_iarchive ia(in); } catch (const boost::archive::archive_exception&) { wrappedThrew = true; }
+        EXPECT_EQ(plainThrew, wrappedThrew) << int(longSize);
     }
 }
 
@@ -151,4 +175,19 @@ TEST(ArchiveOutput, RewritesAFourByteLong) {
         out << std::string(40, '\x04');
     }
     EXPECT_EQ(target.str(), std::string(40, '\x04'));
+}
+
+// The header the node writes, byte by byte: what every node, old ones included, reads. A change of
+// the Boost version or of the format shows up here first.
+TEST(ArchiveOutput, HeaderIsTheOneOfBoost183) {
+    std::ostringstream out(std::ios::binary);
+    {
+        cs::ArchiveOutput stream(out);
+        boost::archive::binary_oarchive oa(stream);
+        const uint32_t value = 1;
+        oa << value;
+    }
+    const std::string header = out.str().substr(0, cs::ArchiveInputBuf::kHeaderSize);
+    const std::string expected("\x16\0\0\0\0\0\0\0serialization::archive\x13\0\x04\x08\x04\x08\x01\0\0\0", cs::ArchiveInputBuf::kHeaderSize);
+    EXPECT_EQ(header, expected);
 }
