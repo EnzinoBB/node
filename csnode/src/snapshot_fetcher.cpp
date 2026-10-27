@@ -5,7 +5,9 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <sstream>
+#include <tuple>
 
 #include <lib/system/platform.hpp>
 
@@ -1344,6 +1346,66 @@ void SnapshotFetcher::onImportFailed(const std::string& fileAtFault) {
 
 std::vector<GroupReport> SnapshotFetcher::groups() const {
     return agreement_.groups;
+}
+
+std::string SnapshotFetcher::surveyText() const {
+    struct Declared {
+        cs::Sequence seq = 0;
+        std::string head, state, settings;
+        std::vector<std::string> sources;
+    };
+    std::map<std::tuple<cs::Sequence, std::string, std::string, std::string>, Declared> groups;
+    std::vector<std::string> silent;
+    size_t serving = 0;
+    auto sourceText = [this](const cs::PublicKey& key, const std::string& address) {
+        std::string a = address;
+        if (a.empty() && hooks_.addressOf) {
+            a = hooks_.addressOf(key);
+        }
+        return keyText(key) + "@" + (a.empty() ? std::string("unknown") : a);
+    };
+    for (const auto& [key, s] : sources_) {
+        if (s.serving || s.configured) {
+            ++serving;
+        }
+        if (s.banned) {
+            continue;
+        }
+        if (!s.manifest) {
+            if (s.serving || s.configured) {
+                silent.push_back(sourceText(key, s.address));
+            }
+            continue;
+        }
+        const auto& m = *s.manifest;
+        auto& g = groups[{m.seq, m.headHash, m.stateDigest, m.settingsDigest}];
+        g.seq = m.seq;
+        g.head = m.headHash;
+        g.state = m.stateDigest;
+        g.settings = m.settingsDigest;
+        g.sources.push_back(sourceText(key, s.address) + "@" + m.created);
+    }
+    std::vector<Declared> ordered;
+    for (auto& entry : groups) {
+        ordered.push_back(std::move(entry.second));
+    }
+    // the most sources first, then the highest block
+    std::sort(ordered.begin(), ordered.end(), [](const Declared& a, const Declared& b) {
+        return a.sources.size() != b.sources.size() ? a.sources.size() > b.sources.size() : a.seq > b.seq;
+    });
+    std::ostringstream out;
+    for (const auto& g : ordered) {
+        out << "SURVEY group seq=" << g.seq << " head=" << g.head << " state=" << g.state << " settings=" << g.settings << " sources=";
+        for (size_t i = 0; i < g.sources.size(); ++i) {
+            out << (i == 0 ? "" : ",") << g.sources[i];
+        }
+        out << "\n";
+    }
+    for (const auto& s : silent) {
+        out << "SURVEY silent " << s << "\n";
+    }
+    out << "SURVEY end groups=" << ordered.size() << " serving=" << serving << " silent=" << silent.size() << "\n";
+    return out.str();
 }
 
 void SnapshotFetcher::stop() {

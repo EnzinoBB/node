@@ -181,6 +181,10 @@ bool Node::init() {
     if (!initCommon()) {
         return false;
     }
+    // a survey of the snapshots the neighbours serve: no chain, whatever the database holds
+    if (surveySeconds_ > 0) {
+        return startSurvey(surveySeconds_);
+    }
     // an empty database: the chain opens once a snapshot is fetched from the neighbours (or after the fallback)
     if (startBootstrap()) {
         return true;
@@ -465,6 +469,17 @@ bool Node::startBootstrap() {
     bootstrapBackend_ = backend;
     bootstrapPermanent_ = permanentAtStart_;
 
+    snapshotFetcher_ = makeFetcher(cfg, false);
+    bootstrapping_ = true;
+    bootstrapStartedAt_ = std::chrono::steady_clock::now();
+    cslog() << "SNAPSHOT: empty database: looking for snapshots on the network (fetch=" << cfg.fetch << ", min_sources=" << cfg.minSources
+            << ", fetch_wait=" << cfg.fetchWait << " s, fetch_fallback=" << cfg.fetchFallback << ")";
+    // ticks are queued to the processor thread, which starts with Node::run()
+    snapshotTickTimer_.start(500, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+    return true;
+}
+
+std::unique_ptr<cs::SnapshotFetcher> Node::makeFetcher(const SnapshotData& cfg, bool dryRun) {
     cs::SnapshotFetcher::Hooks hooks;
     hooks.sendManifestRequest = [this](const cs::PublicKey& to, const cs::snapshot_p2p::ManifestRequest& request) {
         sendSnapshotMessage(to, MsgTypes::SnapshotManifestRequest, cs::snapshot_p2p::encode(request));
@@ -483,14 +498,36 @@ bool Node::startBootstrap() {
         const auto it = peerAddresses_.find(key);
         return it == peerAddresses_.end() ? std::string() : it->second;
     };
-    snapshotFetcher_ = std::make_unique<cs::SnapshotFetcher>(cfg, sb::kTmpDir, std::move(hooks));
-    bootstrapping_ = true;
+    return std::make_unique<cs::SnapshotFetcher>(cfg, cs::snapshot_bootstrap::kTmpDir, std::move(hooks), dryRun);
+}
+
+bool Node::startSurvey(uint32_t seconds) {
+    if (!transport_->isGood()) {
+        return false;
+    }
+    SnapshotData cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
+    cfg.fetch = "p2p";
+    cfg.fetchWait = seconds;
+    cfg.minSources = 1'000'000;   // no agreement is ever reached: the survey ends at the time, with every group
+    bootstrapPermanent_ = permanentAtStart_;
+    snapshotFetcher_ = makeFetcher(cfg, true);
+    surveying_ = true;
+    bootstrapping_ = true;   // the gates of the bootstrap: snapshot messages and pings only, no chain
     bootstrapStartedAt_ = std::chrono::steady_clock::now();
-    cslog() << "SNAPSHOT: empty database: looking for snapshots on the network (fetch=" << cfg.fetch << ", min_sources=" << cfg.minSources
-            << ", fetch_wait=" << cfg.fetchWait << " s, fetch_fallback=" << cfg.fetchFallback << ")";
-    // ticks are queued to the processor thread, which starts with Node::run()
+    cslog() << "SNAPSHOT: survey: asking the neighbours for snapshot manifests for " << seconds << " s";
     snapshotTickTimer_.start(500, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
     return true;
+}
+
+void Node::finishSurvey() {
+    if (!surveying_) {
+        return;
+    }
+    surveying_ = false;
+    snapshotTickTimer_.stop();
+    std::cout << snapshotFetcher_->surveyText() << std::flush;
+    cslog() << "SNAPSHOT: survey done";
+    Node::stopOnError();   // a stop as a signal makes it; the exit code stays 0
 }
 
 void Node::onSnapshotTick() {
@@ -515,6 +552,9 @@ void Node::onSnapshotTick() {
     transport_->forEachNeighbour([&peers](const cs::PublicKey& key, cs::Sequence, cs::RoundNumber) { peers.neighbours.insert(key); });
     snapshotFetcher_->tick(peers);
     switch (snapshotFetcher_->phase()) {
+        case cs::SnapshotFetcher::Phase::Done:
+            finishSurvey();   // a dry run ends in Done: only the survey runs one
+            break;
         case cs::SnapshotFetcher::Phase::Import:
             if (!snapshotFetcher_->result()) {
                 failBootstrap(1, "the fetch ended without a snapshot to import");

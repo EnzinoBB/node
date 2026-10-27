@@ -5,11 +5,13 @@
 # The pruned package of the latest community release joins mainnet for MINUTES minutes from an
 # empty database with a throwaway key, in a CPU- and memory-limited container. collect.py lists the
 # peers that served the oldest blocks; the report goes to the rolling release "known-hosts" and the
-# list is proposed as a pull request updating packaging/mainnet/known_hosts.txt, for review.
+# list is proposed as a pull request updating packaging/mainnet/known_hosts.txt, for review. Then
+# `node --survey-snapshots` asks the neighbours for the snapshots they serve: snapshots.md and
+# snapshot_sources.txt (the serving nodes that answered) go to the same release and pull request.
 #
 # Usage: run-weekly.sh
 # Env:   WORK (default ~/Projects/credits/known-hosts-run), MINUTES (25), REPO (EnzinoBB/node),
-#        CPUS (1.0), MEMORY (3g), PUBLISH (1)
+#        CPUS (1.0), MEMORY (3g), PUBLISH (1), SURVEY_SECONDS (600)
 # Needs: docker, gh (authenticated), python3 with base58 and pynacl.
 set -euo pipefail
 
@@ -67,6 +69,13 @@ grep -ah 'Last written sequence' csnode/log/log_*.txt | tail -1 || true
 
 python3 "$root/ci/known-hosts/collect.py" csnode out
 cat out/peers.md
+
+# the snapshots the neighbours serve: the same folder, no chain opened (its key, its routing table)
+docker run --rm --name "$container-survey" --cpus "$CPUS" --memory "$MEMORY" --cpu-shares 256 --user "$(id -u):$(id -g)" \
+    -v "$WORK/run/csnode:/node" -w /node ubuntu:24.04 \
+    ./node --db-path db --config-file config.ini --survey-snapshots "${SURVEY_SECONDS:-600}" > survey.txt 2> survey.err || echo "the survey ended with an error"
+python3 "$root/ci/known-hosts/snapshot_sources.py" survey.txt csnode/known_peers.json out
+head -20 out/snapshots.md
 listed=$(wc -l < out/known_hosts.txt)
 # the database and the package are not needed any more; keep the logs of the last run
 rm -rf csnode/db csnode/caches csnode/ojdkbuild
@@ -87,7 +96,7 @@ if ! gh release view known-hosts --repo "$REPO" >/dev/null 2>&1; then
 else
     gh release edit known-hosts --repo "$REPO" --notes-file notes.md
 fi
-gh release upload known-hosts --repo "$REPO" --clobber out/known_hosts.txt out/peers.md out/peers.json
+gh release upload known-hosts --repo "$REPO" --clobber out/known_hosts.txt out/peers.md out/peers.json out/snapshot_sources.txt out/snapshots.md
 
 # propose the list for review: a branch from the default branch with only this file changed
 default=$(gh repo view "$REPO" --json defaultBranchRef --jq .defaultBranchRef.name)
@@ -95,6 +104,10 @@ branch=auto/known-hosts
 clone="$WORK/run/repo"
 git clone -q --depth 1 --branch "$default" "https://github.com/$REPO.git" "$clone"
 cp out/known_hosts.txt "$clone/packaging/mainnet/known_hosts.txt"
+# the survey's sources only when it found some: no serving node must not empty the shipped file
+if grep -qv '^#' out/snapshot_sources.txt; then
+    cp out/snapshot_sources.txt "$clone/packaging/mainnet/snapshot_sources.txt"
+fi
 cd "$clone"
 if git diff --quiet; then
     echo "known_hosts.txt unchanged"

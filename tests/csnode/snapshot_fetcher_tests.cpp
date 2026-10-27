@@ -1272,6 +1272,42 @@ TEST(SnapshotFetcher, DryRunReportsGroups) {
     EXPECT_EQ(alone.groups().size(), 1u);
 }
 
+// node --survey-snapshots: every snapshot the sources declared with its sources, and the serving
+// peers that gave no manifest, in the lines the weekly job reads
+TEST(SnapshotFetcher, SurveyTextListsTheGroupsAndTheSilentSources) {
+    TmpDir tmp("survey");
+    Net net;
+    net.add(Snapshots::A1);
+    net.add(Snapshots::A2);
+    net.add(Snapshots::D);
+    net.add(Snapshots::B).silentManifests = 1'000'000;
+    auto cfg = fetchConfig();
+    cfg.fetchWait = 10;
+    cfg.minSources = 1'000'000;   // as the survey: never an agreement, the end is the time
+    SnapshotFetcher fetcher(cfg, tmp.path, net.hooks(), true);
+    ASSERT_TRUE(net.runUntil(fetcher, [&] { return fetcher.phase() == Phase::Done; }, 200));
+    EXPECT_FALSE(fetcher.result());
+
+    std::vector<std::string> lines;
+    std::istringstream in(fetcher.surveyText());
+    for (std::string line; std::getline(in, line);) {
+        lines.push_back(line);
+    }
+    ASSERT_EQ(lines.size(), 4u) << fetcher.surveyText();
+    // the group with the most sources first
+    EXPECT_EQ(lines[0].rfind("SURVEY group seq=", 0), 0u) << lines[0];
+    for (auto i : {Snapshots::A1, Snapshots::A2}) {
+        EXPECT_NE(lines[0].find(base58(net.key(i)) + "@" + net.sources.at(net.key(i)).address + "@"), std::string::npos) << lines[0];
+    }
+    EXPECT_NE(lines[0].find(" head="), std::string::npos);
+    EXPECT_NE(lines[0].find(" state="), std::string::npos);
+    EXPECT_NE(lines[0].find(" settings="), std::string::npos);
+    EXPECT_EQ(lines[1].rfind("SURVEY group seq=", 0), 0u) << lines[1];
+    EXPECT_NE(lines[1].find(base58(net.key(Snapshots::D)) + "@"), std::string::npos) << lines[1];
+    EXPECT_EQ(lines[2], "SURVEY silent " + base58(net.key(Snapshots::B)) + "@" + net.sources.at(net.key(Snapshots::B)).address);
+    EXPECT_EQ(lines[3], "SURVEY end groups=2 serving=4 silent=1");
+}
+
 // (14) stop in every phase: nothing outstanding, nothing sent, replies dropped
 TEST(SnapshotFetcher, StopInEveryPhase) {
     TmpDir tmp("stop");

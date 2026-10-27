@@ -105,6 +105,13 @@ public:
     // or Fallback after kMaxAttempts failed imports
     void onImportFailed(const std::string& fileAtFault);
     std::vector<GroupReport> groups() const;
+    // The report of a survey (node --survey-snapshots, a fetcher built with dryRun): the lines the
+    // weekly job reads, one per snapshot the sources declared and one per serving peer that gave no
+    // manifest. A source is "<base58 key>@<address>" and, in a group, "@<created>" after it:
+    //   SURVEY group seq=<n> head=<hex> state=<hex> settings=<hex> sources=<source>@<created>,...
+    //   SURVEY silent <source>
+    //   SURVEY end groups=<n> serving=<n> silent=<n>
+    std::string surveyText() const;
     // no request is sent and no reply is taken after this
     void stop();
 
