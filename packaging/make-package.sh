@@ -41,6 +41,8 @@ install -m 644 "$executor/contract-executor.jar" "$executor/sc-api-support.jar" 
 cp -a "$jdk" "$dir/$javadir"
 install -m 644 "$here/mainnet/settings.properties" "$here/mainnet/default_confidants.txt" "$dir/"
 install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
+# the serving nodes the weekly survey found (ci/known-hosts/snapshot_sources.py), when it has found any
+[ ! -f "$here/mainnet/snapshot_sources.txt" ] || install -m 644 "$here/mainnet/snapshot_sources.txt" "$dir/snapshot_sources.txt"
 
 # the node accepts an executor only within [executor_commit_min, executor_commit_max], and the
 # executor reports its git commit count, which our fixes raised above the release's 1518

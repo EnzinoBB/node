@@ -4,7 +4,9 @@ name: Known hosts
 # while from an empty database, and the peers it meets are checked: a node syncing from block 0
 # asks its neighbours for the oldest blocks first, so a peer that answers keeps the chain's history.
 # The report is published in the rolling release "known-hosts" (known_hosts.txt, peers.md,
-# peers.json), and the list is proposed as a pull request updating packaging/mainnet/known_hosts.txt:
+# peers.json, and from the survey of `node --survey-snapshots`: snapshots.md, snapshot_sources.txt),
+# and the list is proposed as a pull request updating packaging/mainnet/known_hosts.txt (and
+# snapshot_sources.txt, when the survey found serving nodes):
 # it reaches the packages only after someone reviews it, since peers that misbehave on purpose could
 # otherwise steer new nodes towards themselves.
 #
@@ -109,6 +111,15 @@ jobs:
           pkill -f '[c]ontract-executor[.]jar' 2>/dev/null || true  # the brackets keep this shell's own command line from matching
           grep -ah 'Start contract executor\|Node initialized\|Last written sequence' log/log_*.txt | tail -3 || true
 
+      # the snapshots the neighbours serve: the same folder, no chain opened; its output is data of
+      # untrusted peers, checked by the publishing job
+      - name: Survey snapshots
+        run: |
+          cd csnode
+          ./node --db-path db --config-file config.ini --survey-snapshots 600 </dev/null > survey.txt 2> survey.err || echo "the survey ended with an error"
+          pkill -f '[c]ontract-executor[.]jar' 2>/dev/null || true
+          grep -a '^SURVEY' survey.txt | cut -c1-300 | tail -20 || true
+
       - name: Collect
         run: |
           python3 ci/known-hosts/collect.py csnode out
@@ -129,6 +140,9 @@ jobs:
             out/
             csnode/log/
             csnode/known_hosts.txt
+            csnode/known_peers.json
+            csnode/survey.txt
+            csnode/survey.err
             csnode/stdout.log
             csnode/debug.log
           retention-days: 14
@@ -167,6 +181,8 @@ jobs:
             && { echo "unexpected line in known_hosts.txt"; exit 1; } || true
           listed=$(wc -l < run/out/known_hosts.txt)
           [ "$listed" -ge 5 ] || { echo "only $listed peers verified, not publishing"; exit 1; }
+          # the survey: every field is checked against its exact shape by the script
+          python3 ci/known-hosts/snapshot_sources.py run/csnode/survey.txt run/csnode/known_peers.json run/out
 
       - name: Report
         run: |
@@ -183,7 +199,7 @@ jobs:
             gh release edit known-hosts --repo "$GITHUB_REPOSITORY" --notes-file notes.md
           fi
           gh release upload known-hosts --repo "$GITHUB_REPOSITORY" --clobber \
-            run/out/known_hosts.txt run/out/peers.md run/out/peers.json
+            run/out/known_hosts.txt run/out/peers.md run/out/peers.json run/out/snapshot_sources.txt run/out/snapshots.md
 
       # the packages ship packaging/mainnet/known_hosts.txt: propose the new list for review
       - name: Pull request
@@ -191,7 +207,11 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           cp run/out/known_hosts.txt packaging/mainnet/known_hosts.txt
-          if git diff --quiet; then echo "known_hosts.txt unchanged"; exit 0; fi
+          # the survey's sources only when it found some: no serving node must not empty the shipped file
+          if grep -qv '^#' run/out/snapshot_sources.txt; then
+            cp run/out/snapshot_sources.txt packaging/mainnet/snapshot_sources.txt
+          fi
+          if git diff --quiet; then echo "known_hosts.txt and snapshot_sources.txt unchanged"; exit 0; fi
           branch=auto/known-hosts
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
