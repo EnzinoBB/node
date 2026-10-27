@@ -16,8 +16,8 @@ on:
         description: 'Id of a Release workflow run whose artifacts hold the Linux, Windows and macOS packages (empty = the latest successful one)'
         default: ''
       timeout_min:
-        description: 'Minutes each node has to reach the head'
-        default: '180'
+        description: 'Minutes each node has to reach the head (Linux needs about 5)'
+        default: '30'
       min_common:
         description: 'Blocks with a digest from all three systems needed to pass'
         default: '5'
@@ -74,7 +74,7 @@ jobs:
             package: '*-macos-arm64.tar.gz'
             node: ./node
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 300
+    timeout-minutes: 90
     defaults:
       run:
         shell: bash
@@ -127,7 +127,7 @@ jobs:
 
       - name: Sync to the head
         env:
-          TIMEOUT_MIN: ${{ inputs.timeout_min || '180' }}
+          TIMEOUT_MIN: ${{ inputs.timeout_min || '30' }}
         run: |
           cd csnode
           # how the node ended, if it ends before the head
@@ -136,7 +136,14 @@ jobs:
           pid=$(pgrep -n -f -- '--config-file config.ini' || true)
           echo "NODE_PID=$pid" >> "$GITHUB_ENV"
           cd ..
-          python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min "$TIMEOUT_MIN"
+          # Linux syncs this stretch at 30000+ blocks/min and reaches the head in about 5 minutes: a node
+          # that ends, has no API after 4 minutes or moves at less than a tenth of that speed is
+          # looked at at once, not after the timeout
+          python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min "$TIMEOUT_MIN" \
+            --exit-file csnode/node-exit.txt --api-grace-min 4 --min-rate 3000 --window-min 2 || {
+            echo "---- the end of the node's output"; tail -n 60 csnode/stdout.log
+            exit 1
+          }
 
       - name: Stop and collect the digests
         if: always()

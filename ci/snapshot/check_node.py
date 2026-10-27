@@ -60,18 +60,42 @@ def monitor(path):
 
 def wait_head(args):
     node = None
-    deadline = time.time() + args.timeout_min * 60
+    started = time.time()
+    deadline = started + args.timeout_min * 60
     near_since = None
+    api_up_since = None
+    window = []   # (time, block) of the last --window-min minutes
     while time.time() < deadline:
+        # a node that ended is not waited for
+        if args.exit_file and os.path.exists(args.exit_file):
+            print(f"FAIL: {open(args.exit_file).read().strip()}", flush=True)
+            return 1
         try:
             # the node opens its API only once its database is loaded: connect (again) until it does
             node = node or client(args.api)
             s = node.SyncStateGet()
             gap = s.currRound - s.lastBlock
+            api_up_since = api_up_since or time.time()
         except Exception as e:  # the node may still be starting
             print(f"sync state unavailable: {e}", flush=True)
             node = None
             gap = None
+            if api_up_since is None and args.api_grace_min and time.time() - started > args.api_grace_min * 60:
+                print(f"FAIL: the node's API is not up {args.api_grace_min} min after the start", flush=True)
+                return 1
+        if gap is not None:
+            # the speed of the sync: a node far behind has to move, and at a speed in line with the
+            # others (Linux: 30000 blocks/min and more); near the head the chain sets the pace
+            now = time.time()
+            window.append((now, s.lastBlock))
+            while window and now - window[0][0] > args.window_min * 60 + 1:
+                window.pop(0)
+            if args.min_rate and gap > args.near_gap and now - window[0][0] >= args.window_min * 60:
+                rate = (s.lastBlock - window[0][1]) / ((now - window[0][0]) / 60)
+                print(f"speed over the last {args.window_min} min: {rate:.0f} blocks/min (at least {args.min_rate} wanted)", flush=True)
+                if rate < args.min_rate:
+                    print(f"FAIL: the sync is too slow: {rate:.0f} blocks/min, {gap} blocks behind", flush=True)
+                    return 1
         if gap is not None and s.lastBlock > 0 and gap <= 3:
             near_since = near_since or time.time()
             if time.time() - near_since >= 180:
@@ -189,6 +213,11 @@ def main():
     w = sub.add_parser("wait-head")
     w.add_argument("--api", required=True)
     w.add_argument("--timeout-min", type=int, default=90)
+    w.add_argument("--exit-file", help="a file the caller writes when the node process ends: the wait fails at once")
+    w.add_argument("--api-grace-min", type=int, default=0, help="minutes the node's API may take to come up (0 = no limit)")
+    w.add_argument("--min-rate", type=int, default=0, help="blocks per minute the sync must keep while far behind (0 = no check)")
+    w.add_argument("--window-min", type=int, default=2, help="minutes the speed is measured over")
+    w.add_argument("--near-gap", type=int, default=3000, help="no speed check this close to the head, in blocks")
     b = sub.add_parser("balances")
     b.add_argument("--api", required=True)
     b.add_argument("--count", type=int, default=50)
