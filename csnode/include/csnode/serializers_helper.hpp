@@ -12,7 +12,7 @@ public:
       static const size_t kBufSize = 1 << 27;
       std::vector<uint8_t> buf(::cscrypto::kHashSize + kBufSize, 0);
       {
-        std::ifstream ifs(fileName);
+        std::ifstream ifs(fileName, std::ios::binary);   // text mode on Windows would change the bytes hashed
         while (!ifs.eof()) {
             ifs.read(
               reinterpret_cast<char*>(buf.data() + ::cscrypto::kHashSize),
