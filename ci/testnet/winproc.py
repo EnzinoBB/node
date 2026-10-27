@@ -9,16 +9,18 @@ writes its Windows pid to <pidfile>, waits for it and exits with its exit code. 
 a job object that ends it when this process ends, so a hard kill of this process (kill -KILL from
 Git Bash) ends the node as well.
 
-stop: the graceful stop of such a program, as SIGTERM on Linux: Ctrl-C on its console (the node's
-console handler requests the same stop as its SIGTERM path). A signal sent from Git Bash to a native
+stop: the graceful stop of such a program, as SIGTERM on Linux: Ctrl-Break on its console (the node's
+console handler requests the same stop as its SIGTERM path; Ctrl-C would be lost on a process that
+inherited the flag that ignores it). A signal sent from Git Bash to a native
 process terminates it at once (TerminateProcess), without that stop.
 """
 import ctypes
 import ctypes.wintypes as wt
 import subprocess
 import sys
+import time
 
-CTRL_C_EVENT = 0
+CTRL_BREAK_EVENT = 1
 JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
 JobObjectExtendedLimitInformation = 9
 
@@ -82,19 +84,23 @@ def run(pidfile, cmd):
     return proc.wait()
 
 
+_ignore = ctypes.WINFUNCTYPE(wt.BOOL, wt.DWORD)(lambda ctrl_type: True)
+
+
 def stop(pid):
-    # this process leaves its own console (if any) and joins the node's, where Ctrl-C reaches every
-    # attached process: the node, and this one, which ignores it
+    # this process leaves its own console (if any) and joins the node's, where Ctrl-Break reaches
+    # every attached process: the node, and this one, whose handler takes it
     kernel32.FreeConsole()
     if not kernel32.AttachConsole(wt.DWORD(pid)):
         print(f"winproc: cannot attach to the console of pid {pid} (error {ctypes.get_last_error()})", file=sys.stderr)
         return 1
-    kernel32.SetConsoleCtrlHandler(None, True)
-    ok = kernel32.GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)
+    kernel32.SetConsoleCtrlHandler(_ignore, True)
+    ok = kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)
     err = ctypes.get_last_error()
+    time.sleep(0.5)   # the event reaches this process's handler on a thread of its own
     kernel32.FreeConsole()
     if not ok:
-        print(f"winproc: Ctrl-C to the console of pid {pid} failed (error {err})", file=sys.stderr)
+        print(f"winproc: Ctrl-Break to the console of pid {pid} failed (error {err})", file=sys.stderr)
         return 1
     return 0
 

@@ -398,8 +398,8 @@ if [ "$OS_KIND" = windows ]; then
             if [ "${PIDS[$i]}" = "$1" ]; then cat "$WORK/n$i/node.winpid" 2>/dev/null || true; return; fi
         done
     }
-    # a signal from Git Bash ends a native process at once: SIGTERM to a node becomes Ctrl-C on its
-    # console (its graceful stop, as SIGTERM on Linux), SIGKILL also ends it with taskkill; other
+    # a signal from Git Bash ends a native process at once: SIGTERM to a node becomes Ctrl-Break on
+    # its console (its graceful stop, as SIGTERM on Linux), SIGKILL also ends it with taskkill; other
     # signals and other processes as before
     kill() {
         local sig=$1 rc=0 p w

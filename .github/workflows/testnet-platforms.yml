@@ -322,7 +322,7 @@ jobs:
             "-DCMAKE_VS_GLOBALS=CLToolExe=cl.exe;CLToolPath=C:/ccache-bin;TrackFileAccess=false;UseMultiToolTask=true;DebugInformationFormat=OldStyle"
           ccache --max-size=2G
           ccache --zero-stats
-          cmake --build build-testnet --config Release --target node -j 4 -- -m:4
+          cmake --build build-testnet --config Release --target client -j 4 -- -m:4
           ccache --show-stats
 
       - name: Save ccache
