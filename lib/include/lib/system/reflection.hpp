@@ -49,6 +49,23 @@ std::string_view typeName() noexcept {
     const auto first = begin + marker.size();
     const auto end = signature.find_first_of(";]", first);
     return signature.substr(first, end == std::string_view::npos ? std::string_view::npos : end - first);
+#elif defined(_MSC_VER)
+    // MSVC: "class std::basic_string_view<...> __cdecl cs::reflection::typeName<class cs::Conveyer>(void) noexcept"
+    const std::string_view signature = __FUNCSIG__;
+    const std::string_view marker = "typeName<";
+    const auto begin = signature.find(marker);
+    const auto end = signature.rfind(">(void)");
+    if (begin == std::string_view::npos || end == std::string_view::npos || end < begin + marker.size()) {
+        return {};
+    }
+    auto name = signature.substr(begin + marker.size(), end - begin - marker.size());
+    for (const std::string_view prefix : {"class ", "struct ", "enum ", "union "}) {
+        if (name.substr(0, prefix.size()) == prefix) {
+            name.remove_prefix(prefix.size());
+            break;
+        }
+    }
+    return name;
 #else
     return ::nameof::nameof_type<T>();
 #endif

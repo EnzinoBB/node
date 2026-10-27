@@ -1210,6 +1210,8 @@ TEST(SnapshotFetcher, ReassignmentRace) {
 }
 
 // a symbolic link where a downloaded file goes: the file is not opened, the node syncs from block 0
+// (Windows: creating a symbolic link needs a privilege that test runs do not have)
+#ifndef _WIN32
 TEST(SnapshotFetcher, SymlinkInTmpDirIsRefused) {
     TmpDir tmp("symlink");
     fs::create_directories(tmp.path);
@@ -1224,6 +1226,7 @@ TEST(SnapshotFetcher, SymlinkInTmpDirIsRefused) {
     EXPECT_TRUE(net.logged("cannot write"));
     EXPECT_EQ(fileText(target), "do not touch");
 }
+#endif
 
 // two groups as strong as each other: the 30-s line says conflict
 TEST(SnapshotFetcher, ConflictLine) {

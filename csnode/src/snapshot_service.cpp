@@ -4,9 +4,7 @@
 #include <cctype>
 #include <chrono>
 
-#include <sys/resource.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+#include <lib/system/platform.hpp>
 
 #include <csnode/blockchain.hpp>
 #include <csnode/configholder.hpp>
@@ -78,7 +76,7 @@ void SnapshotService::onCheckpointSaved(cs::Sequence sequence) {
 
 void SnapshotService::run() {
     // the builder works on this thread: below the node's other work
-    ::setpriority(PRIO_PROCESS, static_cast<id_t>(::syscall(SYS_gettid)), 10);
+    cs::platform::lowerThreadPriority();
     while (!stop_) {
         const bool serve = cs::ConfigHolder::instance().config()->getSnapshotSettings().serve;   // the observer may swap the config
         if (serve != serving_) {

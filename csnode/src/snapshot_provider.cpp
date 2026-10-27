@@ -7,9 +7,7 @@
 #include <sstream>
 #include <vector>
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
+#include <lib/system/platform.hpp>
 
 namespace cs {
 
@@ -36,7 +34,7 @@ uint32_t msUntil(SteadyClock::time_point now, SteadyClock::time_point when) {
 
 struct SnapshotProvider::Loaded {
     struct File {
-        int fd = -1;
+        cs::platform::Handle fd = cs::platform::kInvalidHandle;
         uint64_t size = 0;
         uint64_t chunks = 0;
         uint64_t firstChunk = 0;   // index of its first chunk among all files, in manifest order
@@ -50,8 +48,8 @@ struct SnapshotProvider::Loaded {
 
     ~Loaded() {
         for (auto& [name, f] : files) {
-            if (f.fd >= 0) {
-                ::close(f.fd);
+            if (cs::platform::valid(f.fd)) {
+                cs::platform::closeFile(f.fd);
             }
         }
     }
@@ -122,17 +120,16 @@ bool SnapshotProvider::load(const fs::path& dir, std::string* error) {
         // the path comes from the manifest this node built and verified, never from a request
         const auto path = dir / f.name;
         Loaded::File entry;
-        entry.fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (entry.fd < 0) {
+        entry.fd = cs::platform::openFile(path, cs::platform::Open::Read);
+        if (!cs::platform::valid(entry.fd)) {
             return fail(error, "cannot open " + path.string());
         }
         loaded->files[f.name] = entry;   // closed with loaded from here on
-        struct stat st {};
-        if (::fstat(entry.fd, &st) != 0 || static_cast<uint64_t>(st.st_size) != f.size) {
+        if (cs::platform::fileSize(entry.fd) != static_cast<int64_t>(f.size)) {
             return fail(error, path.string() + " does not have the size of the manifest");
         }
         // pieces are read on the thread that handles consensus messages: keep the files in the page cache
-        ::posix_fadvise(entry.fd, 0, 0, POSIX_FADV_WILLNEED);
+        cs::platform::willRead(entry.fd);
         loaded->files[f.name].size = f.size;
         loaded->files[f.name].chunks = f.chunks.size();
         loaded->files[f.name].firstChunk = loaded->totalChunks;
@@ -333,7 +330,7 @@ snapshot_p2p::PieceReply SnapshotProvider::onPieceRequest(const cs::PublicKey& s
     reply.data.resize(length);
     size_t done = 0;
     while (done < length) {
-        const auto n = ::pread(file->second.fd, reply.data.data() + done, length - done, static_cast<off_t>(offset + done));
+        const auto n = cs::platform::readAt(file->second.fd, reply.data.data() + done, length - done, offset + done);
         if (n <= 0) {
             reply.data.clear();
             reply.status = PieceStatus::NotServing;

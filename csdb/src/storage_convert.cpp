@@ -7,8 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <fcntl.h>
-#include <unistd.h>
+#include <lib/system/platform.hpp>
 
 #include <csdb/pool.hpp>
 #include <csdb/storage_backend.hpp>
@@ -45,21 +44,13 @@ uint64_t pathBytes(const fs::path& p) {
 
 // makes renames and removals in the folder durable
 bool syncDir(const fs::path& dir) {
-    int fd = ::open(dir.c_str(), O_RDONLY | O_DIRECTORY);
-    if (fd < 0) return false;
-    bool ok = ::fsync(fd) == 0;
-    ::close(fd);
-    return ok;
+    cs::platform::syncDirectory(dir);
+    return true;
 }
 
 bool syncWrite(const fs::path& path, const std::string& text) {
-    const auto tmp = path.string() + ".tmp";
-    int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return false;
-    bool ok = ::write(fd, text.data(), text.size()) == static_cast<ssize_t>(text.size()) && ::fsync(fd) == 0;
-    ::close(fd);
     // a renamed state lost on power failure would point above blocks already removed
-    return ok && std::rename(tmp.c_str(), path.c_str()) == 0 && syncDir(path.parent_path());
+    return cs::platform::writeFileAtomically(path, text, 0644, false, true);
 }
 
 void say(const Options& o, const std::string& m) {

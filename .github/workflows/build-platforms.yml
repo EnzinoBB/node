@@ -1,0 +1,216 @@
+name: Build node (Windows, macOS)
+
+# The node and its unit tests on Windows (MSVC, x64) and macOS (clang, Apple Silicon). Linux is
+# build.yml. Boost is built once per runner image and cached.
+on:
+  push:
+    branches: [master, 'build/**']
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+  # release.yml packages what this builds
+  workflow_call:
+
+concurrency:
+  # called from release.yml, github.workflow is the caller's name: its own group there
+  group: ${{ github.workflow }}-platforms-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+
+jobs:
+  windows:
+    name: Windows (MSVC, Release)
+    runs-on: windows-2022
+    timeout-minutes: 240
+    env:
+      BOOST_PREFIX: C:\boost
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        shell: bash
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>
+          rm -f third-party/lmdbxx/VERSION
+
+      - name: Install build tools
+        run: choco install -y --no-progress winflexbison3
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      # cscrypto builds libsodium through a Visual Studio 2019 retargeting patch that does not apply
+      # to the libsodium it pins; the VS2022 solution of libsodium itself builds the same static
+      # library (static runtime), placed where cscrypto imports it from
+      - name: Build libsodium
+        shell: bash
+        working-directory: cscrypto/third-party/libsodium
+        run: |
+          MSBuild.exe builds/msvc/vs2022/libsodium.sln -m -p:Configuration=StaticRelease -p:Platform=x64 -v:minimal
+          lib=$(find bin/x64/Release -path '*static*' -name libsodium.lib | head -1)
+          test -n "$lib"
+          mkdir -p Build/Release/x64
+          cp "$lib" Build/Release/x64/libsodium.lib
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-rt-windows-2022-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | sha256sum -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          cmd //c bootstrap.bat
+          ./b2 -j"$(nproc)" -d0 toolset=msvc address-model=64 variant=release link=static runtime-link=static \
+            threading=multi --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            --with-system --with-filesystem --with-program_options --with-date_time --with-regex --with-log \
+            --with-iostreams --with-thread --with-serialization --with-atomic --with-chrono \
+            install --prefix="C:/boost"
+
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
+      - name: Configure
+        shell: bash
+        run: |
+          # thrift's fallback reads the byte order from a Boost header removed in Boost 1.73 (-D, not
+          # /D: Git Bash would read /D... as a path)
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_CXX_FLAGS="-DWIN32 -D_WINDOWS -GR -D__THRIFT_BYTE_ORDER=1234 -D__THRIFT_LITTLE_ENDIAN=1234 -D__THRIFT_BIG_ENDIAN=4321 -EHsc" \
+            -DENABLE_TESTS=ON \
+            -DBoost_ROOT="C:/boost" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_HASKELL=OFF
+
+      - name: Build
+        shell: bash
+        run: cmake --build build --config Release -j 4 -- -m:4
+
+      - name: Test
+        shell: bash
+        working-directory: build
+        timeout-minutes: 30
+        run: ctest -C Release --output-on-failure --timeout 300
+
+      - name: Upload node binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-windows-x64-${{ github.sha }}
+          path: build/client/Release/node.exe
+          retention-days: 30
+
+  macos:
+    name: macOS (clang, Apple Silicon)
+    runs-on: macos-14
+    timeout-minutes: 240
+    env:
+      BOOST_PREFIX: /Users/runner/boost
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>
+          rm -f third-party/lmdbxx/VERSION
+          # blake2's SSE code does not build on ARM: the reference implementation there
+          git -C cscrypto apply ../ci/platform/blake2-portable.patch
+
+      - name: Install build tools
+        run: |
+          brew install ninja bison flex autoconf automake libtool ccache
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-macos-14-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | shasum -a 256 -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(sysctl -n hw.ncpu)" -d0 toolset=clang variant=release link=static threading=multi \
+            cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=ON \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DHAVE_CLANG_THREAD_SAFETY=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_HASKELL=OFF
+
+      - name: Build
+        run: cmake --build build -j"$(sysctl -n hw.ncpu)"
+
+      # a packaged node runs on machines without Homebrew: system libraries only
+      - name: Check linked libraries
+        run: |
+          otool -L build/client/node
+          if otool -L build/client/node | tail -n +2 | grep -vE '^\s+/(usr/lib|System/Library)/'; then
+            echo "the node links a library outside the system" >&2
+            exit 1
+          fi
+
+      - name: Test
+        working-directory: build
+        timeout-minutes: 30
+        run: ctest --output-on-failure --timeout 300
+
+      - name: Upload node binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-macos-arm64-${{ github.sha }}
+          path: build/client/node
+          retention-days: 30

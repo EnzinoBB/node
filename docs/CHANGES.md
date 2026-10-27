@@ -38,6 +38,7 @@ lines under the new release.
 | PR | Change |
 |---|---|
 | #113 | packaging: one package per build for full and pruned storage (`config.ini` full, `config.pruned.ini` pruned on LMDB), half the release size; the workflows that take the latest package accept both layouts |
+| #114 | the node builds and passes its tests on Windows (MSVC, x64) and macOS (Apple Silicon): POSIX-only code behind `lib/system/platform.hpp`, the database lock now also on Windows, a new `build-platforms.yml` workflow; the release workflow also makes a Windows `.zip` and a macOS package (with Eclipse Temurin 11), kept as artifacts until a mainnet state-digest check on each system |
 
 ## community.13 — 2026-10-26
 
