@@ -6,6 +6,7 @@
 #include <iostream>
 #ifdef CREDITS_TESTNET
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #endif
 
@@ -31,6 +32,16 @@ namespace dbcheck {
 namespace {
 
 std::atomic<bool> stopFlag{false};
+
+#ifdef CREDITS_TESTNET
+// the kill of the conversion test (testnet-convert-kill below); Windows has no SIGKILL, an exit
+// without any cleanup stands for it there
+#ifdef _WIN32
+[[noreturn]] void testnetKill() { std::_Exit(137); }
+#else
+void testnetKill() { std::raise(SIGKILL); }
+#endif
+#endif
 
 extern "C" void onStopSignal(int) {
     stopFlag = true;
@@ -143,12 +154,12 @@ int convertNow(const std::string& dbPath, const std::string& from, const std::st
         std::remove("testnet-convert-kill");
         if (at == "checked") {
             opt.hook = [](csdb::convert::Step s, uint32_t, uint32_t) {
-                if (s == csdb::convert::Step::Checked) std::raise(SIGKILL);
+                if (s == csdb::convert::Step::Checked) testnetKill();
             };
         }
         else if (!at.empty() && at.find_first_not_of("0123456789") == std::string::npos && std::stoul(at) > 0) {
             opt.hook = [left = std::stoul(at)](csdb::convert::Step s, uint32_t, uint32_t) mutable {
-                if (s == csdb::convert::Step::Removed && --left == 0) std::raise(SIGKILL);
+                if (s == csdb::convert::Step::Removed && --left == 0) testnetKill();
             };
         }
     }
