@@ -222,8 +222,9 @@ jobs:
             third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
-          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>
-          rm -f third-party/lmdbxx/VERSION
+          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>;
+          # so does miniupnpc's in the compiles that go through ccache (neither is read by the build)
+          rm -f third-party/lmdbxx/VERSION p2p/third-party/miniupnp/miniupnpc/VERSION
 
       - name: Install build tools
         shell: pwsh

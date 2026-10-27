@@ -80,7 +80,7 @@ def run(pidfile, cmd):
         print(f"winproc: no job object for pid {proc.pid} (error {ctypes.get_last_error()}): "
               "a hard kill of the launcher leaves it running", file=sys.stderr, flush=True)
     with open(pidfile, "w") as f:
-        f.write(f"{proc.pid}\n")
+        f.write(str(proc.pid))   # no line end: text mode would write "\r\n"
     return proc.wait()
 
 
