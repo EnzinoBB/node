@@ -13,6 +13,7 @@ import datetime
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import thriftpy2
@@ -45,13 +46,30 @@ def run(cmd, path):
     return out
 
 
+HANG = {"pid": 0, "out": ".", "n": 0}
+
+
 def call(node):
+    """One SyncStateGet; a call still waiting after 5 s has the node's fds and threads recorded."""
     t0 = time.time()
+    done = threading.Event()
+
+    def watch():
+        if not done.wait(5) and HANG["n"] < 6:
+            HANG["n"] += 1
+            tag = f"{HANG['n']:02d}"
+            run(f"lsof -n -p {HANG['pid']}", os.path.join(HANG["out"], f"hang-lsof-{tag}.txt"))
+            run(f"netstat -an -p tcp | grep -E '[.:]9090 '", os.path.join(HANG["out"], f"hang-netstat-{tag}.txt"))
+            run(f"sample {HANG['pid']} 2", os.path.join(HANG["out"], f"hang-sample-{tag}.txt"))
+
+    threading.Thread(target=watch, daemon=True).start()
     try:
         s = node.SyncStateGet()
         return True, time.time() - t0, f"block {s.lastBlock} round {s.currRound} gap {s.currRound - s.lastBlock}"
     except Exception as e:  # noqa: BLE001
         return False, time.time() - t0, repr(e)
+    finally:
+        done.set()
 
 
 def main():
@@ -65,6 +83,7 @@ def main():
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
+    HANG["pid"], HANG["out"] = args.pid, args.out
     port = args.api.rsplit(":", 1)[1]
     log = open(os.path.join(args.out, f"probe-{args.mode}.txt"), "a", buffering=1)
 

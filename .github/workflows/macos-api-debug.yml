@@ -14,7 +14,7 @@ on:
         default: '25'
       trace:
         description: 'Thrift trace lines (1/0)'
-        default: '1'
+        default: '0'
 
 permissions:
   contents: read
@@ -25,8 +25,8 @@ env:
   BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
   RELEASE_RUN: '40463796959'
   PACKAGE_ARTIFACT: credits-node-test-platform-4-windows-macos
-  PROBE_MIN: ${{ inputs.probe_min || '25' }}
-  TRACE: ${{ inputs.trace || '1' }}
+  PROBE_MIN: ${{ inputs.probe_min || '12' }}
+  TRACE: ${{ inputs.trace || '0' }}
 
 jobs:
   macos:
@@ -139,6 +139,7 @@ jobs:
 
       - name: Run the node and probe its API
         run: |
+          set -o pipefail
           mkdir -p result
           cd csnode
           ( rc=0; ./node --config-file config.ini </dev/null > stdout.log 2>&1 || rc=$?; echo "$rc" > node-exit.txt ) &
@@ -149,8 +150,11 @@ jobs:
           cd ..
           for _ in $(seq 1 240); do nc -z 127.0.0.1 9090 2>/dev/null && break; sleep 1; done
           lsof -n -p "$pid" > result/lsof-api-up.txt 2>&1 || true
+          # the platform check's own client first: it has to see the node at the head
+          python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min 20 \
+            --api-grace-min 4 --min-rate 3000 --window-min 2 2>&1 | tee result/waithead.txt
           python ci/debug/api_probe.py --api 127.0.0.1:9090 --pid "$pid" --minutes "$PROBE_MIN" \
-            --interval 30 --mode reuse --out result || echo "PROBE FAILED" | tee result/probe-failed.txt
+            --interval 30 --mode new --out result
           lsof -n -p "$pid" > result/lsof-end.txt 2>&1 || true
 
       - name: Stop the node
@@ -175,6 +179,8 @@ jobs:
           for f in csnode/log/*; do [ -f "$f" ] && tail -c 3000000 "$f" > "result/$(basename "$f")"; done 2>/dev/null || true
           tail -n 40 csnode/stdout.log | cut -c1-200 || true
           grep -a "TRACE" result/thrift-trace.txt | grep -v "port=9070\|fd=.*timeout=0" | head -60 || true
+          # a clean stop: status 0 and no crash report
+          [ "$(cat csnode/node-exit.txt 2>/dev/null)" = 0 ] && ! ls result/node*.ips >/dev/null 2>&1
 
       - name: Upload
         if: always()
