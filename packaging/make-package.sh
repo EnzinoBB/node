@@ -40,6 +40,9 @@ install -m 755 "$node" "$dir/$exe"
 install -m 644 "$executor/contract-executor.jar" "$executor/sc-api-support.jar" "$dir/"
 cp -a "$jdk" "$dir/$javadir"
 install -m 644 "$here/mainnet/settings.properties" "$here/mainnet/default_confidants.txt" "$dir/"
+# the node reads VERSION for the "node" field of the snapshots it builds; a package extracted over an
+# older folder corrects it
+printf '%s\n' "$version" > "$dir/VERSION"
 install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
 # the serving nodes the weekly survey found (ci/known-hosts/snapshot_sources.py), when it has found any
 [ ! -f "$here/mainnet/snapshot_sources.txt" ] || install -m 644 "$here/mainnet/snapshot_sources.txt" "$dir/snapshot_sources.txt"

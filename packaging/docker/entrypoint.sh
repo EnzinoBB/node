@@ -158,6 +158,8 @@ echo "mode=$cfg_mode backend=$cfg_backend" > .storage
 for f in settings.properties known_hosts.txt default_confidants.txt; do
     [ -e "$f" ] || cp "$OPT/$f" "$f"
 done
+# the image's version, on every start: the node puts it in the snapshots it builds
+[ ! -e "$OPT/VERSION" ] || cp -f "$OPT/VERSION" VERSION
 # the serving nodes of the weekly survey, when the package has them
 [ ! -e "$OPT/snapshot_sources.txt" ] || [ -e snapshot_sources.txt ] || cp "$OPT/snapshot_sources.txt" snapshot_sources.txt
 if [ ! -f keys/NodePublic.txt ]; then
