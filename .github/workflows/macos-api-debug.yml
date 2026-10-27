@@ -1,0 +1,178 @@
+name: macOS API and exit (debug)
+
+# Diagnostics of two macOS-only defects of the node: the public API (9090) that stops answering
+# new connections after a while, and the SIGSEGV at process exit. Builds the macOS node of this
+# branch (optionally with Thrift trace lines, ci/debug/thrift-trace.patch), puts it into the macOS
+# package of a Release run, restores the published snapshot, syncs mainnet and probes the API.
+on:
+  push:
+    branches: ['debug/macos-api-exit']
+  workflow_dispatch:
+    inputs:
+      probe_min:
+        description: 'Minutes of API probing'
+        default: '25'
+      trace:
+        description: 'Thrift trace lines (1/0)'
+        default: '1'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  RELEASE_RUN: '40463796959'
+  PACKAGE_ARTIFACT: credits-node-test-platform-4-windows-macos
+  PROBE_MIN: ${{ inputs.probe_min || '25' }}
+  TRACE: ${{ inputs.trace || '1' }}
+
+jobs:
+  macos:
+    name: macOS API and exit
+    runs-on: macos-14
+    timeout-minutes: 150
+    env:
+      BOOST_PREFIX: /Users/runner/boost
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+          rm -f third-party/lmdbxx/VERSION
+          git -C cscrypto apply ../ci/platform/blake2-portable.patch
+          if [ "$TRACE" = 1 ]; then git -C third-party/thrift apply ../../ci/debug/thrift-trace.patch; fi
+          git -C third-party/thrift diff --stat
+
+      - name: Install build tools
+        run: |
+          brew install ninja bison flex autoconf automake libtool
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-14-v1
+
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | shasum -a 256 -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          ./b2 -j"$(sysctl -n hw.ncpu)" -d0 toolset=clang variant=release link=static threading=multi \
+            cxxstd=17 cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DHAVE_CLANG_THREAD_SAFETY=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_HASKELL=OFF
+
+      - name: Build
+        run: cmake --build build --target client -j"$(sysctl -n hw.ncpu)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python packages
+        run: python -m pip install --quiet thriftpy2 base58 pynacl
+
+      - name: Download the package
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ env.RELEASE_RUN }}
+          github-token: ${{ github.token }}
+          name: ${{ env.PACKAGE_ARTIFACT }}
+          path: packages
+
+      - name: Unpack, with the node built here
+        run: |
+          ls -la packages
+          pkg=$(ls packages/*-macos-arm64.tar.gz | head -1)
+          test -n "$pkg"
+          tar -xzf "$pkg"
+          cp csnode/config.pruned.ini csnode/config.ini
+          sed -i.bak 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
+          xattr -dr com.apple.quarantine csnode 2>/dev/null || true
+          cp build/client/node csnode/node
+          python ci/testnet/gen_keys.py 1 keys >/dev/null
+          cp keys/n1/NodePublic.txt keys/n1/NodePrivate.txt csnode/
+          grep -nE '^\[api\]|port|timeout' csnode/config.ini | head -30
+          ulimit -a
+
+      - name: Restore the published snapshot
+        working-directory: csnode
+        run: |
+          ./node --config-file config.ini --download-snapshot </dev/null > download.log 2>&1 || { tail -n 60 download.log | cut -c1-300; exit 1; }
+          grep -aE '^(download-snapshot|import-snapshot|snapshot)' download.log | cut -c1-250
+          tail -n 3 download.log | cut -c1-250
+
+      - name: Run the node and probe its API
+        run: |
+          mkdir -p result
+          cd csnode
+          ( rc=0; ./node --config-file config.ini </dev/null > stdout.log 2>&1 || rc=$?; echo "$rc" > node-exit.txt ) &
+          sleep 2
+          pid=$(pgrep -n -f -- '--config-file config.ini')
+          echo "NODE_PID=$pid" >> "$GITHUB_ENV"
+          echo "node pid $pid"
+          cd ..
+          for _ in $(seq 1 240); do nc -z 127.0.0.1 9090 2>/dev/null && break; sleep 1; done
+          lsof -n -p "$pid" > result/lsof-api-up.txt 2>&1 || true
+          python ci/debug/api_probe.py --api 127.0.0.1:9090 --pid "$pid" --minutes "$PROBE_MIN" \
+            --interval 30 --mode reuse --out result || echo "PROBE FAILED" | tee result/probe-failed.txt
+          lsof -n -p "$pid" > result/lsof-end.txt 2>&1 || true
+
+      - name: Stop the node
+        if: always()
+        run: |
+          mkdir -p result
+          if [ -n "${NODE_PID:-}" ] && kill -0 "$NODE_PID" 2>/dev/null; then
+            sample "$NODE_PID" 3 -file result/sample.txt >/dev/null 2>&1 || true
+            kill -TERM "$NODE_PID" || true
+            for _ in $(seq 1 180); do kill -0 "$NODE_PID" 2>/dev/null || break; sleep 1; done
+            kill -0 "$NODE_PID" 2>/dev/null && { echo "the node did not end in 180 s"; kill -9 "$NODE_PID"; }
+          fi
+          sleep 3
+          echo "node exit status: $(cat csnode/node-exit.txt 2>/dev/null)" | tee result/exit.txt
+          pkill -f '[c]ontract-executor[.]jar' || true
+          sleep 15   # the crash report is written a moment after the process ends
+          cp ~/Library/Logs/DiagnosticReports/node*.ips result/ 2>/dev/null || true
+          ls -la ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head || true
+          grep -a "TRACE\|^Thrift" csnode/stdout.log > result/thrift-trace.txt 2>/dev/null || true
+          wc -l result/thrift-trace.txt || true
+          tail -c 3000000 csnode/stdout.log > result/stdout.log 2>/dev/null || true
+          for f in csnode/log/*; do [ -f "$f" ] && tail -c 3000000 "$f" > "result/$(basename "$f")"; done 2>/dev/null || true
+          tail -n 40 csnode/stdout.log | cut -c1-200 || true
+          grep -a "TRACE" result/thrift-trace.txt | grep -v "port=9070\|fd=.*timeout=0" | head -60 || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-api-debug
+          path: result/
+          retention-days: 14

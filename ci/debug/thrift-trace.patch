@@ -1,0 +1,92 @@
+diff --git a/lib/cpp/src/thrift/server/TConnectedClient.cpp b/lib/cpp/src/thrift/server/TConnectedClient.cpp
+index 33ec3a98..3ef047a1 100644
+--- a/lib/cpp/src/thrift/server/TConnectedClient.cpp
++++ b/lib/cpp/src/thrift/server/TConnectedClient.cpp
+@@ -60,9 +60,12 @@ void TConnectedClient::run() {
+ 
+     try {
+       if (!processor_->process(inputProtocol_, outputProtocol_, opaqueContext_)) {
++        GlobalOutput.printf("TRACE TConnectedClient: process() returned false");
+         break;
+       }
+     } catch (const TTransportException& ttx) {
++      GlobalOutput.printf("TRACE TConnectedClient: ends on TTransportException type=%d errno=%d: %s",
++                          (int)ttx.getType(), 0, ttx.what());
+       switch (ttx.getType()) {
+         case TTransportException::END_OF_FILE:
+         case TTransportException::INTERRUPTED:
+@@ -82,6 +85,7 @@ void TConnectedClient::run() {
+         }
+       }
+     } catch (const TException& tex) {
++      GlobalOutput.printf("TRACE TConnectedClient: ends on TException: %s", tex.what());
+       string errStr = string("TConnectedClient processing exception: ") + tex.what();
+       GlobalOutput(errStr.c_str());
+       // Disconnect from client, because we could not process the message.
+diff --git a/lib/cpp/src/thrift/transport/TServerSocket.cpp b/lib/cpp/src/thrift/transport/TServerSocket.cpp
+index c1d5f44a..5a048d4b 100644
+--- a/lib/cpp/src/thrift/transport/TServerSocket.cpp
++++ b/lib/cpp/src/thrift/transport/TServerSocket.cpp
+@@ -252,6 +252,9 @@ void TServerSocket::listen() {
+         = stdcxx::shared_ptr<THRIFT_SOCKET>(new THRIFT_SOCKET(sv[0]), destroyer_of_fine_sockets);
+   }
+ 
++  GlobalOutput.printf("TRACE TServerSocket::listen port=%d interrupt=%d/%d child_interrupt=%d/%d", port_,
++                      (int)interruptSockReader_, (int)interruptSockWriter_,
++                      pChildInterruptSockReader_ ? (int)*pChildInterruptSockReader_ : -1, (int)childInterruptSockWriter_);
+   // Validate port number
+   if (port_ < 0 || port_ > 0xFFFF) {
+     throw TTransportException(TTransportException::BAD_ARGS, "Specified port is invalid");
+@@ -631,6 +634,9 @@ shared_ptr<TTransport> TServerSocket::acceptImpl() {
+                               errno_copy);
+   }
+ 
++  GlobalOutput.printf("TRACE TServerSocket::accept port=%d listen_fd=%d client_fd=%d child_interrupt_fd=%d",
++                      port_, (int)serverSocket_, (int)clientSocket,
++                      pChildInterruptSockReader_ ? (int)*pChildInterruptSockReader_ : -1);
+   shared_ptr<TSocket> client = createSocket(clientSocket);
+   if (sendTimeout_ > 0) {
+     client->setSendTimeout(sendTimeout_);
+diff --git a/lib/cpp/src/thrift/transport/TSocket.cpp b/lib/cpp/src/thrift/transport/TSocket.cpp
+index d93d0ffd..347bd9a6 100644
+--- a/lib/cpp/src/thrift/transport/TSocket.cpp
++++ b/lib/cpp/src/thrift/transport/TSocket.cpp
+@@ -534,8 +534,20 @@ try_again:
+     fds[1].fd = *(interruptListener_.get());
+     fds[1].events = THRIFT_POLLIN;
+ 
++    struct timeval tp0;
++    THRIFT_GETTIMEOFDAY(&tp0, NULL);
+     int ret = THRIFT_POLL(fds, 2, (recvTimeout_ == 0) ? -1 : recvTimeout_);
+     int errno_copy = THRIFT_GET_SOCKET_ERROR;
++    {
++      struct timeval tp1;
++      THRIFT_GETTIMEOFDAY(&tp1, NULL);
++      long ms = (tp1.tv_sec - tp0.tv_sec) * 1000 + (tp1.tv_usec - tp0.tv_usec) / 1000;
++      if (ret <= 0 || fds[1].revents != 0 || (fds[0].revents & ~THRIFT_POLLIN) != 0 || ms > 1000) {
++        GlobalOutput.printf("TRACE TSocket::read poll fd=%d ifd=%d ret=%d errno=%d rev0=0x%x rev1=0x%x waited=%ldms timeout=%d",
++                            (int)socket_, (int)fds[1].fd, ret, errno_copy, (unsigned)fds[0].revents,
++                            (unsigned)fds[1].revents, ms, recvTimeout_);
++      }
++    }
+     if (ret < 0) {
+       // error cases
+       if (errno_copy == THRIFT_EINTR && (retries++ < maxRecvRetries_)) {
+@@ -558,6 +570,9 @@ try_again:
+   got = static_cast<int>(recv(socket_, cast_sockopt(buf), len, 0));
+   // THRIFT_GETTIMEOFDAY can change THRIFT_GET_SOCKET_ERROR
+   int errno_copy = THRIFT_GET_SOCKET_ERROR;
++  if (got <= 0) {
++    GlobalOutput.printf("TRACE TSocket::read recv fd=%d got=%d errno=%d", (int)socket_, got, got < 0 ? errno_copy : 0);
++  }
+ 
+   // Check for error on read
+   if (got < 0) {
+@@ -622,6 +637,7 @@ void TSocket::write(const uint8_t* buf, uint32_t len) {
+   while (sent < len) {
+     uint32_t b = write_partial(buf + sent, len - sent);
+     if (b == 0) {
++      GlobalOutput.printf("TRACE TSocket::write fd=%d send timeout after %u of %u bytes", (int)socket_, sent, len);
+       // This should only happen if the timeout set with SO_SNDTIMEO expired.
+       // Raise an exception.
+       throw TTransportException(TTransportException::TIMED_OUT, "send timeout expired");
