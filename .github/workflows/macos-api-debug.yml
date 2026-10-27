@@ -77,6 +77,13 @@ jobs:
             cxxstd=17 cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
             install --prefix="${BOOST_PREFIX}"
 
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
