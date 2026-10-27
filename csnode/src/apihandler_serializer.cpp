@@ -7,6 +7,7 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <csnode/archive_stream.hpp>
 
 #include <csconnector/csconnector.hpp>
 #include <csnode/serializers_helper.hpp>
@@ -28,7 +29,8 @@ void APIHandler_Serializer::bind(api::APIHandler& apih) {
 
 void APIHandler_Serializer::save(const std::filesystem::path& rootDir) {
     std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_oarchive oa(ofs);
+    cs::ArchiveOutput out(ofs);   // the same header bytes on every system
+    boost::archive::binary_oarchive oa(out);
 
     auto saveHelper = [&](auto& entity) {
       auto ref = lockedReference(entity);
@@ -45,7 +47,8 @@ void APIHandler_Serializer::save(const std::filesystem::path& rootDir) {
 
 void APIHandler_Serializer::load(const std::filesystem::path& rootDir) {
     std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_iarchive ia(ifs);
+    cs::ArchiveInput in(ifs);   // also a checkpoint written on another system
+    boost::archive::binary_iarchive ia(in);
 
     auto loadHelper = [&](auto& entity) {
       auto ref = lockedReference(entity);

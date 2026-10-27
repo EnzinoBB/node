@@ -7,6 +7,7 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <csnode/archive_stream.hpp>
 
 #include <csnode/walletsids.hpp>
 #include <csnode/walletsids_serializer.hpp>
@@ -33,7 +34,8 @@ void WalletsIds_Serializer::clear(const std::filesystem::path& rootDir) {
 
 void WalletsIds_Serializer::save(const std::filesystem::path& rootDir) {
     std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_oarchive oa(ofs);
+    cs::ArchiveOutput out(ofs);   // the same header bytes on every system
+    boost::archive::binary_oarchive oa(out);
     oa << *data_;
     oa << *nextId_;
 }
@@ -65,7 +67,8 @@ void WalletsIds_Serializer::save(const std::filesystem::path& rootDir) {
 
 void WalletsIds_Serializer::load(const std::filesystem::path& rootDir) {
     std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
-    boost::archive::binary_iarchive ia(ifs);
+    cs::ArchiveInput in(ifs);   // also a checkpoint written on another system
+    boost::archive::binary_iarchive ia(in);
     ia >> *data_;
     ia >> *nextId_;
 }

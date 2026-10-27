@@ -4,6 +4,7 @@
 
 #include <boost/archive/binary_oarchive.hpp>
 #include <boost/archive/binary_iarchive.hpp>
+#include <csnode/archive_stream.hpp>
 
 #include <csnode/roundstat_serializer.hpp>
 #include <csnode/serializers_helper.hpp>
@@ -35,7 +36,8 @@ namespace cs {
 
     void RoundStat_Serializer::save(const std::filesystem::path& rootDir) {
         std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
-        boost::archive::binary_oarchive oa(ofs);
+        cs::ArchiveOutput out(ofs);   // the same header bytes on every system
+        boost::archive::binary_oarchive oa(out);
         csdebug() << kLogPrefix << __func__;
         roundStat_->printClassInfo();
         oa << roundStat_->serialize();
@@ -62,7 +64,8 @@ namespace cs {
 
     void RoundStat_Serializer::load(const std::filesystem::path& rootDir) {
         std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
-        boost::archive::binary_iarchive ia(ifs);
+        cs::ArchiveInput in(ifs);   // also a checkpoint written on another system
+        boost::archive::binary_iarchive ia(in);
         csdebug() << kLogPrefix << __func__;
         Bytes data;
         ia >> data;
