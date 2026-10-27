@@ -68,7 +68,8 @@ jobs:
           # blake2's SSE code does not build on ARM: the reference implementation there
           git -C cscrypto apply ../ci/platform/blake2-portable.patch
 
-      # bash 4+ for run.sh; the GNU tools go first on PATH in the run step only
+      # bash 4+ for run.sh; the GNU tools go first on PATH in the run step only (not Homebrew's bin,
+      # whose python3 would shadow the one set up below)
       - name: Install tools
         run: |
           brew install ninja bison flex autoconf automake libtool ccache bash coreutils gnu-sed grep gawk findutils
@@ -159,10 +160,10 @@ jobs:
           WORK: ${{ github.workspace }}/testnet-run
         run: |
           b=$(brew --prefix)
-          export PATH="$b/opt/coreutils/libexec/gnubin:$b/opt/gnu-sed/libexec/gnubin:$b/opt/grep/libexec/gnubin:$b/opt/gawk/libexec/gnubin:$b/opt/findutils/libexec/gnubin:$b/bin:$PATH"
+          export PATH="$b/opt/coreutils/libexec/gnubin:$b/opt/gnu-sed/libexec/gnubin:$b/opt/grep/libexec/gnubin:$b/opt/gawk/libexec/gnubin:$b/opt/findutils/libexec/gnubin:$PATH"
           # macOS gives a process 256 open files by default
           ulimit -n 10240
-          echo "$(bash --version | head -1); $(sed --version | head -1); $(ulimit -n) open files"
+          echo "$("$b/bin/bash" --version | head -1); $(sed --version | head -1); $(python3 --version) at $(command -v python3); $(ulimit -n) open files"
           rc=0
           "$b/bin/bash" ci/testnet/run.sh build-testnet/client/node || rc=$?
           if [ "$rc" -ne 0 ]; then
