@@ -30,7 +30,7 @@ void TokensMaster_Serializer::clear(const std::filesystem::path& rootDir) {
 }
 
 void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {
-    std::ofstream ofs(rootDir / kDataFileName);
+    std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
     boost::archive::text_oarchive oa(ofs);
     oa << *tokens_;
     oa << *holders_;
@@ -38,7 +38,7 @@ void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {
 
 ::cscrypto::Hash TokensMaster_Serializer::hash() {
     {
-        std::ofstream ofs(kDataFileName);
+        std::ofstream ofs(kDataFileName, std::ios::binary);   // text mode on Windows would write \r\n and change the hash
         boost::archive::text_oarchive oa(
           ofs,
           boost::archive::no_header | boost::archive::no_codecvt
@@ -60,7 +60,7 @@ void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {
 }
 
 void TokensMaster_Serializer::load(const std::filesystem::path& rootDir) {
-    std::ifstream ifs(rootDir / kDataFileName);
+    std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
     boost::archive::text_iarchive ia(ifs);
     ia >> *tokens_;
     ia >> *holders_;

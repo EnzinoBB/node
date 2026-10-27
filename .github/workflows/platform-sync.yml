@@ -131,9 +131,11 @@ jobs:
         run: |
           cd csnode
           # how the node ended, if it ends before the head
-          ( ${{ matrix.node }} --config-file config.ini </dev/null > stdout.log 2>&1; echo "the node exited with status $?" > node-exit.txt ) &
+          # (not "cmd; echo $?": with -e the subshell would end at the failing node)
+          ( rc=0; ${{ matrix.node }} --config-file config.ini </dev/null > stdout.log 2>&1 || rc=$?; echo "the node exited with status $rc" > node-exit.txt ) &
           sleep 2
-          pid=$(pgrep -n -f -- '--config-file config.ini' || true)
+          pid=
+          [ "${{ matrix.os }}" = windows ] || pid=$(pgrep -n -f -- '--config-file config.ini' || true)
           echo "NODE_PID=$pid" >> "$GITHUB_ENV"
           cd ..
           # Linux syncs this stretch at 30000+ blocks/min and reaches the head in about 5 minutes: a node

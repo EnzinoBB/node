@@ -63,7 +63,7 @@ void WalletsCache_Serializer::save(const std::filesystem::path& rootDir) {
 
 ::cscrypto::Hash WalletsCache_Serializer::hash() {
     {
-      std::ofstream ofs(kTmpDataFile);
+      std::ofstream ofs(kTmpDataFile, std::ios::binary);   // text mode on Windows would write \r\n and change the hash
       boost::archive::text_oarchive oa(
         ofs,
         boost::archive::no_header | boost::archive::no_codecvt
