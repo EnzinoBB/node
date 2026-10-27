@@ -23,9 +23,6 @@ on:
         default: '45'
   schedule:
     - cron: '23 5 * * *'
-  # TEMPORARY while the workflow is developed on its branch (a manual run needs it on master):
-  push:
-    branches: ['ci/testnet-platforms*']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -44,7 +41,7 @@ env:
 jobs:
   macos:
     name: Private network (macOS, ${{ inputs.nodes || '7' }} nodes)
-    if: github.event_name == 'schedule' || inputs.os == 'macos' || inputs.os == 'both' || github.event_name == 'push'
+    if: github.event_name == 'schedule' || inputs.os == 'macos' || inputs.os == 'both'
     runs-on: macos-14
     timeout-minutes: 150
     env:
@@ -201,7 +198,7 @@ jobs:
 
   windows:
     name: Private network (Windows, ${{ inputs.nodes || '7' }} nodes)
-    if: github.event_name == 'schedule' || inputs.os == 'windows' || inputs.os == 'both' || github.event_name == 'push'
+    if: github.event_name == 'schedule' || inputs.os == 'windows' || inputs.os == 'both'
     runs-on: windows-2022
     timeout-minutes: 150
     defaults:
