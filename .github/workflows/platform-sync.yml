@@ -140,6 +140,11 @@ jobs:
         env:
           OS: ${{ matrix.os }}
         run: |
+          mkdir -p result
+          # a node that never reached the head: where its threads are
+          if [ "$OS" = macos ] && [ -n "${NODE_PID:-}" ] && kill -0 "$NODE_PID" 2>/dev/null; then
+            sample "$NODE_PID" 5 -file result/sample-macos.txt >/dev/null 2>&1 || true
+          fi
           if [ "$OS" = windows ]; then
             taskkill //F //IM node.exe >/dev/null 2>&1 || true
             taskkill //F //IM java.exe >/dev/null 2>&1 || true
@@ -148,10 +153,10 @@ jobs:
             for _ in $(seq 1 120); do [ -z "${NODE_PID:-}" ] || kill -0 "$NODE_PID" 2>/dev/null || break; sleep 1; done
             pkill -f '[c]ontract-executor[.]jar' || true
           fi
-          mkdir -p result
           cat csnode/log/log_*.txt 2>/dev/null | grep -a "STATE DIGEST #" > "result/digests-$OS.txt" || true
           cat csnode/log/log_*.txt 2>/dev/null | grep -aE "counted transactions is different|Couldn't save block|is not on this chain|but its caches already hold block|snapshot.verified|snapshot.mismatch" | head -50 > "result/problems-$OS.txt" || true
           tail -c 2000000 csnode/stdout.log > "result/stdout-$OS.log" 2>/dev/null || true
+          for f in csnode/log/*; do [ -f "$f" ] && tail -c 3000000 "$f" > "result/$OS-$(basename "$f")"; done 2>/dev/null || true
           echo "$(wc -l < "result/digests-$OS.txt") digest lines"; tail -3 "result/digests-$OS.txt"
 
       - name: Upload the digests
