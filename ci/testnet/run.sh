@@ -162,6 +162,19 @@
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
 set -euo pipefail
 
+# the system this runs on: every scenario on Linux; the default scenario also on macOS and on Windows
+# (Git Bash), see .github/workflows/testnet-platforms.yml. What needs Linux stays behind these checks
+case "$(uname -s)" in
+    Linux) OS_KIND=linux ;;
+    Darwin) OS_KIND=macos ;;
+    MINGW*|MSYS*|CYGWIN*) OS_KIND=windows ;;
+    *) OS_KIND=other ;;
+esac
+if [ "$OS_KIND" != linux ]; then
+    # mapfile, ${var,,}: macOS ships bash 3.2 (the workflow installs a newer one)
+    [ "${BASH_VERSINFO[0]}" -ge 4 ] || { echo "FAIL: run.sh needs bash 4 or later, this is $BASH_VERSION"; exit 1; }
+fi
+
 BIN=$(realpath "$1")
 # mixed nodes: the even nodes run BIN_ALT, built from another ref
 BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
@@ -358,6 +371,19 @@ WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
 declare -a PIDS KEYS REPORTED_DOWN
+
+if [ "$OS_KIND" != linux ]; then
+    # sudo, tc netem, iptables, cgroups, tmpfs and /proc are Linux only
+    not_here() { echo "FAIL: $1 needs Linux (this is $OS_KIND)"; exit 1; }
+    [ -z "$NET_FAULT" ] || not_here "NET_FAULT (tc netem, iptables)"
+    [ -z "$SLOW_NODES" ] || not_here "SLOW_NODES (cgroups)"
+    [ "$DISK_FULL_NODE" -eq 0 ] || not_here "DISK_FULL_NODE (tmpfs)"
+    [ "$NODE_NETS" != 1 ] || not_here "NODE_NETS=1 (iptables SNAT, JOIN_FETCH=p2p without JOIN_SOURCES=keys)"
+    if [ "$SAMPLE_SECONDS" -gt 0 ]; then
+        echo "sampler: off on $OS_KIND (sampler.py reads /proc)"
+        SAMPLE_SECONDS=0
+    fi
+fi
 
 # official even nodes: refuse what they cannot take part in (see BIN_ALT_OFFICIAL above)
 official_node() { [ "$BIN_ALT_OFFICIAL" = 1 ] && [ $(( $1 % 2 )) -eq 0 ]; }

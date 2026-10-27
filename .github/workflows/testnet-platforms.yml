@@ -1,0 +1,200 @@
+name: Testnet (macOS, Windows)
+
+# The default scenario of testnet.yml (7 nodes funded from the genesis key with transfers, the last
+# node restarted at sequence 300, every node at the target with the same STATE DIGEST) on macOS
+# (Apple Silicon), with a -DCREDITS_TESTNET=ON node built on each.
+# Linux is testnet.yml. Nightly and on demand only: macOS runners are scarce.
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: 'Systems to run on'
+        type: choice
+        options: [macos]
+        default: macos
+      nodes:
+        description: 'Nodes in the network (odd, 5 to 25)'
+        default: '7'
+      target_seq:
+        description: 'Sequence every node must reach (past the STATE DIGEST at 1000)'
+        default: '1100'
+      timeout_min:
+        description: 'Minutes allowed to reach it'
+        default: '45'
+  schedule:
+    - cron: '23 5 * * *'
+  # TEMPORARY while the workflow is developed on its branch (a manual run needs it on master):
+  push:
+    branches: ['ci/testnet-platforms*']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BOOST_VERSION: 1.83.0
+  BOOST_SHA256: 6478edfe2f3305127cffe8caf73ea0176c53769f4bf1585be237eb30798c3b8e
+  NODES: ${{ inputs.nodes || '7' }}
+  TARGET_SEQ: ${{ inputs.target_seq || '1100' }}
+  TIMEOUT_MIN: ${{ inputs.timeout_min || '45' }}
+
+jobs:
+  macos:
+    name: Private network (macOS, ${{ inputs.nodes || '7' }} nodes)
+    if: github.event_name == 'schedule' || inputs.os == 'macos' || inputs.os == 'both' || github.event_name == 'push'
+    runs-on: macos-14
+    timeout-minutes: 150
+    env:
+      BOOST_PREFIX: /Users/runner/boost
+      CCACHE_DIR: /Users/runner/.ccache
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: |
+          git submodule update --init -- cscrypto p2p \
+            third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+          git -C cscrypto submodule update --init
+          git -C p2p submodule update --init
+          # on a case-insensitive file system lmdbxx's VERSION text file shadows the standard <version>
+          rm -f third-party/lmdbxx/VERSION
+          # blake2's SSE code does not build on ARM: the reference implementation there
+          git -C cscrypto apply ../ci/platform/blake2-portable.patch
+
+      # bash 4+ for run.sh; the GNU tools go first on PATH in the run step only
+      - name: Install tools
+        run: |
+          brew install ninja bison flex autoconf automake libtool ccache bash coreutils gnu-sed grep gawk findutils
+          echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix flex)/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python packages
+        run: python3 -m pip install --quiet thriftpy2 base58 pynacl
+
+      - name: Restore Boost
+        id: cache-boost
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-14-v1
+
+      # as in build-platforms.yml
+      - name: Build Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        run: |
+          v=${BOOST_VERSION//./_}
+          curl -sSfL -o boost.tar.bz2 "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${v}.tar.bz2"
+          echo "${BOOST_SHA256}  boost.tar.bz2" | shasum -a 256 -c
+          tar xjf boost.tar.bz2
+          cd "boost_${v}"
+          ./bootstrap.sh --with-libraries=system,filesystem,program_options,date_time,regex,log,iostreams,thread,serialization,atomic,chrono
+          # cxxstd=17: a Boost built as C++98 by Apple clang holds header template definitions that
+          # differ from the node's C++17 ones (see build-platforms.yml)
+          ./b2 -j"$(sysctl -n hw.ncpu)" -d0 toolset=clang variant=release link=static threading=multi \
+            cxxstd=17 cxxflags=-fPIC --layout=tagged -sNO_BZIP2=1 -sNO_ZSTD=1 -sNO_LZMA=1 \
+            install --prefix="${BOOST_PREFIX}"
+
+      - name: Save Boost
+        if: steps.cache-boost.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.BOOST_PREFIX }}
+          key: ${{ steps.cache-boost.outputs.cache-primary-key }}
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-testnet-macos-14-${{ github.sha }}
+          restore-keys: ccache-testnet-macos-14-
+
+      # build-platforms.yml's configuration plus CREDITS_TESTNET (csnode, net and client only)
+      - name: Build node
+        id: build
+        env:
+          CCACHE_BASEDIR: ${{ github.workspace }}
+        run: |
+          cmake -S . -B build-testnet -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DHAVE_CLANG_THREAD_SAFETY=OFF \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+            -DWITH_HASKELL=OFF \
+            -DCREDITS_TESTNET=ON
+          ccache --max-size=2G
+          ccache --zero-stats
+          cmake --build build-testnet -j"$(sysctl -n hw.ncpu)" --target node
+          ccache --show-stats
+
+      - name: Save ccache
+        if: always() && (steps.build.outcome == 'success' || steps.build.outcome == 'failure')
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-testnet-macos-14-${{ github.sha }}
+
+      - name: Run private network
+        timeout-minutes: 75
+        env:
+          RESTART_AT: '300'
+          FUND: '1'
+          LOAD_SECONDS: '300'
+          WORK: ${{ github.workspace }}/testnet-run
+        run: |
+          b=$(brew --prefix)
+          export PATH="$b/opt/coreutils/libexec/gnubin:$b/opt/gnu-sed/libexec/gnubin:$b/opt/grep/libexec/gnubin:$b/opt/gawk/libexec/gnubin:$b/opt/findutils/libexec/gnubin:$b/bin:$PATH"
+          # macOS gives a process 256 open files by default
+          ulimit -n 10240
+          echo "$(bash --version | head -1); $(sed --version | head -1); $(ulimit -n) open files"
+          rc=0
+          "$b/bin/bash" ci/testnet/run.sh build-testnet/client/node || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            for f in testnet-run/n*/node.log testnet-run/n*/stdout.log testnet-run/fund.log; do
+              [ -f "$f" ] || continue
+              echo "---- the end of $f"; tail -n 30 "$f" | cut -c1-300
+            done
+            echo "TESTNET macOS: FAIL (run.sh exited $rc)"
+            echo "TESTNET macOS: FAIL (run.sh exited $rc)" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "TESTNET macOS: PASS ($NODES nodes, sequence $TARGET_SEQ, restart at 300)"
+          echo "TESTNET macOS: PASS ($NODES nodes, sequence $TARGET_SEQ, restart at 300)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Crash reports
+        if: failure()
+        run: |
+          sleep 10   # a crash report is written a moment after the process ends
+          mkdir -p testnet-run/crash
+          cp ~/Library/Logs/DiagnosticReports/node*.ips testnet-run/crash/ 2>/dev/null || true
+          ls testnet-run/crash
+
+      - name: Upload node logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-logs-macos-${{ github.run_id }}
+          path: |
+            testnet-run/n*/*.log
+            testnet-run/fund.log
+            testnet-run/n*/config.ini
+            testnet-run/progress
+            testnet-run/crash/
+          retention-days: 14
+
