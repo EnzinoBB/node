@@ -33,7 +33,7 @@
 
 const NodeVersion NODE_VERSION = 532;
 // the community release (4.2.532-community.N); also announced to peers in host_data bits 32-47
-const uint8_t MINOR_NODE_VERSION = 13;
+const uint8_t MINOR_NODE_VERSION = 14;
 
 const std::string BLOCK_NAME_PARAMS = "params";
 const std::string BLOCK_NAME_HOST_INPUT = "host_input";

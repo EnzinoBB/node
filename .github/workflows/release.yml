@@ -45,9 +45,10 @@ env:
   TEMURIN_WINDOWS_SHA256: d5008f02174c1ad21c10407cbf104815cb390ec4c263d53946e8d0507d7a77f9
   TEMURIN_MACOS: OpenJDK11U-jdk_aarch64_mac_hotspot_11.0.32.1_1.tar.gz
   TEMURIN_MACOS_SHA256: c487a1c3a56588b3a32d0d07cdd526bf3d401c4b8422be772ca178bfcd647f3f
-  # the Windows and macOS packages join a published release only once a node on each system has
-  # matched the Linux state digests on mainnet; until then they are workflow artifacts
-  PUBLISH_PLATFORMS: 'false'
+  # the Windows and macOS packages join a published release: a node of each system matched the Linux
+  # state digests on mainnet (platform-sync.yml, run on the packages of this commit before the tag).
+  # 'false': they stay workflow artifacts
+  PUBLISH_PLATFORMS: 'true'
 
 jobs:
   # the node for Ubuntu 20.04 and later (glibc 2.31); the default build below needs glibc 2.38
@@ -224,9 +225,10 @@ jobs:
 
           One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
           (\`./node --config-file config.pruned.ini\`).
-          Two builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
-          \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
-          each package. Verify with SHA256SUMS.
+          Builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
+          \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later; \`windows-x64\` (.zip, Windows 10 and
+          later) and \`macos-arm64\` (Apple Silicon) come with Eclipse Temurin 11. See README-COMMUNITY.txt inside
+          each package. Verify with SHA256SUMS (Linux) and SHA256SUMS-windows-macos.
 
           What changes from the official node: https://github.com/${GITHUB_REPOSITORY}/blob/master/docs/differences.md
           Every change by release: https://github.com/${GITHUB_REPOSITORY}/blob/master/docs/CHANGES.md
