@@ -226,12 +226,21 @@ rounds for both).
 ## Packages and Docker
 
 - **Release packages.** Each release has one package for full and pruned storage (until
-  community.13, a full and a pruned package), in two builds:
+  community.13, a full and a pruned package), in these builds:
   - `linux-x64` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
-  - `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later.
+  - `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later;
+  - `windows-x64` (a `.zip`, Windows 10 and later; start `node.exe` from a terminal in the `csnode`
+    folder) and `macos-arm64` (Apple Silicon; clear the download quarantine once with
+    `xattr -dr com.apple.quarantine csnode`; the node is not signed).
 
-  Each package includes the JDK of the official release and the community build of the contract
+  The Linux packages include the JDK of the official release; the Windows and macOS ones include
+  Eclipse Temurin 11 (the official release has no JDK for them), in `jdk/`, and their
+  `executor_command` points at it. Each package includes the community build of the contract
   executor.
+- **Checkpoints and snapshots are the same on every system.** A Windows or macOS node loads what a
+  Linux node wrote and the other way round: the binary checkpoint files record `long` as 8 bytes
+  whatever the system, and the checkpoint's text files are read and written in binary mode. On
+  Linux the files are byte for byte what they were.
 - **`config.ini` in the packages.** It is the official one, with five changes:
   - `[event_report]` is commented out (it reports node events to a fixed address);
   - `executor_commit_max` accepts the community executor;

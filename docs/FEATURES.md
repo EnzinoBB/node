@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.13 or earlier.
+Everything listed here is in release 4.2.532-community.14 or earlier.
 
 ## Storage
 
@@ -52,6 +52,10 @@ Everything listed here is in release 4.2.532-community.13 or earlier.
   [#101](https://github.com/EnzinoBB/node/pull/101), [#102](https://github.com/EnzinoBB/node/pull/102),
   [#104](https://github.com/EnzinoBB/node/pull/104), [#105](https://github.com/EnzinoBB/node/pull/105),
   [#106](https://github.com/EnzinoBB/node/pull/106), [#110](https://github.com/EnzinoBB/node/pull/110)
+- **A survey of who serves what.** `node --survey-snapshots` asks the neighbours for the snapshots
+  they serve without opening the chain and prints what they declared; a weekly job publishes the
+  result and the list of serving nodes that ships in the packages.
+  [#116](https://github.com/EnzinoBB/node/pull/116)
 
 ## State that can be checked
 
@@ -111,10 +115,16 @@ the storage engines (a full disk, a failed write) that hung or stopped the node.
 
 ## Packages and Docker
 
-- **Release packages** for Ubuntu 20.04 and later, full and pruned, and a verified list of known
+- **Release packages** for Ubuntu 20.04 and later (one package: `config.ini` full, `config.pruned.ini`
+  pruned), for Windows (x64, `.zip`) and for macOS (Apple Silicon), and a verified list of known
   hosts updated every week.
   [#34](https://github.com/EnzinoBB/node/pull/34), [#35](https://github.com/EnzinoBB/node/pull/35),
-  [#42](https://github.com/EnzinoBB/node/pull/42)
+  [#42](https://github.com/EnzinoBB/node/pull/42), [#113](https://github.com/EnzinoBB/node/pull/113)
+- **Windows and macOS.** The node builds and passes its tests on Windows (MSVC) and on macOS
+  (Apple Silicon), and a Windows or macOS node loads the checkpoints and snapshots a Linux node
+  wrote and syncs mainnet with the same state digests; CI checks that on mainnet for the three
+  systems before the packages are published.
+  [#114](https://github.com/EnzinoBB/node/pull/114), [#115](https://github.com/EnzinoBB/node/pull/115)
 - **Docker image.** One command starts a node; the first start of a pruned node restores the
   published snapshot (or fetches one from its neighbours), the node serves snapshots, and a database
   conversion is one variable.

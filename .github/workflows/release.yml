@@ -224,9 +224,10 @@ jobs:
 
           One package for full and pruned storage: \`config.ini\` runs a full node, \`config.pruned.ini\` a pruned one on LMDB
           (\`./node --config-file config.pruned.ini\`).
-          Two builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
-          \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later. See README-COMMUNITY.txt inside
-          each package. Verify with SHA256SUMS.
+          Builds of the same code: \`linux-x64\` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
+          \`linux-x64-glibc2.31\` runs on Ubuntu 20.04, Debian 11 and later; \`windows-x64\` (.zip, Windows 10 and
+          later) and \`macos-arm64\` (Apple Silicon) come with Eclipse Temurin 11. See README-COMMUNITY.txt inside
+          each package. Verify with SHA256SUMS (Linux) and SHA256SUMS-windows-macos.
 
           What changes from the official node: https://github.com/${GITHUB_REPOSITORY}/blob/master/docs/differences.md
           Every change by release: https://github.com/${GITHUB_REPOSITORY}/blob/master/docs/CHANGES.md
