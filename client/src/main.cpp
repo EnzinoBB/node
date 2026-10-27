@@ -221,12 +221,24 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // The snapshot commands end before Peer sets the logger up. Without it Boost.Log prints every
+    // record of the import, hundreds of thousands of debug and trace lines, to the console: the
+    // configured levels apply to them as to a running node.
+    const bool snapshotCommand = vm.count("download-snapshot") > 0 || vm.count("import-snapshot") > 0 || vm.count("export-snapshot") > 0;
+    if (snapshotCommand) {
+        logger::initialize(config.getLoggerSettings());
+    }
+    auto finishCommand = [](int code) {
+        logger::cleanup();
+        return code;
+    };
+
     // no keys needed: the import writes only the database, the caches and the checkpoint
     if (vm.count("download-snapshot") > 0) {
-        return snapshot_export::runDownload(config, vm["download-snapshot"].as<std::string>());
+        return finishCommand(snapshot_export::runDownload(config, vm["download-snapshot"].as<std::string>()));
     }
     if (vm.count("import-snapshot") > 0) {
-        return snapshot_export::runImport(config, vm["import-snapshot"].as<std::string>());
+        return finishCommand(snapshot_export::runImport(config, vm["import-snapshot"].as<std::string>()));
     }
 
     if (vm.count(cmdline::argSeed) == 0) {
@@ -241,7 +253,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (vm.count("export-snapshot") > 0) {
-        return snapshot_export::run(config, vm["export-snapshot"].as<std::string>());
+        return finishCommand(snapshot_export::run(config, vm["export-snapshot"].as<std::string>()));
     }
 
     if (vm.count(cmdline::argDumpKeys) > 0) {
