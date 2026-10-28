@@ -1,0 +1,306 @@
+name: Mainnet join from a p2p snapshot
+
+# The packages for Linux, Windows and macOS (Apple Silicon) each start on mainnet with an empty
+# database and fetch their snapshot over p2p from the node named in SOURCE_KEY / SOURCE_ADDR (its key
+# in [snapshot] sources, min_sources=1, fetch_fallback=wait: no other way to start). Each node must
+# import the snapshot from that source, verify it, sync to the head, follow the chain for STAY_MIN
+# minutes and log the same state digests as the other two systems. The block hashes each node holds
+# are kept for a comparison with other nodes.
+#
+# Run by pushing a mainnet-join-* tag (the workflow is not on the default branch).
+on:
+  push:
+    tags: ['mainnet-join-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TAG: community-v4.2.532-community.14
+  SOURCE_KEY: C31LvnwHuugixwgPzoLV87AiK6xK5H6iVjFC5GQnVTeb
+  SOURCE_ADDR: 109.199.123.26:9510
+  FETCH_TIMEOUT_MIN: '45'
+  HEAD_TIMEOUT_MIN: '60'
+  STAY_MIN: '20'
+
+jobs:
+  join:
+    name: Join (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            package: '*-linux-x64.tar.gz'
+            node: ./node
+          - os: windows
+            runner: windows-2022
+            package: '*-windows-x64.zip'
+            node: ./node.exe
+          - os: macos
+            runner: macos-14
+            package: '*-macos-arm64.tar.gz'
+            node: ./node
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init -- third-party/thrift-interface-definitions
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python packages
+        run: python -m pip install --quiet thriftpy2 base58 pynacl
+
+      - name: Download the package of the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir packages
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir packages --pattern "$PACKAGE" --pattern 'SHA256SUMS*'
+          python -I - packages <<'PY'
+          import glob, hashlib, os, sys
+          root = sys.argv[1]
+          sums = {}
+          for f in glob.glob(os.path.join(root, "SHA256SUMS*")):
+              for line in open(f):
+                  parts = line.split()
+                  if len(parts) == 2:
+                      sums[parts[1].lstrip("*")] = parts[0]
+          checked = 0
+          for f in glob.glob(os.path.join(root, "credits-node-*")):
+              name = os.path.basename(f)
+              h = hashlib.sha256(open(f, "rb").read()).hexdigest()
+              if sums.get(name) != h:
+                  sys.exit(f"{name}: checksum {h} is not the published one {sums.get(name)}")
+              checked += 1
+              print(f"{name}: checksum ok")
+          sys.exit(0 if checked else "no package downloaded")
+          PY
+
+      - name: Unpack and configure
+        env:
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          pkg=$(ls packages/$PACKAGE | grep -v glibc | head -1)
+          test -n "$pkg"
+          echo "package $pkg"
+          case "$pkg" in
+            *.zip) unzip -q "$pkg" ;;
+            *) tar -xzf "$pkg" ;;
+          esac
+          cp csnode/config.pruned.ini csnode/config.ini
+          sed -i.bak 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini
+          # [snapshot] goes before [storage]: only the named source counts, and nothing else starts the node
+          python -I - csnode/config.ini <<'PY'
+          import os, sys
+          path = sys.argv[1]
+          text = open(path).read()
+          section = ("[snapshot]\nfetch=auto\nmin_sources=1\nsources=%s\nsources_file=snapshot_sources.txt\n"
+                     "fetch_wait=%d\nfetch_fallback=wait\n\n") % (os.environ["SOURCE_KEY"], int(os.environ["FETCH_TIMEOUT_MIN"]) * 60)
+          assert "\n[storage]" in text
+          text = text.replace("\n[storage]", "\n" + section + "[storage]", 1)
+          open(path, "w").write(text)
+          PY
+          echo "$SOURCE_ADDR $SOURCE_KEY" > csnode/snapshot_sources.txt
+          sed -n '/^\[snapshot\]/,/^\[storage\]/p' csnode/config.ini
+          [ "${{ matrix.os }}" != macos ] || xattr -dr com.apple.quarantine csnode 2>/dev/null || true
+          python ci/testnet/gen_keys.py 1 keys >/dev/null
+          cp keys/n1/NodePublic.txt keys/n1/NodePrivate.txt csnode/
+          echo "this node: $(cat csnode/NodePublic.txt)"
+
+      - name: Can the source be reached
+        run: |
+          python -I - <<'PY'
+          import os, socket, time
+          host, port = os.environ["SOURCE_ADDR"].rsplit(":", 1)
+          t = time.time()
+          try:
+              socket.create_connection((host, int(port)), timeout=10).close()
+              print(f"TCP {host}:{port} open ({(time.time() - t) * 1000:.0f} ms)")
+          except Exception as e:
+              print(f"TCP {host}:{port} not reachable: {e}")
+          PY
+
+      - name: Fetch the snapshot over p2p
+        run: |
+          cd csnode
+          ( rc=0; ${{ matrix.node }} --config-file config.ini </dev/null > stdout.log 2>&1 || rc=$?; echo "the node exited with status $rc" > node-exit.txt ) &
+          sleep 2
+          pid=
+          [ "${{ matrix.os }}" = windows ] || pid=$(pgrep -n -f -- '--config-file config.ini' || true)
+          echo "NODE_PID=$pid" >> "$GITHUB_ENV"
+          started=$(date +%s)
+          deadline=$((started + FETCH_TIMEOUT_MIN * 60))
+          shown=0
+          while :; do
+            logs=$(ls log/log_*.txt 2>/dev/null || true)
+            lines=$(cat $logs stdout.log 2>/dev/null | grep -a 'SNAPSHOT:' || true)
+            n=$(printf '%s\n' "$lines" | grep -c . || true)
+            if [ "$n" -gt "$shown" ]; then printf '%s\n' "$lines" | tail -n +$((shown + 1)) | cut -c1-300; shown=$n; fi
+            if printf '%s\n' "$lines" | grep -q 'SNAPSHOT: imported block'; then
+              echo "imported after $(( $(date +%s) - started )) s"; break
+            fi
+            if printf '%s\n' "$lines" | grep -q 'opening an empty database'; then echo "FAIL: fell back to a sync from block 0"; exit 1; fi
+            if [ -f node-exit.txt ]; then echo "FAIL: $(cat node-exit.txt)"; tail -n 60 stdout.log | cut -c1-300; exit 1; fi
+            if [ "$(date +%s)" -gt "$deadline" ]; then echo "FAIL: no snapshot in $FETCH_TIMEOUT_MIN min"; exit 1; fi
+            sleep 10
+          done
+          echo "---- snapshot.sources.json"; cat snapshot.sources.json 2>/dev/null || echo "(missing)"
+
+      - name: Sync to the head
+        run: |
+          python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min "$HEAD_TIMEOUT_MIN" \
+            --exit-file csnode/node-exit.txt --api-grace-min 10 2>&1 | tee csnode/waithead.txt || {
+            echo "---- the end of the node's output"; tail -n 60 csnode/stdout.log | cut -c1-300
+            exit 1
+          }
+          date +%s > csnode/head-time.txt
+
+      - name: Follow the chain
+        run: |
+          end=$(( $(date +%s) + STAY_MIN * 60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            if [ -f csnode/node-exit.txt ]; then echo "FAIL: $(cat csnode/node-exit.txt)"; exit 1; fi
+            python -I - <<'PY' || true
+          import sys
+          sys.path.insert(0, "ci/snapshot")
+          from check_node import client
+          n = client("127.0.0.1:9090")
+          s = n.SyncStateGet()
+          print(f"block {s.lastBlock}, round {s.currRound}, {s.currRound - s.lastBlock} behind", flush=True)
+          n.close()
+          PY
+            sleep 60
+          done
+          grep -a 'snapshot.json verified' csnode/log/log_*.txt csnode/stdout.log 2>/dev/null | head -3 || true
+
+      - name: Block hashes
+        if: always()
+        run: |
+          mkdir -p result
+          python -I - result/blocks-${{ matrix.os }}.txt <<'PY' || true
+          import sys
+          sys.path.insert(0, "ci/snapshot")
+          from check_node import client
+          n = client("127.0.0.1:9090")
+          head = n.SyncStateGet().lastBlock
+          out = open(sys.argv[1], "w")
+          seqs = list(range(186_600_000, head, 1000)) + [head - 10]
+          found = 0
+          for seq in seqs:
+              r = n.PoolListGetStable(seq, 1)
+              for p in r.pools or []:
+                  if p.poolNumber == seq:
+                      out.write(f"{seq} {bytes(p.hash).hex()}\n")
+                      found += 1
+          print(f"head {head}: {found} of {len(seqs)} block hashes")
+          PY
+
+      - name: Stop and collect
+        if: always()
+        env:
+          OS: ${{ matrix.os }}
+        run: |
+          mkdir -p result
+          if [ "$OS" = windows ]; then
+            taskkill //F //IM node.exe >/dev/null 2>&1 || true
+            taskkill //F //IM java.exe >/dev/null 2>&1 || true
+          else
+            [ -z "${NODE_PID:-}" ] || kill -TERM "$NODE_PID" 2>/dev/null || true
+            for _ in $(seq 1 120); do [ -z "${NODE_PID:-}" ] || kill -0 "$NODE_PID" 2>/dev/null || break; sleep 1; done
+            pkill -f '[c]ontract-executor[.]jar' || true
+          fi
+          cat csnode/log/log_*.txt 2>/dev/null | grep -a "STATE DIGEST #" > "result/digests-$OS.txt" || true
+          cat csnode/log/log_*.txt csnode/stdout.log 2>/dev/null | grep -a "SNAPSHOT:" | cut -c1-400 > "result/snapshot-$OS.txt" || true
+          cat csnode/log/log_*.txt 2>/dev/null | grep -aE "counted transactions is different|Couldn't save block|is not on this chain|but its caches already hold block|\[error\]" | head -100 > "result/problems-$OS.txt" || true
+          for f in snapshot.json snapshot.sources.json snapshot.verified snapshot.mismatch node-exit.txt waithead.txt head-time.txt; do
+            [ -f "csnode/$f" ] && cp "csnode/$f" "result/$OS-$f"
+          done
+          tail -c 2000000 csnode/stdout.log > "result/stdout-$OS.log" 2>/dev/null || true
+          for f in csnode/log/*; do [ -f "$f" ] && tail -c 3000000 "$f" > "result/$OS-$(basename "$f")"; done 2>/dev/null || true
+          echo "$(wc -l < "result/digests-$OS.txt") digest lines"; tail -3 "result/digests-$OS.txt"
+          echo "---- sources"; cat "result/$OS-snapshot.sources.json" 2>/dev/null || true
+
+      - name: Upload
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: join-${{ matrix.os }}
+          path: result/
+          retention-days: 30
+
+  compare:
+    name: Compare
+    needs: join
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download
+        uses: actions/download-artifact@v4
+        with:
+          pattern: join-*
+          merge-multiple: true
+          path: result
+
+      - name: Compare
+        run: |
+          python3 -I - result <<'EOF'
+          import json, os, re, sys
+          root = sys.argv[1]
+          key = os.environ["SOURCE_KEY"]
+          line = re.compile(r"STATE DIGEST #(\d+) ([0-9A-Fa-f]{64}) wallets (\d+)")
+          bad = []
+          seen, blocks = {}, {}
+          for o in ("linux", "windows", "macos"):
+              src = os.path.join(root, f"{o}-snapshot.sources.json")
+              text = open(src).read() if os.path.exists(src) else ""
+              print(f"{o}: sources {text.strip()[:300] or '(none)'}")
+              if key not in text:
+                  bad.append(f"{o}: the snapshot did not come from {key}")
+              if not os.path.exists(os.path.join(root, f"{o}-snapshot.verified")):
+                  bad.append(f"{o}: no snapshot.verified")
+              d = {}
+              p = os.path.join(root, f"digests-{o}.txt")
+              if os.path.exists(p):
+                  for t in open(p, errors="replace"):
+                      m = line.search(t)
+                      if m:
+                          d[int(m.group(1))] = (m.group(2).lower(), int(m.group(3)))
+              seen[o] = d
+              b = {}
+              p = os.path.join(root, f"blocks-{o}.txt")
+              if os.path.exists(p):
+                  for t in open(p):
+                      s, h = t.split()
+                      b[int(s)] = h
+              blocks[o] = b
+              print(f"{o}: {len(d)} digests" + (f", {min(d)}..{max(d)}" if d else "") + f", {len(b)} block hashes")
+          for seq in sorted(set().union(*seen.values())):
+              v = {o: d[seq] for o, d in seen.items() if seq in d}
+              if len(set(v.values())) > 1:
+                  bad.append(f"digest MISMATCH at {seq}: {v}")
+          for seq in sorted(set().union(*blocks.values())):
+              v = {o: b[seq] for o, b in blocks.items() if seq in b}
+              if len(set(v.values())) > 1:
+                  bad.append(f"block hash MISMATCH at {seq}: {v}")
+          common = set.intersection(*(set(d) for d in seen.values()))
+          print(f"{len(common)} digests from all three systems")
+          if len(common) < 5:
+              bad.append(f"only {len(common)} digests in common")
+          for b in bad:
+              print("FAIL: " + b)
+          sys.exit(1 if bad else 0)
+          EOF
