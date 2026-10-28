@@ -47,6 +47,15 @@ install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
 # the serving nodes the weekly survey found (ci/known-hosts/snapshot_sources.py), when it has found any
 [ ! -f "$here/mainnet/snapshot_sources.txt" ] || install -m 644 "$here/mainnet/snapshot_sources.txt" "$dir/snapshot_sources.txt"
 
+# the guided set-up (setup.sh, or setup.bat with setup.ps1 on Windows): writes [snapshot] and [storage]
+if [ "$os" = windows ]; then
+    install -m 644 "$here/setup/setup.bat" "$here/setup/setup.ps1" "$dir/"
+    setup=setup.bat
+else
+    install -m 755 "$here/setup/setup.sh" "$dir/"
+    setup=./setup.sh
+fi
+
 # the node accepts an executor only within [executor_commit_min, executor_commit_max], and the
 # executor reports its git commit count, which our fixes raised above the release's 1518
 commits=$(unzip -p "$executor/contract-executor.jar" git.properties | sed -n 's/^git.total.commit.count=//p' | tr -d '\r')
@@ -103,6 +112,10 @@ Changing the block database (db_backend)
   and the transaction index are kept, so the node quick-starts afterwards. The official node
   only reads berkeleydb: convert back before running it on this folder. In Docker, use
   CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
+
+First time: cd csnode && $setup
+  asks a few questions (pruned or full, database, snapshot, sharing; Enter keeps each default),
+  writes config.ini (the previous one is kept as config.ini.bak-<date>) and starts the node.
 
 Start: cd csnode && $start                                  (full storage, as the official node)
   or:  cd csnode && $start --config-file config.pruned.ini     (pruned storage)

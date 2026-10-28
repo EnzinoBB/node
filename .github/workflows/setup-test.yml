@@ -1,0 +1,188 @@
+name: Set-up script test
+
+# The guided set-up (packaging/setup) in the published packages of Linux, Windows and macOS, used as a
+# user would: answers typed on stdin, the snapshot downloaded, the node started up to the mainnet
+# head; then a second run that must change nothing, and a full berkeleydb configuration with a wrong
+# answer first.
+on:
+  push:
+    tags: ['setup-test-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TAG: community-v4.2.532-community.14
+
+jobs:
+  setup:
+    name: Set-up (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-24.04
+            package: '*-linux-x64.tar.gz'
+            node: ./node
+          - os: windows
+            runner: windows-2022
+            package: '*-windows-x64.zip'
+            node: ./node.exe
+          - os: macos
+            runner: macos-14
+            package: '*-macos-arm64.tar.gz'
+            node: ./node
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        run: git submodule update --init -- third-party/thrift-interface-definitions
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Python packages
+        run: python -m pip install --quiet thriftpy2 base58 pynacl
+
+      - name: Package with the set-up script
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ matrix.package }}
+        run: |
+          mkdir packages
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir packages --pattern "$PACKAGE"
+          pkg=$(ls packages/$PACKAGE | grep -v glibc | head -1)
+          case "$pkg" in *.zip) unzip -q "$pkg" ;; *) tar -xzf "$pkg" ;; esac
+          if [ "${{ matrix.os }}" = windows ]; then
+            cp packaging/setup/setup.bat packaging/setup/setup.ps1 csnode/
+          else
+            cp packaging/setup/setup.sh csnode/ && chmod +x csnode/setup.sh
+          fi
+          sed -i.bak 's/^executor_multi_instance=.*/executor_multi_instance=true/' csnode/config.ini && rm csnode/config.ini.bak
+          [ "${{ matrix.os }}" != macos ] || xattr -dr com.apple.quarantine csnode 2>/dev/null || true
+          python ci/testnet/gen_keys.py 1 keys >/dev/null
+          cp keys/n1/NodePublic.txt keys/n1/NodePrivate.txt csnode/
+          cp -a csnode csnode-clean
+          cat > setup-run.sh <<'EOF'
+          # setup-run.sh <folder> <answers, one per line, \n separated>
+          dir=$1; answers=$2
+          cd "$dir"
+          if [ -f setup.bat ]; then
+            printf "$answers" | cmd //c setup.bat
+          else
+            printf "$answers" | ./setup.sh
+          fi
+          EOF
+          cat > check-config.py <<'EOF'
+          # check-config.py <config.ini> <section> <expected "k=v k=v"> ...
+          import sys
+          lines = open(sys.argv[1], newline="").read().replace("\r\n", "\n").split("\n")
+          sections, cur = {}, None
+          for l in lines:
+              s = l.strip()
+              if s.startswith("["):
+                  cur = s
+                  sections.setdefault(cur, [])
+              elif cur and s and not s.startswith(";"):
+                  sections[cur].append(s)
+          bad = 0
+          for i in range(2, len(sys.argv), 2):
+              got = " ".join(sections.get("[" + sys.argv[i] + "]", []))
+              ok = got == sys.argv[i + 1]
+              bad += not ok
+              print(("ok  " if ok else "FAIL") + f" [{sys.argv[i]}] {got!r}" + ("" if ok else f" expected {sys.argv[i + 1]!r}"))
+          sys.exit(1 if bad else 0)
+          EOF
+
+      - name: First set-up (pruned, lmdb, snapshot from GitHub, share, do not start)
+        run: |
+          # storage, database, first start, share, start, write
+          bash setup-run.sh csnode '\n\n\n\nno\n\n' 2>&1 | tee setup1.txt | grep -av '^download-snapshot: .*%' | tail -40
+          python check-config.py csnode/config.ini snapshot "serve=on fetch=off" \
+            storage "db_backend=lmdb checkpoint_every=100000 checkpoint_keep=2 prune_keep_blocks=1000"
+          ls csnode/config.ini.bak-* && test "$(ls csnode/config.ini.bak-* | wc -l)" -eq 1
+          test -f csnode/snapshot.json && echo "snapshot restored"
+          ls csnode/db
+
+      - name: Start the node up to the head
+        run: |
+          cd csnode
+          ( rc=0; ${{ matrix.node }} --config-file config.ini </dev/null > stdout.log 2>&1 || rc=$?; echo "the node exited with status $rc" > node-exit.txt ) &
+          sleep 2
+          pid=
+          [ "${{ matrix.os }}" = windows ] || pid=$(pgrep -n -f -- '--config-file config.ini' || true)
+          echo "NODE_PID=$pid" >> "$GITHUB_ENV"
+          cd ..
+          python ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min 45 \
+            --exit-file csnode/node-exit.txt --api-grace-min 6 || { tail -n 60 csnode/stdout.log | cut -c1-300; exit 1; }
+          grep -ah 'snapshot.json verified\|STATE DIGEST' csnode/log/log_*.txt | tail -3 | cut -c1-200
+
+      - name: Stop the node
+        if: always()
+        run: |
+          if [ "${{ matrix.os }}" = windows ]; then
+            taskkill //F //IM node.exe >/dev/null 2>&1 || true
+            taskkill //F //IM java.exe >/dev/null 2>&1 || true
+          else
+            [ -z "${NODE_PID:-}" ] || kill -TERM "$NODE_PID" 2>/dev/null || true
+            for _ in $(seq 1 120); do [ -z "${NODE_PID:-}" ] || kill -0 "$NODE_PID" 2>/dev/null || break; sleep 1; done
+            pkill -f '[c]ontract-executor[.]jar' || true
+          fi
+          sleep 5
+
+      - name: Second set-up (Enter everywhere, do not start) changes nothing
+        run: |
+          sleep 1
+          # storage, database, share, start, write (no first-start question: the database exists)
+          bash setup-run.sh csnode '\n\n\nno\n\n' 2>&1 | tee setup2.txt | tail -20
+          grep -a "already holds a lmdb database" setup2.txt
+          if grep -a "How should the node get the chain" setup2.txt; then echo "asked about the first start"; exit 1; fi
+          python check-config.py csnode/config.ini snapshot "serve=on fetch=off" \
+            storage "db_backend=lmdb checkpoint_every=100000 checkpoint_keep=2 prune_keep_blocks=1000"
+          test "$(grep -c '^; written by setup' csnode/config.ini)" -eq 1
+          test "$(ls csnode/config.ini.bak-* | wc -l)" -eq 2
+
+      - name: Full berkeleydb set-up with a wrong answer first
+        run: |
+          # storage (wrong, then full), database, share (no), start, write
+          bash setup-run.sh csnode-clean 'maybe\nfull\n\nno\nno\n\n' 2>&1 | tee setup3.txt | tail -20
+          grep -a "Please answer one of" setup3.txt
+          python check-config.py csnode-clean/config.ini snapshot "serve=off fetch=off" storage "db_backend=berkeleydb"
+          # the rest of config.ini is the package's
+          python - <<'EOF'
+          import glob
+          def body(p):
+              out = []
+              for l in open(p, newline="").read().replace("\r\n", "\n").split("\n"):
+                  if l.startswith("; written by setup"):
+                      break
+                  if l.strip():
+                      out.append(l)
+              return out
+          new, old = body("csnode-clean/config.ini"), body(glob.glob("csnode-clean/config.ini.bak-*")[0])
+          assert new == old, "the rest of config.ini changed"
+          print("the rest of config.ini is unchanged")
+          EOF
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p result
+          cp setup*.txt csnode/config.ini result/ 2>/dev/null || true
+          cp csnode-clean/config.ini result/config-full.ini 2>/dev/null || true
+          tail -c 1000000 csnode/stdout.log > result/stdout.log 2>/dev/null || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: setup-${{ matrix.os }}
+          path: result/
+          retention-days: 14
