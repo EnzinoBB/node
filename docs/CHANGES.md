@@ -42,6 +42,7 @@ lines under the new release.
 | #119 | ci: the release checks the Windows and macOS packages on mainnet before publishing them (a node of each system restores the published snapshot, syncs to the head, logs the same state digests as Linux and stops cleanly), and the same check runs weekly on the latest published release |
 | #120 | ci: a private network of 7 nodes (with the restart of one at block 300) runs on macOS and on Windows every night and on demand (`testnet-platforms.yml`): the nodes reach the same state digests as on Linux and a stopped node quick-starts again; Linux-only scenarios (network faults, slow nodes, full disks) stay on Linux |
 | #122 | csdb: backward sync, step 1: `Storage::pool_save_backfill` stores a block directly below a stored one on every backend (BerkeleyDB, LMDB, RocksDB), without touching the head; not called yet, no change for a running node |
+| #123 | csnode: backward sync, step 2: `BlockChain::storeBackfilledBlock` stores a verified block below the first one (index, block hashes, non-empty block map, storage) without applying it to the caches, and the transaction index links it under each wallet's lowest indexed block, so that histories grow downwards while the node runs; start-up repairs after a crash, only on a node that backfilled; not called yet, no change for a running node |
 
 ## community.14 — 2026-10-27
 
