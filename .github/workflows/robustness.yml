@@ -11,7 +11,7 @@ name: Robustness
 # - a pruned node killed while it prunes;
 # - every block database, full and pruned, in one network, also with crashes and a power cut;
 # - packet loss, corruption, delay, reordering and a partition on some nodes, slow nodes, random
-#   datagrams, and all of them at once;
+#   datagrams, packet headers announcing huge sizes, and all of them at once;
 # - smart contracts across crashes, a power cut, packet loss, a pruned node killed and a node joining,
 #   and a database conversion.
 # All scenarios run funded transfers and the usual restart test.
@@ -140,14 +140,27 @@ jobs:
             git -C node-alt apply --whitespace=nowarn "$PWD/ci/official/testnet-hooks.patch"
             git -C node-alt diff --stat
           fi
-          # the submodules are copied from this run's checkout, which must point to the same commits
+          # the submodules are copied from this run's checkout, which must point to the same commits,
+          # except p2p: this repository runs its fork (EnzinoBB/p2p, which holds the upstream history),
+          # and the node under comparison gets the files of the p2p commit it points to (same submodules)
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
-            if [ "$(git ls-tree HEAD -- "$m")" != "$(git -C node-alt ls-tree HEAD -- "$m")" ]; then
+            alt=$(git -C node-alt ls-tree HEAD -- "$m" | awk '{print $3}')
+            if [ "$(git ls-tree HEAD -- "$m" | awk '{print $3}')" != "$alt" ] && [ "$m" != p2p ]; then
               echo "$NODE_ALT_REF points $m to another commit than this run"; exit 1
             fi
             rm -rf "node-alt/$m"
             cp -a "$m" "node-alt/$m"
+            if [ "$m" = p2p ] && [ "$(git -C p2p rev-parse HEAD)" != "$alt" ]; then
+              git -C p2p cat-file -e "$alt^{commit}" 2>/dev/null || git -C p2p fetch -q origin "$alt"
+              for s in $(git -C p2p ls-tree -r HEAD | awk '$2 == "commit" {print $4}'); do
+                [ "$(git -C p2p ls-tree HEAD -- "$s")" = "$(git -C p2p ls-tree "$alt" -- "$s")" ] \
+                  || { echo "p2p $alt points $s to another commit than this run"; exit 1; }
+              done
+              git -C p2p ls-files -s | awk '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' | (cd node-alt/p2p && xargs rm -f)
+              git -C p2p archive "$alt" | tar -x -C node-alt/p2p
+              echo "$NODE_ALT_REF: p2p at $alt (this run: $(git -C p2p rev-parse --short HEAD))"
+            fi
           done
           cmake -S node-alt -B build-alt -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -273,6 +286,11 @@ jobs:
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300
+          # p2p packet headers announcing 2^40, 2^30 and 256 MiB + 1 bytes to every node of this build
+          # (the odd ones with node_alt_ref): each closes the connections at once (frame limit of the p2p
+          # fork), keeps running with its memory flat and stays in consensus
+          - name: net-huge-frame
+            env: HUGE_FRAME_AT=150
           # all at once, on a mixed-backend network
           - name: chaos-mixed
             env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
@@ -339,11 +357,9 @@ jobs:
           - name: snapshot-p2p-fallback
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb SNAPSHOT_SERVE_NODES=3 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=2 JOIN_WAIT=60 JOIN_FALLBACK=sync JOIN_EXPECT=fallback TARGET_SEQ=3300
             fixed: true
-          # two serving nodes, a third one (n7) starts serving later: the joiner waits (fetch_fallback=wait).
-          # Manual until plan P9: peers keep the capability bit they first saw for n7 (the p2p routing
-          # table is not refreshed), so the joiner finds n7 only through snapshot_sources.txt (-wait-file)
+          # two serving nodes, a third one (n7) starts serving later: the joiner waits (fetch_fallback=wait)
+          # and finds n7 by the capability bit its peers refresh from n7's datagrams (p2p fork, plan P9)
           - name: snapshot-p2p-wait
-            manual: true
             env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5 SNAPSHOT_LATE_SERVE_NODES=7 JOIN_MIN_SOURCES=3 JOIN_WAIT=60 JOIN_FALLBACK=wait TARGET_SEQ=3300
             fixed: true
           # the same with the serving nodes listed in the joiner's snapshot_sources.txt

@@ -178,14 +178,27 @@ jobs:
             git -C node-alt apply --whitespace=nowarn "$PWD/ci/official/testnet-hooks.patch"
             git -C node-alt diff --stat
           fi
-          # the submodules are copied from this run's checkout, which must point to the same commits
+          # the submodules are copied from this run's checkout, which must point to the same commits,
+          # except p2p: this repository runs its fork (EnzinoBB/p2p, which holds the upstream history),
+          # and the node under comparison gets the files of the p2p commit it points to (same submodules)
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
-            if [ "$(git ls-tree HEAD -- "$m")" != "$(git -C node-alt ls-tree HEAD -- "$m")" ]; then
+            alt=$(git -C node-alt ls-tree HEAD -- "$m" | awk '{print $3}')
+            if [ "$(git ls-tree HEAD -- "$m" | awk '{print $3}')" != "$alt" ] && [ "$m" != p2p ]; then
               echo "$NODE_ALT_REF points $m to another commit than this run"; exit 1
             fi
             rm -rf "node-alt/$m"
             cp -a "$m" "node-alt/$m"
+            if [ "$m" = p2p ] && [ "$(git -C p2p rev-parse HEAD)" != "$alt" ]; then
+              git -C p2p cat-file -e "$alt^{commit}" 2>/dev/null || git -C p2p fetch -q origin "$alt"
+              for s in $(git -C p2p ls-tree -r HEAD | awk '$2 == "commit" {print $4}'); do
+                [ "$(git -C p2p ls-tree HEAD -- "$s")" = "$(git -C p2p ls-tree "$alt" -- "$s")" ] \
+                  || { echo "p2p $alt points $s to another commit than this run"; exit 1; }
+              done
+              git -C p2p ls-files -s | awk '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' | (cd node-alt/p2p && xargs rm -f)
+              git -C p2p archive "$alt" | tar -x -C node-alt/p2p
+              echo "$NODE_ALT_REF: p2p at $alt (this run: $(git -C p2p rev-parse --short HEAD))"
+            fi
           done
           cmake -S node-alt -B build-alt -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
