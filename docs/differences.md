@@ -73,7 +73,10 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   requests of its p2p neighbours while it is synced with the network, within `serve_rate_kbps`
   (KB/s, all peers together; half for one peer), `serve_max_peers` peers within 30 s, and half of
   that while it is a confidant or the writer. It announces it in its p2p host data at start, with
-  its community version. Official nodes neither see nor answer these messages.
+  its community version; community peers refresh that value from each datagram the node sends
+  them, so a restart with another `serve` value is seen within seconds (official peers keep the
+  value they first saw until the node leaves their routing table). Official nodes neither see nor
+  answer these messages.
 - **A first start fetches a snapshot from the network.** A node whose `db/` holds no database,
   with no checkpoint in `qs/`, `db_backend` `lmdb` or `rocksdb` and `fetch=auto` (the default),
   starts its p2p transport without opening the chain and looks for neighbours that serve
@@ -180,6 +183,15 @@ consensus rules.
 - **Remote crashes and out-of-bounds reads.** Fixed when a peer sends a malformed compressed
   region, an empty packet, or a pool whose lengths point past its data. Also fixed: a data race
   in `LockFreeChanger`.
+- **A size limit on p2p packets.** The node runs its own fork of the p2p library
+  ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the commit the official node uses). A
+  packet header may announce at most 256 MiB of data, far above any packet the node sends;
+  above that the connection is closed before anything is allocated, with an error line at most
+  once a minute per address (`Packet header from <address> announces <n> bytes, above the limit
+  of 268435456: connection dropped (...)`). Official nodes accept any announced size. The fork
+  also shows a peer's latest host data (version, snapshot capability) instead of the first one
+  seen, passes each received datagram with its own length, and stops its routing table (threads,
+  UDP socket) with the p2p host at exit.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;

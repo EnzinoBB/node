@@ -41,6 +41,7 @@ lines under the new release.
 |---|---|
 | #119 | ci: the release checks the Windows and macOS packages on mainnet before publishing them (a node of each system restores the published snapshot, syncs to the head, logs the same state digests as Linux and stops cleanly), and the same check runs weekly on the latest published release |
 | #120 | ci: a private network of 7 nodes (with the restart of one at block 300) runs on macOS and on Windows every night and on demand (`testnet-platforms.yml`): the nodes reach the same state digests as on Linux and a stopped node quick-starts again; Linux-only scenarios (network faults, slow nodes, full disks) stay on Linux |
+| #PR | p2p: the node runs its fork of the p2p library ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the official commit `8fb3c516`): a packet header announcing more than 256 MiB closes the connection before any allocation (one error line a minute per address); peers' host data (version, snapshot capability) is refreshed from their own datagrams, so a node restarted with `serve=on` is found without leaving the routing tables first; a received datagram is passed with its own length; `~Host` stops the routing table (threads joined, UDP socket closed) after its io thread and clears the `Network` reference, which `~Transport` no longer does. ci: robustness `net-huge-frame`; `snapshot-p2p-wait` back in the suite; mixed runs build the official node with its own p2p commit |
 
 ## community.14 — 2026-10-27
 
