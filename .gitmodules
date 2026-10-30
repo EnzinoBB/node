@@ -24,7 +24,7 @@
 	url = https://github.com/Neargye/nameof.git
 [submodule "p2p"]
 	path = p2p
-	url = https://github.com/SychevS/p2p.git
+	url = https://github.com/EnzinoBB/p2p.git
 [submodule "third-party/rocksdb"]
 	path = third-party/rocksdb
 	url = https://github.com/facebook/rocksdb.git

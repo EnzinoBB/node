@@ -22,6 +22,7 @@ This repository is the community continuation of [CREDITSCOM/node](https://githu
 | What changes from the official node | [docs/differences.md](docs/differences.md) |
 | Every change, pull request by pull request | [docs/CHANGES.md](docs/CHANGES.md) |
 | Block database, pruned storage, conversion | [docs/storage.md](docs/storage.md) |
+| Tokens, the token API and the token tests | [docs/tokens.md](docs/tokens.md) |
 | Docker (pruned node from a snapshot) | [packaging/docker/README.md](packaging/docker/README.md) |
 | Packages (Linux x86-64, Windows x64, macOS Apple Silicon; `config.ini` full and `config.pruned.ini` pruned, one package per system) | [Releases](https://github.com/EnzinoBB/node/releases) |
 
