@@ -94,6 +94,13 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   `snapshot.mismatch` exists. An import interrupted by a kill leaves `db/.importing`; the next
   start removes what that import wrote before it looks at `db/`.
 
+### Token cache
+
+`[api] tokens_cache=true` turns on the token cache behind the `Token*` API methods in any build.
+The official node has it only in its monitor and wallet builds. The cache follows tokens of every
+standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
+rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
+
 ## Start-up behaviour
 
 - **Database check.** Before opening the block database, the node looks at `db/`. It writes the
