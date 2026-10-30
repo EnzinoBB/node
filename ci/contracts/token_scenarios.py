@@ -385,6 +385,35 @@ def token_v1_lifecycle(ex, rec, Contract):
                    severity="info")
 
 
+def template_token(ex, rec, Contract):
+    """The token template of samples/contracts/Token.java"""
+    path = os.path.join(HERE, "..", "..", "samples", "contracts", "Token.java")
+    if not os.path.exists(path):
+        rec.step("template not found", path=path)
+        return
+    with open(path) as f:
+        t = Contract(ex, "Token", f.read(), OWNER, rec)
+    if not rec.expect((t.deploy() or {}).get("ok"), "the template deploys"):
+        return
+    r = t.get_methods()
+    rec.expect(r.tokenStandard == 4, f"the template is an ExtensionTokenStandard token (got {r.tokenStandard})")
+    get = lambda m, *p: t.get(m, *p)["ret"]
+    rec.expect(t.call(OWNER, "transfer", v_str(b58(ALICE)), v_dec("100"))["ok"], "transfer")
+    rec.expect(get("balanceOf", v_str(b58(ALICE))) == "100.000", "balances are kept at the token's scale")
+    rec.expect(not t.call(ALICE, "transfer", v_str(b58(BOB)), v_dec("1.0001"))["ok"], "an amount with too many decimals fails")
+    rec.expect(not t.call(ALICE, "transfer", v_str(b58(BOB)), v_dec("-1"))["ok"], "a negative amount fails")
+    rec.expect(not t.call(ALICE, "transfer", v_str(b58(BOB)), v_dec("100.001"))["ok"], "more than the balance fails")
+    t.call(ALICE, "approve", v_str(b58(BOB)), v_dec("10"))
+    t.call(ALICE, "approve", v_str(b58(BOB)), v_dec("4"))
+    rec.expect(get("allowance", v_str(b58(ALICE)), v_str(b58(BOB))) == "4.000", "approve sets the allowance, it does not add")
+    rec.expect(t.call(BOB, "transferFrom", v_str(b58(ALICE)), v_str(b58(CAROL)), v_dec("4"))["ok"], "transferFrom within the allowance")
+    rec.expect(not t.call(BOB, "transferFrom", v_str(b58(ALICE)), v_str(b58(CAROL)), v_dec("0.001"))["ok"], "the allowance is used up")
+    rec.expect(t.call(ALICE, "payable", v_dec("2.5"), v_bytes(b""))["ok"], "payable buys tokens")
+    rec.expect(get("balanceOf", v_str(b58(ALICE))) == "98.500", "96 + 2.5 bought")
+    rec.expect(not t.call(ALICE, "setFrozen", v_bool(True))["ok"], "only the owner freezes")
+    rec.expect(t.call(OWNER, "burn", v_dec("1000"))["ok"] and get("totalSupply") == "9999000.000", "burn")
+
+
 def token_v0_lifecycle(ex, rec, Contract):
     """A v0 token (amounts as strings), including the legacy payable(String, String)"""
     t = Contract(ex, "TokenV0", source("TokenV0"), OWNER, rec)
@@ -535,6 +564,6 @@ def general_double(x):
     return general.Variant(v_double=x)
 
 
-SCENARIOS = [token_standards, token_v1_lifecycle, token_v0_lifecycle, failed_call_state, getter_writes,
+SCENARIOS = [token_standards, token_v1_lifecycle, template_token, token_v0_lifecycle, failed_call_state, getter_writes,
              reserved_names, root_class, platform_calls, emitted_precision, contract_calls, slow_token_name,
              serialization_hang]

@@ -29,6 +29,21 @@ call fails with "Cannot find a method by name and parameters specified", and the
 fee is still charged. The reverse applies to v0 tokens. A wallet reads the types from
 `ContractMethodsGet` (or `SmartContractGet`) before it builds the call.
 
+## A template and a client
+
+- `samples/contracts/Token.java`: a token to start from (ExtensionTokenStandard v1, token standard
+  4). It checks every amount (positive, no more decimals than the token has), keeps balances at the
+  token's scale, sets allowances with `approve()` as ERC-20 does, and sells tokens for CS through
+  `payable()`. The executor harness runs it (`template_token`).
+- `samples/python/token_client.py`: lists a contract's methods, reads a getter for free, and signs
+  and sends a call, converting each argument to the type the method declares:
+
+  ```sh
+  python3 samples/python/token_client.py methods <token>
+  python3 samples/python/token_client.py get <token> balanceOf <wallet>
+  python3 samples/python/token_client.py --seed <private key> call <token> transfer <wallet> 12.5
+  ```
+
 ## The token cache
 
 - `[api] tokens_cache=true` turns the cache on. It is off by default. The RelMonitor and
