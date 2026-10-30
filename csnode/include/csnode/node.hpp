@@ -19,6 +19,7 @@
 
 #include <csnode/bootstrapgate.hpp>
 #include <csnode/bootstrapweight.hpp>
+#include <csnode/backwardsync.hpp>
 #include <csnode/blocktakeover.hpp>
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
@@ -485,6 +486,15 @@ private:
     std::unique_ptr<cs::SnapshotFetcher> makeFetcher(const SnapshotData& cfg, bool dryRun);
     void onSnapshotTick();
     void startBootstrapWorker(bool import);
+    // backward sync: created once the chain is open (initRunning), ticked every 500 ms on the
+    // processor thread
+    void startBackfill();
+    void onBackfillTick();
+    // the lowest block the backfill stores: 0 for a full node; for a pruned node the bottom of its
+    // pruned window, max(pruning target, the head at start - (checkpoint_every + prune_keep_blocks))
+    cs::Sequence backfillFloor() const;
+    // a BlockRequest packet, without the forward sync's status change
+    void sendBlockRequestPacket(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences);
     // the worker thread: the import (snapshot set) or nothing (the fallback), then initChain() and
     // verifyAtStart(); it hands over through CallsQueue and never stops the node itself
     void bootstrapWork(const std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>* snapshot);
@@ -566,6 +576,12 @@ private:
     std::unique_ptr<cs::SnapshotService> snapshotService_;
     // snapshot fetched from p2p neighbours at a start on an empty database (constructed in bootstrap mode only)
     std::unique_ptr<cs::SnapshotFetcher> snapshotFetcher_;
+    // backward sync (docs/specs/2026-10-17-backward-sync-design.md): the blocks below the lowest stored one
+    std::unique_ptr<cs::BackwardSync> backwardSync_;
+    cs::Timer backfillTimer_;
+    std::mutex backfillTimerMutex_;               // started on the processor thread, stopped from stop() too
+    void stopBackfillTimer();
+    cs::Sequence backfillStartSeq_ = 0;           // the head when the chain opened
     std::chrono::steady_clock::time_point snapshotSummaryAt_{};
 
     // bootstrap mode: see startBootstrap()

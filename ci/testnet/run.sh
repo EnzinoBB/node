@@ -337,6 +337,19 @@ fi
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
     if [ "$i" -eq "$PRUNE_NODE" ] || { is_joiner "$i" && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
+# the full nodes whose storage starts above block 0 and run this build: they backfill the older
+# blocks from their peers (backward sync) and must hold the whole chain at the end. n6 after the
+# storage switch; the full joiner of a snapshot (imported, or fetched over p2p)
+BACKFILL_NODES=""
+if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then BACKFILL_NODES="6"; fi
+if [ "$JOIN_FULL" = 1 ] && { { [ "$SNAPSHOT_AT" -gt 0 ] && [ "$SNAPSHOT_CORRUPT" != 1 ]; } || { [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" != fallback ]; }; }; then
+    BACKFILL_NODES="$BACKFILL_NODES $JOIN_NODE"
+fi
+for i in $BACKFILL_NODES; do
+    # an even node running BIN_ALT has no backward sync
+    if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then BACKFILL_NODES=$(echo " $BACKFILL_NODES " | sed "s/ $i / /"); fi
+done
+is_backfill_node() { [[ " $BACKFILL_NODES " == *" $1 "* ]]; }
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -493,8 +506,9 @@ api_settings() {
             echo "apiexec_port=0"
             return
         fi
-        if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
-            # every node answers block queries: the official ones are compared with n1 by block hash
+        if [ "$BIN_ALT_OFFICIAL" = 1 ] || is_backfill_node "$i" || { [ "$i" -eq 1 ] && [ -n "${BACKFILL_NODES// /}" ]; }; then
+            # every node answers block queries: the official ones are compared with n1 by block hash;
+            # so are the nodes that backfill, and n1
             echo "port=$(api_port "$i")"
         else
             echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
@@ -1664,6 +1678,22 @@ if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
         || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
     echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
 fi
+# backward sync: each full node that started above block 0 fetched the older blocks from its peers,
+# refused none, ends with block 0 stored, and holds the same blocks as n1 (every 100th, over the API)
+for i in $BACKFILL_NODES; do
+    blog="$WORK/n$i/node.log"
+    grep -aq 'BACKFILL: full node with blocks' "$blog" || { echo "FAIL: n$i did not start backward sync"; exit 1; }
+    grep -aq 'BACKFILL: full history stored' "$blog" \
+        || { echo "FAIL: n$i did not finish backward sync"; { grep -a 'BACKFILL' "$blog" || true; } | tail -20; exit 1; }
+    ! grep -aq 'BACKFILL: block .* rejected' "$blog" || { echo "FAIL: n$i refused blocks of honest peers"; grep -a 'rejected' "$blog" | head -5; exit 1; }
+    last_status=$(grep -a 'Last written sequence = ' "$blog" | tail -1)
+    [[ "$last_status" == *"oldest stored = 0"* ]] || { echo "FAIL: n$i last status line: $last_status"; exit 1; }
+    s1=$(seq_of 1); si=$(seq_of "$i")
+    bhead=$(( ${s1:-0} < ${si:-0} ? ${s1:-0} : ${si:-0} ))
+    (cd "$HERE" && python3 blockhashes.py --head "$bhead" "1:$(api_port 1)" "$i:$(api_port "$i")") \
+        || { echo "FAIL: n$i holds other blocks than n1 after backward sync"; exit 1; }
+    echo "backward sync: n$i $(grep -a -m1 'BACKFILL: full node with blocks' "$blog" | sed 's/.*BACKFILL: //'); $(grep -a -m1 'BACKFILL: full history stored' "$blog" | sed 's/.*BACKFILL: //')"
+done
 if [ "$CONVERT_AT" -gt 0 ]; then
     for i in 4 6; do
         want=$([ "$i" = 4 ] && echo lmdb || echo rocksdb)
