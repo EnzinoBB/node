@@ -23,10 +23,13 @@ class SmartContractInvocation;
 using TokenId = csdb::Address;
 using HolderKey = csdb::Address;
 
+// the ids the executor reports (com.credits.scapi.misc.TokenStandardId)
 enum TokenStandard {
     NotAToken = 0,
-    CreditsBasic = 1,
-    CreditsExtended = 2
+    CreditsBasic = 1,        // v0 BasicStandard: amounts as strings
+    CreditsExtended = 2,     // v0 ExtensionStandard
+    CreditsBasicToken = 3,   // v1 (and v2) BasicTokenStandard: amounts as BigDecimal
+    CreditsExtendedToken = 4 // v1 (and v2) ExtensionTokenStandard
 };
 
 struct Token {
@@ -60,9 +63,26 @@ public:
     TokensMaster(api::APIHandler*);
     ~TokensMaster();
 
+    // [api] tokens_cache, or a RelMonitor/RelWallet build: the token cache is kept and served
+    bool enabled() const {
+        return enabled_;
+    }
+
     void checkNewDeploy(const csdb::Address& sc, const csdb::Address& deployer, const api::SmartContractInvocation&);
 
-    void checkNewState(const csdb::Address& sc, const csdb::Address& initiator, const api::SmartContractInvocation&, const std::string& newState);
+    // refresh = false: holders and counters only, the balances are read later (rebuild)
+    void checkNewState(const csdb::Address& sc, const csdb::Address& initiator, const api::SmartContractInvocation&, const std::string& newState,
+                       bool refresh = true);
+
+    bool isToken(const csdb::Address& addr) {
+        std::lock_guard<std::mutex> l(dataMut_);
+        return tokens_.count(addr) != 0;
+    }
+
+    bool empty() {
+        std::lock_guard<std::mutex> l(dataMut_);
+        return tokens_.empty();
+    }
 
     void loadTokenInfo(const std::function<void(const TokensMap&, const HoldersMap&)>);
 
@@ -87,14 +107,24 @@ public:
         std::list<Params> invocations;
     };
 
-    void updateTokenChaches(const csdb::Address& addr, const std::string& newState, const TokenInvocationData::Params& params);
+    void updateTokenChaches(const csdb::Address& addr, const std::string& newState, const TokenInvocationData::Params& params, bool refresh = true);
     
-    void refreshTokenState(const csdb::Address& token, const std::string& newState, bool checkBalance = false);
+    // name, symbol and total supply; with checkBalance the balances of `only` (every holder when empty)
+    void refreshTokenState(const csdb::Address& token, const std::string& newState, bool checkBalance = false,
+                           const std::set<csdb::Address>& only = {});
+
+    // every token's name, symbol, supply and balances, one token at a time under the lock
+    void refreshAll();
+
+    static bool isExtended(int64_t tokenStandard) {
+        return tokenStandard == CreditsExtended || tokenStandard == CreditsExtendedToken;
+    }
 
 private:
     void initiateHolder(Token&, const csdb::Address& token, const csdb::Address& holder, bool increaseTransfers = false);
 
     api::APIHandler* api_;
+    bool enabled_ = false;
 
     std::mutex cvMut_;
 
