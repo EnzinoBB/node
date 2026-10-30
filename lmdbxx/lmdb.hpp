@@ -183,6 +183,7 @@ public:
             dbi.put(transaction, key, value, flags);
             transaction.commit();
 
+            // emitted under the shared lock: a slot must not write to this database (it would wait for itself)
             emit commited(keyData, keySize);
         }
         catch(const lmdb::error& error) {
@@ -219,6 +220,7 @@ public:
 
             if (result) {
                 transaction.commit();
+                // emitted under the shared lock, as commited
                 emit removed(data, size);
             }
 
@@ -342,6 +344,7 @@ protected:
         try {
             std::shared_lock<std::shared_mutex> mapLock(mapMutex_);
             env_->sync(force);
+            // emitted under the shared lock, as commited
             emit flushed();
         }
         catch(const lmdb::error& error) {
@@ -489,8 +492,12 @@ protected:
             auto freeSpace = metaInfo.me_mapsize - (metaStats.ms_psize * metaInfo.me_last_pgno);
             return freeSpace < increaseSize_ / 2;
         };
-        if (!needsGrowth()) {
-            return;
+        {
+            // the meta page is read under the shared lock too: a growth by another writer remaps it
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);
+            if (!needsGrowth()) {
+                return;
+            }
         }
         size_t newSize = 0;
         {
