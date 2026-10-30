@@ -1682,17 +1682,25 @@ fi
 # refused none, ends with block 0 stored, and holds the same blocks as n1 (every 100th, over the API)
 for i in $BACKFILL_NODES; do
     blog="$WORK/n$i/node.log"
-    grep -aq 'BACKFILL: full node with blocks' "$blog" || { echo "FAIL: n$i did not start backward sync"; exit 1; }
-    grep -aq 'BACKFILL: full history stored' "$blog" \
-        || { echo "FAIL: n$i did not finish backward sync"; { grep -a 'BACKFILL' "$blog" || true; } | tail -20; exit 1; }
-    ! grep -aq 'BACKFILL: block .* rejected' "$blog" || { echo "FAIL: n$i refused blocks of honest peers"; grep -a 'rejected' "$blog" | head -5; exit 1; }
-    last_status=$(grep -a 'Last written sequence = ' "$blog" | tail -1)
-    [[ "$last_status" == *"oldest stored = 0"* ]] || { echo "FAIL: n$i last status line: $last_status"; exit 1; }
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        grep -aq 'BACKFILL: full history stored' "$blog" \
+            || { echo "FAIL: n$i did not finish backward sync"; { grep -a 'BACKFILL' "$blog" || true; } | tail -20; exit 1; }
+        ! grep -aq 'BACKFILL: block .* rejected' "$blog" || { echo "FAIL: n$i refused blocks of honest peers"; grep -a 'rejected' "$blog" | head -5; exit 1; }
+        last_status=$(grep -a 'Last written sequence = ' "$blog" | tail -1)
+        [[ "$last_status" == *"oldest stored = 0"* ]] || { echo "FAIL: n$i last status line: $last_status"; exit 1; }
+    elif grep -aq 'pruned storage: oldest block stored is' "$blog"; then
+        echo "FAIL: n$i started above block 0 and did not start backward sync"; exit 1
+    else
+        # a snapshot from full sources holds every block from 0 (snapshot_blocks covers the chain)
+        echo "backward sync: n$i holds the chain from block 0, nothing to fetch"
+    fi
     s1=$(seq_of 1); si=$(seq_of "$i")
     bhead=$(( ${s1:-0} < ${si:-0} ? ${s1:-0} : ${si:-0} ))
     (cd "$HERE" && python3 blockhashes.py --head "$bhead" "1:$(api_port 1)" "$i:$(api_port "$i")") \
         || { echo "FAIL: n$i holds other blocks than n1 after backward sync"; exit 1; }
-    echo "backward sync: n$i $(grep -a -m1 'BACKFILL: full node with blocks' "$blog" | sed 's/.*BACKFILL: //'); $(grep -a -m1 'BACKFILL: full history stored' "$blog" | sed 's/.*BACKFILL: //')"
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        echo "backward sync: n$i $(grep -a -m1 'BACKFILL: full node with blocks' "$blog" | sed 's/.*BACKFILL: //'); $(grep -a -m1 'BACKFILL: full history stored' "$blog" | sed 's/.*BACKFILL: //')"
+    fi
 done
 if [ "$CONVERT_AT" -gt 0 ]; then
     for i in 4 6; do
