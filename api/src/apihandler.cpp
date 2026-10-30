@@ -70,6 +70,10 @@ void APIHandler::run() {
     stats.run(stats_);
 #endif
     state_updater_running.test_and_set(std::memory_order_acquire);
+    // the node runs once its stored blocks are read; a quick start at the last stored block reads
+    // none, so baseLoaded() never marks them read, and TransactionFlow would never get the result
+    // of a contract call (the signal at the new_state of the call needs isBDLoaded_)
+    isBDLoaded_.store(true, std::memory_order_release);
 }
 
 APIHandler::~APIHandler() {
@@ -1870,7 +1874,7 @@ void APIHandler::store_block_slot(const csdb::Pool& pool) {
 
 void APIHandler::baseLoaded(const csdb::Pool& pool) {
     if (maxReadSequence && pool.sequence() == maxReadSequence) {
-        isBDLoaded_ = true;
+        isBDLoaded_.store(true, std::memory_order_release);
 #ifdef TOKENS_CACHE   
         tm_.loadTokenInfo([&](const TokensMap& tokens, const HoldersMap&) {
             int count{}, i{};
@@ -1889,7 +1893,7 @@ void APIHandler::baseLoaded(const csdb::Pool& pool) {
 
 void APIHandler::maxBlocksCount(cs::Sequence lastBlockNum) {
     if (!lastBlockNum) {
-        isBDLoaded_ = true;
+        isBDLoaded_.store(true, std::memory_order_release);
     }
 
     maxReadSequence = lastBlockNum;
