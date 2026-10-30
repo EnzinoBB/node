@@ -41,6 +41,7 @@ lines under the new release.
 |---|---|
 | #119 | ci: the release checks the Windows and macOS packages on mainnet before publishing them (a node of each system restores the published snapshot, syncs to the head, logs the same state digests as Linux and stops cleanly), and the same check runs weekly on the latest published release |
 | #120 | ci: a private network of 7 nodes (with the restart of one at block 300) runs on macOS and on Windows every night and on demand (`testnet-platforms.yml`): the nodes reach the same state digests as on Linux and a stopped node quick-starts again; Linux-only scenarios (network faults, slow nodes, full disks) stay on Linux |
+| #127 | ci: token tests: `ci/contracts/executor_harness.py` compares contract executors on token contracts without a node, and `TOKENS=1` runs `ci/testnet/tokens.py` (v1 and v0 tokens, balances and states on every node, the token API; `TOKENS_VIA` through another node) on the private network |
 
 ## community.14 — 2026-10-27
 
