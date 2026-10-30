@@ -557,7 +557,11 @@ Sequence TransactionsIndex::walkToTail(const csdb::Address& key) {
         }
         cur = *prev;
         prev = next;
-        ++steps;
+        if (++steps % 100'000 == 0) {
+            // a busy wallet after an index rebuild: once, one read per stored block of it
+            cslog() << "trxIndex: backfill: walking the history of "
+                    << EncodeBase58(pubKey.data(), pubKey.data() + pubKey.size()) << ", " << steps << " blocks so far";
+        }
     }
     csdebug() << "trxIndex: backfill: tail of " << EncodeBase58(pubKey.data(), pubKey.data() + pubKey.size())
               << " is block " << cur << ", " << steps << " steps";

@@ -448,7 +448,14 @@ bool BlockChain::storeBackfilledBlock(const csdb::Pool& pool) {
 
     // the index first and outside dbLock_: it reads the wallet cache, whose lock is never taken
     // while dbLock_ is held. Only the processor thread writes the index, as for the live blocks
+    const bool firstFloor = trxIndex_->backfillFloor() == cs::kWrongSequence;
     trxIndex_->indexBackfilledBlock(pool);
+    if (firstFloor) {
+        // the start-up repairs run only where the index holds a backfill floor: the first one goes
+        // to disk before any block is stored, or a power cut before the first flushBackfill could
+        // keep the blocks and lose the floor, and leave them unindexed
+        trxIndex_->flush();
+    }
 
     std::lock_guard lock(dbLock_);
     if (firstStoredSeq_ != seq + 1) {
