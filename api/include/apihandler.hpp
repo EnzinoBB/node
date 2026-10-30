@@ -3,6 +3,7 @@
 
 #include <csstats.hpp>
 
+#include <atomic>
 #include <deque>
 #include <queue>
 #include <tuple>
@@ -173,7 +174,7 @@ public:
         return executor_;
     }
 
-    bool isBDLoaded() { return isBDLoaded_; }
+    bool isBDLoaded() { return isBDLoaded_.load(std::memory_order_acquire); }
     
 private:
 #ifdef USE_DEPRECATED_STATS
@@ -182,7 +183,7 @@ private:
     cs::Executor& executor_;
     cs::DumbCv dumbCv_;
 
-    bool isBDLoaded_{ false };
+    std::atomic<bool> isBDLoaded_{ false };
 
     struct smart_trxns_queue {
         cs::SpinLock lock{ATOMIC_FLAG_INIT};

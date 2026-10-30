@@ -172,6 +172,12 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   - `[params] sync_contract_execution` (default `true`): `false` skips the re-execution while
     syncing altogether, and every state comes from the confidants.
 
+- **Contract results after a quick start.** A node that quick-starts from a checkpoint at its last
+  stored block reads no block. The official node then never marks its stored blocks as read, and
+  every contract call sent through its API ends with "Transaction in progress" and no result,
+  even though the network executed the call. The community node marks the blocks as read when
+  it starts running.
+
 ## Security and correctness fixes
 
 These were found by reviewing the official code. None of them changes the blocks or the
