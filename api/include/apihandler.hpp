@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <deque>
+#include <thread>
 #include <queue>
 #include <tuple>
 
@@ -184,6 +185,13 @@ private:
     cs::DumbCv dumbCv_;
 
     std::atomic<bool> isBDLoaded_{ false };
+    // the stored blocks are read (the last one, or run() after a quick start that read none): the
+    // token cache is refreshed once
+    void onBaseLoaded(bool refreshInBackground);
+    // an empty token cache on a node that has contracts (the cache was off when its checkpoint
+    // was saved): find the tokens among the contracts and their holders in the chain
+    void rebuildTokenCache();
+    std::thread tokensRefresh_;
 
     struct smart_trxns_queue {
         cs::SpinLock lock{ATOMIC_FLAG_INIT};
