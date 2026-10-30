@@ -18,8 +18,10 @@
 
 #if defined(MONITOR_NODE) || defined(WEB_WALLET_NODE)
 #define PROFILE_API
-#define TOKENS_CACHE
 #endif
+
+// the token cache is built in every node; [api] tokens_cache turns it on (TokensMaster::enabled)
+#define TOKENS_CACHE
 
 #ifdef MONITOR_NODE
 #define STATS
