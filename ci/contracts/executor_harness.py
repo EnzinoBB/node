@@ -13,8 +13,9 @@ getContractMethods (the token standard the API records).
 
 Each step records the status code, the return value, a hash of every contract state the executor
 returns and the emitted transactions. The first jar is the reference (the release executor): with
-two or more jars, any step whose record differs is a FAIL, because the node accepts a contract
-result only if the confidants' executors agree. Every scenario also checks its own expectations
+two or more jars, any answer that differs is a FAIL, because the node accepts a contract result
+only if the confidants' executors agree. What only the node's API reads (the token standard of
+getContractMethods) may differ. Every scenario also checks its own expectations
 (an expectation that does not hold is reported as a finding, not as a difference).
 """
 import argparse
@@ -364,10 +365,17 @@ class Recorder:
         return condition
 
 
+# what only the node's API reads, never contract execution: an executor may improve it
+API_ONLY = ("tokenStandard", "stopped_when_the_client_left")
+
+
 def comparable(step):
-    # the executor's error text carries stack traces and line numbers; the status code and the
-    # first line are what the node keeps (ret_val of a failed call is the message)
-    return json.dumps(step, sort_keys=True)
+    """What two executors must answer alike: the answers of deploys, calls and getters. The
+    scenarios' own expectations are left out (a fixed executor meets more of them), and so are the
+    fields only the API reads."""
+    if "expect" in step:
+        return None
+    return json.dumps({k: v for k, v in step.items() if k not in API_ONLY}, sort_keys=True)
 
 
 def main():
@@ -421,8 +429,8 @@ def main():
         for f in run["findings"]:
             print(f"  [{f['severity']}] {f['scenario']}: {f['finding']}")
     for other in runs[1:]:
-        a = [comparable(s) for s in ref["steps"]]
-        b = [comparable(s) for s in other["steps"]]
+        a = [c for c in map(comparable, ref["steps"]) if c is not None]
+        b = [c for c in map(comparable, other["steps"]) if c is not None]
         diffs = [(i, x, y) for i, (x, y) in enumerate(zip(a, b)) if x != y]
         if len(a) != len(b):
             diffs.append((min(len(a), len(b)), f"{len(a)} steps", f"{len(b)} steps"))
