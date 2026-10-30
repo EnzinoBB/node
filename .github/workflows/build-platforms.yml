@@ -126,11 +126,13 @@ jobs:
 
   macos:
     name: macOS (clang, Apple Silicon)
-    runs-on: macos-14
+    runs-on: macos-15
     # measured 11-18 min with the Boost cache, about 45 when Boost is built again: a stuck job ends
     # here instead of holding one of the few macOS runners for hours
     timeout-minutes: 60
     env:
+      # built on macOS 15, runs on macOS 14 and later (Boost and the node alike)
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
       BOOST_PREFIX: /Users/runner/boost
     steps:
       - name: Checkout
@@ -159,7 +161,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.BOOST_PREFIX }}
-          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-14-v1
+          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-15-v1
 
       - name: Build Boost
         if: steps.cache-boost.outputs.cache-hit != 'true'
