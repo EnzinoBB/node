@@ -1,7 +1,9 @@
 #include "gtest/gtest.h"
 
+#include <atomic>
 #include <memory>
 #include <random>
+#include <thread>
 #include <vector>
 #include <utility>
 
@@ -371,4 +373,63 @@ TEST(Lmdbxx, DISABLED_InsertInDifferentTables) {
 
     ASSERT_TRUE(db->isKeyExists(key1, db1));
     ASSERT_TRUE(db->isKeyExists(key2, db2));
+}
+
+// Integer keys and values are stored as decimal text. The text of each conversion must be its own:
+// one buffer shared by every conversion of a type gave an insert of an integer key and value of the
+// same type the value's text as its key, and threads converting at once each other's numbers.
+TEST(Lmdbxx, IntegerKeysAndValuesOfTheSameTypeFromSeveralThreads) {
+    auto db = createDb();
+    db->setMapSize(cs::Lmdb::Default1GbMapSize);
+    db->open();
+
+    static constexpr uint64_t kBase = 1'000'000'000'000ULL;
+    static constexpr uint64_t kPerThread = 2000;
+    static constexpr uint64_t kWriters = 4;
+    constexpr int kReaders = 4;
+
+    db->insert(uint64_t{7}, uint64_t{123456789});
+    ASSERT_TRUE(db->isKeyExists(uint64_t{7}));
+    ASSERT_EQ(db->value<uint64_t>(uint64_t{7}), 123456789u);
+
+    std::atomic<bool> writing{true};
+    std::atomic<size_t> wrong{0};
+    std::vector<std::thread> threads;
+    for (uint64_t w = 0; w < kWriters; ++w) {
+        threads.emplace_back([&db, w] {
+            for (uint64_t i = 0; i < kPerThread; ++i) {
+                const uint64_t key = kBase + w * kPerThread + i;
+                db->insert(key, key * 3);
+            }
+        });
+    }
+    for (int r = 0; r < kReaders; ++r) {
+        threads.emplace_back([&db, &writing, &wrong, r] {
+            std::mt19937_64 random(static_cast<uint64_t>(r));
+            while (writing) {
+                // short numbers too, so that the texts converted at once differ in length
+                const uint64_t key = (random() % 2 == 0) ? kBase + random() % (kWriters * kPerThread) : random() % 1000;
+                if (db->isKeyExists(key)) {
+                    const auto value = db->value<uint64_t>(key);
+                    if (value != key * 3 && key != 7) {
+                        ++wrong;
+                    }
+                }
+            }
+        });
+    }
+    for (uint64_t w = 0; w < kWriters; ++w) {
+        threads[w].join();
+    }
+    writing = false;
+    for (size_t t = kWriters; t < threads.size(); ++t) {
+        threads[t].join();
+    }
+
+    EXPECT_EQ(wrong.load(), 0u);
+    ASSERT_EQ(db->size(), kWriters * kPerThread + 1);
+    for (uint64_t key = kBase; key < kBase + kWriters * kPerThread; ++key) {
+        ASSERT_TRUE(db->isKeyExists(key)) << key;
+        ASSERT_EQ(db->value<uint64_t>(key), key * 3) << key;
+    }
 }

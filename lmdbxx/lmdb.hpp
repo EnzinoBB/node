@@ -1,7 +1,9 @@
 #ifndef LMDBXX_HPP
 #define LMDBXX_HPP
 
+#include <array>
 #include <cassert>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <string_view>
@@ -342,20 +344,31 @@ protected:
         emit failed(LmdbException(error));
     }
 
+    // the decimal text of a number, held by value (empty if it does not fit)
+    template<size_t N>
+    struct Digits {
+        std::array<char, N> bytes{};
+        size_t length = 0;
+        const char* data() const { return bytes.data(); }
+        size_t size() const { return length; }
+    };
+
     template<typename T, typename = std::enable_if_t<(std::is_integral_v<T> || std::is_floating_point_v<T>)>>
     auto cast(const T& value) const {
 #ifndef __APPLE__
 #ifdef  LMDBXX_FP_SUPPORT
         if constexpr (std::is_integral_v<T>) {
 #endif
-            static std::array<char, std::numeric_limits<T>::digits10 * 2> bytes{};
-            const auto result = std::to_chars(bytes.data(), bytes.data() + bytes.size(), value);
+            // the text lives in the returned object, not in a buffer shared by every call: the
+            // processor thread writes integer values while API threads look up integer keys
+            Digits<std::numeric_limits<T>::digits10 * 2> text;
+            const auto result = std::to_chars(text.bytes.data(), text.bytes.data() + text.bytes.size(), value);
 
-            if (result.ec != std::errc{}) {
-                return std::string_view{};
+            if (result.ec == std::errc{}) {
+                text.length = static_cast<size_t>(result.ptr - text.bytes.data());
             }
 
-            return std::string_view(bytes.data(), result.ptr - bytes.data());
+            return text;
 #ifdef  LMDBXX_FP_SUPPORT
         }
         else if constexpr (std::is_floating_point_v<T>) {
