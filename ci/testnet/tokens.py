@@ -273,6 +273,20 @@ def main():
               f"listed {len(tr.transfers or [])}", flush=True)
         run.check(tr.status.code == 0 and len(tr.transfers or []) >= 3,
                   f"TokenTransfersGet lists the v1 transfers (got {len(tr.transfers or [])})", kind="api")
+        # a page of 2 transfers: the failed transfer in between takes no place in it
+        page = c.TokenTransfersGet(v1, 0, 2)
+        run.check(len(page.transfers or []) == 2, f"TokenTransfersGet with limit 2 lists 2 transfers (got {len(page.transfers or [])})",
+                  kind="api")
+        if tr.transfers:
+            one = c.TokenTransferGet(v1, tr.transfers[0].transaction)
+            run.check(one.status.code == 0 and len(one.transfers or []) == 1 and one.count == 1,
+                      "TokenTransferGet of a transfer returns it", kind="api")
+        txs = c.TokenTransactionsGet(v1, 0, 100)
+        approve = next((t for t in (txs.transactions or []) if t.method == "approve"), None)
+        if approve is not None:
+            other = c.TokenTransferGet(v1, approve.transaction)
+            run.check(other.status.code != 0 and not other.transfers, "TokenTransferGet of an approve() is not a transfer",
+                      kind="api")
         holders = c.TokenHoldersGet(v1, 0, 100, 0, True)
         print(f"  TokenHoldersGet TokenV1: status {holders.status.code} "
               f"{[(b58(h.holder)[:8], h.balance) for h in (holders.holders or [])]}", flush=True)

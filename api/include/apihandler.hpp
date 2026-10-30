@@ -308,6 +308,7 @@ private:
     ::csdb::Transaction makeTransaction(const ::api::Transaction&);
     void dumbTransactionFlow(api::TransactionFlowResult& _return, const csdb::Transaction& tr);
     void smartTransactionFlow(api::TransactionFlowResult& _return, const ::api::Transaction&, csdb::Transaction& send_transaction);
+    SmartOperationState operationState(const csdb::TransactionID& id);
     void processTransaction(csdb::Transaction trx, uint64_t requestId);
     void processSmartTransaction(const Transaction& transaction, csdb::Transaction transactionToSend, uint64_t requestId);
 

@@ -2475,6 +2475,13 @@ void APIHandler::ContractAllMethodsGet(ContractAllMethodsGetResult& _return, con
     }
 }
 
+// the state of a contract call the API knows, Pending for one it does not (never adds an entry)
+SmartOperationState APIHandler::operationState(const csdb::TransactionID& id) {
+    auto opers = cs::lockedReference(this->smart_operations);
+    const auto it = opers->find(id);
+    return static_cast<SmartOperationState>(it == opers->end() ? SmartOperation::State::Pending : it->second.state);
+}
+
 void APIHandler::addTokenResult(api::TokenTransfersResult& _return, const csdb::Address& token, const std::string& code, const csdb::Pool& pool, const csdb::Transaction& tr,
                                 const api::SmartContractInvocation& smart, const std::pair<csdb::Address, csdb::Address>& addrPair) {
     api::TokenTransfer transfer;
@@ -2496,8 +2503,7 @@ void APIHandler::addTokenResult(api::TokenTransfersResult& _return, const csdb::
     if (ufd.is_valid()) {
         transfer.__set_userFields(ufd.value<std::string>());
     }
-    auto opers = cs::lockedReference(this->smart_operations);
-    transfer.state = static_cast<SmartOperationState>((*opers)[tr.id()].state);
+    transfer.state = operationState(tr.id());
 
     if (transfer.state == SOS_Success) {
         _return.transfers.push_back(transfer);
@@ -2515,10 +2521,14 @@ void APIHandler::addTokenResult(api::TokenTransactionsResult& _return, const csd
     trans.method = smart.method;
     trans.params = smart.params;
 
-    auto opers = cs::lockedReference(this->smart_operations);
-    trans.state = static_cast<SmartOperationState>((*opers)[tr.id()].state);
+    trans.state = operationState(tr.id());
 
     _return.transactions.push_back(trans);
+}
+
+// a 64-bit counter in an i32 field of the API: the largest i32 instead of a wrapped value
+static int32_t toInt32(uint64_t value) {
+    return static_cast<int32_t>(std::min<uint64_t>(value, static_cast<uint64_t>(std::numeric_limits<int32_t>::max())));
 }
 
 void putTokenInfo(api::TokenInfo& ti, const general::Address& addr, const Token& token) {
@@ -2527,9 +2537,9 @@ void putTokenInfo(api::TokenInfo& ti, const general::Address& addr, const Token&
     ti.name = token.name;
     ti.totalSupply = token.totalSupply;
     ti.owner = fromByteArray(token.owner.public_key());
-    ti.transfersCount = int32_t(token.transfersCount);
-    ti.transactionsCount = int32_t(token.transactionsCount);
-    ti.holdersCount = int32_t(token.realHoldersCount);
+    ti.transfersCount = toInt32(token.transfersCount);
+    ti.transactionsCount = toInt32(token.transactionsCount);
+    ti.holdersCount = toInt32(token.realHoldersCount);
     ti.tokenStandard = decltype(api::TokenInfo::tokenStandard)(uint32_t((token.tokenStandard)));
 }
 
@@ -2553,15 +2563,15 @@ void APIHandler::tokenTransactionsInternal(ResultType& _return, APIHandler& hand
             //cslog() << __func__ << ": Tokens found";
             code = it->second.symbol;
             if (transfersOnly && !filterByWallet) {
-                _return.count = static_cast<int32_t>(it->second.transfersCount);
+                _return.count = toInt32(it->second.transfersCount);
             }
             else if (!transfersOnly) {
-                _return.count = static_cast<int32_t>(it->second.transactionsCount);
+                _return.count = toInt32(it->second.transactionsCount);
             }
             else if (transfersOnly && filterByWallet) {
                 auto hIt = it->second.holders.find(wallet);
                 if (hIt != it->second.holders.end()) {
-                    _return.count = static_cast<int32_t>(hIt->second.transfersCount);
+                    _return.count = toInt32(hIt->second.transfersCount);
                 }
                 else {
                     _return.count = 0;
@@ -2585,6 +2595,10 @@ void APIHandler::tokenTransactionsInternal(ResultType& _return, APIHandler& hand
         auto addrPair = TokensMaster::getTransferData(addr_pk, smart.method, smart.params);
 
         if (filterByWallet && addrPair.first != wallet && addrPair.second != wallet) {
+            return true;
+        }
+        // a failed transfer moved nothing and is not listed: it must not take a place in the page
+        if (transfersOnly && handler.operationState(tr.id()) != SOS_Success) {
             return true;
         }
 
@@ -2814,14 +2828,21 @@ void APIHandler::TokenTransferGet(api::TokenTransfersResult& _return, const gene
         return;
     }
 
-    const auto pool = executor_.loadBlockApi(trxn.id().pool_seq());
+    if (!trxn.is_valid() || !is_smart(trxn) || blockchain_.getAddressByType(trxn.target(), BlockChain::AddressType::PublicKey) != addr) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND, "no call to this token with this id");
+        return;
+    }
     const auto smart = fetch_smart(trxn);
+    if (!TokensMaster::isTransfer(smart.method, smart.params)) {
+        SetResponseStatus(_return.status, APIRequestStatusType::NOT_FOUND, "the transaction is not a transfer of this token");
+        return;
+    }
+    const auto pool = executor_.loadBlockApi(trxn.id().pool_seq());
     const auto addr_pk = blockchain_.getAddressByType(trxn.source(), BlockChain::AddressType::PublicKey);
     const auto addrPair = TokensMaster::getTransferData(addr_pk, smart.method, smart.params);
 
-    _return.count = 1;
-
     addTokenResult(_return, addr, code, pool, trxn, smart, addrPair);
+    _return.count = static_cast<int32_t>(_return.transfers.size());
     SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
 }
 
@@ -3059,7 +3080,7 @@ void APIHandler::TokenHoldersGet(api::TokenHoldersResult& _return, const general
         auto tIt = tm_.find(addr);
         if (tIt != tm_.end()) {
             found = true;
-            _return.count = static_cast<int32_t>(tIt->second.realHoldersCount);
+            _return.count = toInt32(tIt->second.realHoldersCount);
 
             applyToSortedMap(tIt->second.holders, comparator, [&offset, &limit, &_return, &token](const HMap::value_type& t) {
                 if (TokensMaster::isZeroAmount(t.second.balance)) {
@@ -3074,7 +3095,7 @@ void APIHandler::TokenHoldersGet(api::TokenHoldersResult& _return, const general
                 th.holder = fromByteArray(t.first.public_key());
                 th.token = token;
                 th.balance = t.second.balance;
-                th.transfersCount = static_cast<int32_t>(t.second.transfersCount);
+                th.transfersCount = toInt32(t.second.transfersCount);
 
                 _return.holders.push_back(th);
 
