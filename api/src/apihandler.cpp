@@ -14,6 +14,7 @@
 #include <src/priv_crypto.hpp>
 
 #include "csconnector/csconnector.hpp"
+#include "callcheck.hpp"
 
 #include "stdafx.h"
 #include "serializer.hpp"
@@ -1166,6 +1167,25 @@ void APIHandler::processSmartTransaction(const Transaction& transaction, csdb::T
 }
 
 
+// the public methods of a deployed contract, as the executor lists them; its byte code never changes,
+// so they are asked once. Empty when the executor does not answer: nothing is checked then
+std::vector<general::MethodDescription> APIHandler::contractMethods(const csdb::Address& contract, const std::vector<general::ByteCodeObject>& byteCode) {
+    {
+        std::lock_guard lock(contractMethodsLock_);
+        if (const auto it = contractMethods_.find(contract); it != contractMethods_.end()) {
+            return it->second;
+        }
+    }
+    executor::GetContractMethodsResult result;
+    executor_.getContractMethods(result, byteCode);
+    if (result.status.code != 0) {
+        return {};
+    }
+    std::lock_guard lock(contractMethodsLock_);
+    contractMethods_[contract] = result.methods;
+    return result.methods;
+}
+
 void APIHandler::smartTransactionFlow(api::TransactionFlowResult& _return, const ::api::Transaction& transaction, csdb::Transaction& send_transaction) {
     auto input_smart = transaction.__isset.smartContract ? transaction.smartContract : SmartContractInvocation{};
     //auto send_transaction = makeTransaction(transaction);
@@ -1197,6 +1217,15 @@ void APIHandler::smartTransactionFlow(api::TransactionFlowResult& _return, const
         else {
             SetResponseStatus(_return.status, APIRequestStatusType::FAILURE);
             return;
+        }
+        // a call whose method the executor cannot find fails on every node, and its fee is paid
+        // all the same: refused here, before it reaches the network
+        if (transaction.__isset.smartContract && !origin_bytecode.empty()) {
+            const auto why = checkCallArguments(contractMethods(smart_addr, origin_bytecode), input_smart.method, input_smart.params);
+            if (!why.empty()) {
+                SetResponseStatus(_return.status, APIRequestStatusType::FAILURE, why);
+                return;
+            }
         }
     }
     else {

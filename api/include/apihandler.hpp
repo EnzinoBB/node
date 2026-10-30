@@ -309,6 +309,9 @@ private:
     void dumbTransactionFlow(api::TransactionFlowResult& _return, const csdb::Transaction& tr);
     void smartTransactionFlow(api::TransactionFlowResult& _return, const ::api::Transaction&, csdb::Transaction& send_transaction);
     SmartOperationState operationState(const csdb::TransactionID& id);
+    std::vector<general::MethodDescription> contractMethods(const csdb::Address& contract, const std::vector<general::ByteCodeObject>& byteCode);
+    std::mutex contractMethodsLock_;
+    std::unordered_map<csdb::Address, std::vector<general::MethodDescription>> contractMethods_;
     void processTransaction(csdb::Transaction trx, uint64_t requestId);
     void processSmartTransaction(const Transaction& transaction, csdb::Transaction transactionToSend, uint64_t requestId);
 
