@@ -142,6 +142,19 @@ class Run:
         return self.check(all(v == expected for v in got.values()), f"{label} = {expected!r} on every node (got {got})")
 
 
+def wrong_type_call(run, src, contract, params, passed, what):
+    """A call no method of the contract matches fails on every node and its fee is paid: the API
+    refuses it before it reaches the network (a node without that check sends it on)."""
+    c = run.client()
+    before = c.WalletTransactionsCountGet(src.pk).lastTransactionInnerId or 0
+    s, r, m = run.invoke(src, contract, "transfer", params, what)
+    refused = s != 0 and "no method matches" in m and f"the call passes {passed}" in m
+    time.sleep(10)
+    after = c.WalletTransactionsCountGet(src.pk).lastTransactionInnerId or 0
+    run.check(refused and after == before, f"{what}: refused by the API, nothing sent (inner id {before} -> {after})",
+              kind="api")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("work")
@@ -178,9 +191,8 @@ def main():
     print("TokenV1 calls", flush=True)
     s, r, _ = run.invoke(master, v1, "transfer", [v_str(b58(alice.pk)), v_dec("1000")], "master -> alice 1000")
     run.check(s == 0 and r is True, "v1 transfer with a BigDecimal amount")
-    s, r, m = run.invoke(master, v1, "transfer", [v_str(b58(bob.pk)), v_str("5")], "master -> bob \"5\" (string amount)")
-    run.check(s == 0 and r is True, "v1 transfer with the amount as a string (the only form the API's token cache "
-                                    "recognises as a transfer)", kind="info")
+    wrong_type_call(run, master, v1, [v_str(b58(bob.pk)), v_str("5")], "v_string",
+                    "v1 transfer with the amount as a string (the executor finds no transfer(String, String))")
     s, r, _ = run.invoke(alice, v1, "transfer", [v_str(b58(bob.pk)), v_dec("100.5")], "alice -> bob 100.5")
     run.check(s == 0 and r is True, "v1 transfer by a holder")
     s, r, _ = run.invoke(alice, v1, "transfer", [v_str(b58(bob.pk)), v_dec("999999")], "alice -> bob 999999")
@@ -209,8 +221,8 @@ def main():
     print("TokenV0 calls", flush=True)
     s, r, _ = run.invoke(master, v0, "transfer", [v_str(b58(alice.pk)), v_str("10.5")], "master -> alice \"10.5\"")
     run.check(s == 0 and r is True, "v0 transfer with a string amount")
-    s, r, _ = run.invoke(master, v0, "transfer", [v_str(b58(bob.pk)), v_dec("1")], "master -> bob 1 (BigDecimal amount)")
-    run.check(s == 0 and r is True, "v0 transfer with a BigDecimal amount", kind="info")
+    wrong_type_call(run, master, v0, [v_str(b58(bob.pk)), v_dec("1")], "v_big_decimal",
+                    "v0 transfer with the amount as a BigDecimal (the executor finds no transfer(String, BigDecimal))")
     s, r, _ = run.invoke(alice, v0, "approve", [v_str(b58(bob.pk)), v_str("5")], "alice approves bob 5")
     s, r, _ = run.invoke(bob, v0, "transferFrom", [v_str(b58(alice.pk)), v_str(b58(bob.pk)), v_str("5")],
                          "bob moves 5 alice -> bob")
