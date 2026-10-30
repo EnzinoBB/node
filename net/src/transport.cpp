@@ -121,13 +121,10 @@ Transport::~Transport() {
     if (processorThread_.joinable()) {
         processorThread_.join();
     }
-    // p2p's Network singleton keeps a reference to the host's routing table (Host::Run). Left there,
-    // the routing table (its UDP socket, pinger and explorer threads) would outlive host_ and its
-    // io_context and be destroyed at static destruction, against the io_context's freed reactor:
-    // SIGSEGV in kqueue_reactor::deregister_descriptor at exit on macOS, undefined behaviour on the
-    // other systems. Without it the routing table goes with host_ (just below, as host_ is the last
-    // member), after ~Host has stopped its io_context and before the io_context is destroyed.
-    net::Network::Instance().SetRoutingTable(nullptr);
+    // host_ (the last member) goes next: ~Host stops its io_context and joins its thread, then stops
+    // the routing table and clears the Network singleton's reference to it (p2p fork), so the routing
+    // table, its UDP socket and its threads end while the io_context exists. Clearing the reference
+    // here, before ~Host, raced with Network::OnConnected on the p2p io thread.
 }
 
 void Transport::run() {

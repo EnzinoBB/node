@@ -116,6 +116,8 @@ struct ApiData {
     int executorBackgroundThreadDelay = 100;
     int executorCheckVersionDelay = 5000;
     bool executorMultiInstance = false;
+    // the token cache behind the Token* API methods (always on in RelMonitor and RelWallet builds)
+    bool tokensCache = false;
     int executorCommitMin = 1506;   // first commit with support of checking
     int executorCommitMax{-1};      // unlimited range on the right
     std::string jpsCmdLine = "jps";

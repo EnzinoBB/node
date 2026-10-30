@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tests the image's entrypoint with a stub node: first-start setup, kept configuration and keys,
-# the snapshot download on request (--download-snapshot) and the [snapshot] settings, the refusal
-# after a snapshot mismatch, and storage changes.
+# the snapshot download on request (--download-snapshot) and the [snapshot] settings, for pruned and
+# full nodes, the refusal after a snapshot mismatch, and storage changes.
 # Usage: test-entrypoint.sh <dir with mdb_copy and mdb_load>
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -113,12 +113,30 @@ run "$d" -e CREDITS_SNAPSHOT=auto -e CREDITS_SNAPSHOT_URL=https://example.org/re
 grep -q -- '--download-snapshot https://example.org/rel/snapshot.json' "$d/stub-download" || fail "old latest.json address"
 pass "p2p, off, serve and the old values"
 
-# 6b. a full node does not download and does not fetch (a snapshot holds recent blocks only)
+# 6b. a full node on berkeleydb (the full default) does not download and does not fetch: berkeleydb
+# cannot hold a database that starts above block 0
 d=$(newdata 6f)
 run "$d" -e CREDITS_STORAGE=full >/dev/null
-[ -e "$d/stub-download" ] && fail "a full node downloads"
-grep -q '^fetch=off' "$d/config.ini" || fail "a full node fetches"
-pass "a full node syncs from block 0"
+[ -e "$d/stub-download" ] && fail "a full berkeleydb node downloads"
+grep -q '^fetch=off' "$d/config.ini" || fail "a full berkeleydb node fetches"
+pass "a full berkeleydb node syncs from block 0"
+
+# 6g. a full node on lmdb or rocksdb starts from the snapshot and backfills (backward sync);
+# CREDITS_BACKFILL=off writes backfill=off
+for b in lmdb rocksdb; do
+    d=$(newdata "6g-$b")
+    out=$(run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=$b)
+    grep -q -- '--download-snapshot' "$d/stub-download" 2>/dev/null || { echo "$out"; fail "a full $b node does not download"; }
+    grep -q 'fetches the older blocks from its neighbours' <<<"$out" || { echo "$out"; fail "a full $b node: no backfill note"; }
+    grep -q '^fetch=auto' "$d/config.ini" || fail "a full $b node does not fetch"
+    grep -q '^backfill=' "$d/config.ini" && fail "a full $b node: backfill set without CREDITS_BACKFILL"
+    grep -q '^prune_keep_blocks' "$d/config.ini" && fail "a full $b node is pruned"
+    grep -q "mode=full backend=$b" "$d/.storage" || fail "a full $b node: record"
+done
+d=$(newdata 6g-off)
+run "$d" -e CREDITS_STORAGE=full -e CREDITS_DB_BACKEND=lmdb -e CREDITS_BACKFILL=off >/dev/null
+grep -q '^backfill=off' "$d/config.ini" || fail "CREDITS_BACKFILL=off not written"
+pass "a full lmdb or rocksdb node starts from the snapshot and backfills"
 
 # 6c. a snapshot mismatch reported by the node: the next start is refused
 d=$(newdata 6m)
@@ -139,12 +157,15 @@ grep -q 'switching from full to pruned storage' <<<"$out" || { echo "$out"; fail
 grep -q 'mode=pruned backend=lmdb' "$d/.storage" || fail "full to pruned record"
 pass "full to pruned allowed"
 
-# 8. pruned to full: refused
+# 8. pruned to full: allowed, the node fetches the older blocks (backward sync)
 d=$(withdata 8)
 sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$d/config.ini"
 set +e; out=$(run "$d"); rc=$?; set -e
-[ "$rc" = 3 ] && grep -q 'cannot become a full node' <<<"$out" || { echo "$out"; fail "pruned to full: exit $rc"; }
-pass "pruned to full refused"
+[ "$rc" = 0 ] && grep -q 'switching from pruned to full storage: the node keeps its blocks and fetches the older ones' <<<"$out" \
+    || { echo "$out"; fail "pruned to full: exit $rc"; }
+grep -q 'mode=full backend=lmdb' "$d/.storage" || fail "pruned to full record"
+[ -e "$d/stub-download" ] && fail "pruned to full downloads"
+pass "pruned to full allowed"
 
 # 9. backend change: refused
 d=$(withdata 9)
