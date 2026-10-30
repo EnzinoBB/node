@@ -43,7 +43,8 @@ jobs:
     name: Private network (macOS, ${{ inputs.nodes || '7' }} nodes)
     if: github.event_name == 'schedule' || inputs.os == 'macos' || inputs.os == 'both'
     runs-on: macos-14
-    timeout-minutes: 150
+    # measured 16-25 min with the caches (build 3, network 13), about 45 with a cold build
+    timeout-minutes: 60
     env:
       BOOST_PREFIX: /Users/runner/boost
       CCACHE_DIR: /Users/runner/.ccache
@@ -149,7 +150,7 @@ jobs:
           key: ccache-testnet-macos-14-${{ github.sha }}
 
       - name: Run private network
-        timeout-minutes: 75
+        timeout-minutes: 40
         env:
           RESTART_AT: '300'
           FUND: '1'

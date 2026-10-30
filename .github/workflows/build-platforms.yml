@@ -127,7 +127,9 @@ jobs:
   macos:
     name: macOS (clang, Apple Silicon)
     runs-on: macos-14
-    timeout-minutes: 240
+    # measured 11-18 min with the Boost cache, about 45 when Boost is built again: a stuck job ends
+    # here instead of holding one of the few macOS runners for hours
+    timeout-minutes: 60
     env:
       BOOST_PREFIX: /Users/runner/boost
     steps:
@@ -208,7 +210,7 @@ jobs:
 
       - name: Test
         working-directory: build
-        timeout-minutes: 30
+        timeout-minutes: 15   # the unit tests take about 4 minutes
         run: ctest --output-on-failure --timeout 300
 
       - name: Upload node binary
