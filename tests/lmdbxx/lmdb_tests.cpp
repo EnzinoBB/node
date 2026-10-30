@@ -433,3 +433,51 @@ TEST(Lmdbxx, IntegerKeysAndValuesOfTheSameTypeFromSeveralThreads) {
         ASSERT_EQ(db->value<uint64_t>(key), key * 3) << key;
     }
 }
+
+// The map grows while other threads read: LMDB allows that only with no transaction open in the
+// process, so the growth waits for the readers. Every value read is the one written for its key.
+TEST(Lmdbxx, MapGrowsWhileOtherThreadsRead) {
+    auto db = createDb();
+    size_t grown = 0;
+    cs::Connector::connect(&db->mapSizeIncreased, [&grown](const size_t) { ++grown; });
+    db->setMapSize(1 << 20);
+    db->setIncreaseSize(1 << 20);
+    db->open();
+
+    static constexpr size_t kKeys = 4000;
+    const std::string payload(2000, 'v');
+    auto keyOf = [](size_t i) { return "key" + std::to_string(i); };
+    auto valueOf = [&payload](size_t i) { return std::to_string(i) + payload; };
+
+    std::atomic<size_t> written{0};
+    std::atomic<bool> writing{true};
+    std::atomic<size_t> wrong{0};
+    std::vector<std::thread> readers;
+    for (int r = 0; r < 4; ++r) {
+        readers.emplace_back([&, r] {
+            std::mt19937_64 random(static_cast<uint64_t>(r));
+            while (writing) {
+                const size_t n = written;
+                if (n == 0) {
+                    continue;
+                }
+                const size_t i = random() % n;
+                if (db->value<std::string>(keyOf(i)) != valueOf(i)) {
+                    ++wrong;
+                }
+            }
+        });
+    }
+    for (size_t i = 0; i < kKeys; ++i) {
+        db->insert(keyOf(i), valueOf(i));
+        written = i + 1;
+    }
+    writing = false;
+    for (auto& t : readers) {
+        t.join();
+    }
+
+    EXPECT_EQ(wrong.load(), 0u);
+    EXPECT_GT(grown, 3u);
+    ASSERT_EQ(db->size(), kKeys);
+}

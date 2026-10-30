@@ -4,7 +4,9 @@
 #include <array>
 #include <cassert>
 #include <limits>
+#include <mutex>
 #include <numeric>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 
@@ -139,6 +141,7 @@ public:
     // name - table name at current path, nullptr if only one table exist
     size_t size(const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
             auto dbi = lmdb::dbi::open(transaction, name);
 
@@ -170,6 +173,7 @@ public:
         checkMapSize();
 
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_);
             auto dbi = lmdb::dbi::open(transaction, name);
 
@@ -206,6 +210,7 @@ public:
         checkMapSize();
 
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr);
             auto dbi = lmdb::dbi::open(transaction, name, flags);
 
@@ -237,6 +242,7 @@ public:
     // name - table name at current path
     bool isKeyExists(const char* data, size_t size, const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
             auto dbi = lmdb::dbi::open(transaction, name);
             auto cursor = lmdb::cursor::open(transaction, dbi);
@@ -261,6 +267,7 @@ public:
     template<typename T>
     T value(const char* data, size_t size, const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
             auto dbi = lmdb::dbi::open(transaction, name);
             auto cursor = lmdb::cursor::open(transaction, dbi);
@@ -310,6 +317,7 @@ protected:
     template<typename Key, typename Value>
     std::pair<Key, Value> keyValueImpl(unsigned int mdbFlag, MDB_cursor_op cursorFlag, const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, mdbFlag);
             auto dbi = lmdb::dbi::open(transaction, name);
             auto cursor = lmdb::cursor::open(transaction, dbi);
@@ -332,6 +340,7 @@ protected:
 
     void flushImpl(bool force) {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);
             env_->sync(force);
             emit flushed();
         }
@@ -470,18 +479,29 @@ protected:
         return temp;
     }
 
+    // LMDB grows the map only while this process has no transaction open (mdb_env_set_mapsize):
+    // every transaction of this class holds mapMutex_ shared, the growth holds it alone. Before,
+    // a write could grow the map under a read transaction of an API thread
     void checkMapSize() {
-        Info metaInfo = info();
-        Stats metaStats = stats();
-
-        auto freeSpace = metaInfo.me_mapsize - (metaStats.ms_psize * metaInfo.me_last_pgno);
-
-        if (freeSpace < increaseSize_/2) {
-            auto newSize = mapSize() + increaseSize_;
-            setMapSize(newSize);
-
-            emit mapSizeIncreased(newSize);
+        auto needsGrowth = [this] {
+            Info metaInfo = info();
+            Stats metaStats = stats();
+            auto freeSpace = metaInfo.me_mapsize - (metaStats.ms_psize * metaInfo.me_last_pgno);
+            return freeSpace < increaseSize_ / 2;
+        };
+        if (!needsGrowth()) {
+            return;
         }
+        size_t newSize = 0;
+        {
+            std::unique_lock<std::shared_mutex> mapLock(mapMutex_);
+            if (!needsGrowth()) {
+                return;   // another writer grew it meanwhile
+            }
+            newSize = mapSize() + increaseSize_;
+            setMapSize(newSize);
+        }
+        emit mapSizeIncreased(newSize);
     }
 
     auto environment(const unsigned flags) const {
@@ -495,6 +515,8 @@ private:
     bool isOpen_ = false;
     unsigned int flags_;
     size_t increaseSize_ = DefaultIncreaseSize;
+    // shared by every transaction, held alone to grow the map (checkMapSize)
+    mutable std::shared_mutex mapMutex_;
 
 public signals:
 
