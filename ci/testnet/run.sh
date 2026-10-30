@@ -120,7 +120,13 @@
 #        FORGE_NODE / CORRUPT_NODE (odd, a CREDITS_TESTNET build): that serving node declares a forged
 #        state digest / flips a byte of every third piece it serves
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
-#        node 5 is restarted as a pruned node and node 6 as a full one
+#        node 5 is restarted as a pruned node and node 6 as a full one; n6 then fetches the blocks it
+#        pruned from its peers (backward sync). BACKFILL_RATE / BACKFILL_BATCH / BACKFILL_PER_TURN set
+#        its [storage] backfill_rate / backfill_batch / backfill_store_per_turn. BACKFILL_MEASURE=1:
+#        n1's and n6's block rate and round times from n6's first request (a trusted node: n6 is an
+#        initial confidant) to 60 s later, against the two minutes after the backfill: the block
+#        rate may fall by 20 %, the round time p95 rise by 50 % (at least 10 rounds in each window),
+#        and n6's longest turn of storing must stay under 250 ms; BACKFILL_MEASURE=report only prints
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
 #        after its second batch and again with every block converted (testnet-convert-kill), its
@@ -334,6 +340,10 @@ ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo $((JOIN_NODE + JOIN_EXTRA)) || echo "
 is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
 EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
+BACKFILL_RATE=${BACKFILL_RATE:-}
+BACKFILL_BATCH=${BACKFILL_BATCH:-}
+BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
+BACKFILL_MEASURE=${BACKFILL_MEASURE:-0}
 declare -a STORE_BACKEND STORE_PRUNED
 if [ -n "$NODE_STORAGE" ]; then
     IFS=, read -r -a entries <<<"$NODE_STORAGE"
@@ -351,6 +361,19 @@ fi
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
     if [ "$i" -eq "$PRUNE_NODE" ] || { is_joiner "$i" && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
+# the full nodes whose storage starts above block 0 and run this build: they backfill the older
+# blocks from their peers (backward sync) and must hold the whole chain at the end. n6 after the
+# storage switch; the full joiner of a snapshot (imported, or fetched over p2p)
+BACKFILL_NODES=""
+if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then BACKFILL_NODES="6"; fi
+if [ "$JOIN_FULL" = 1 ] && { { [ "$SNAPSHOT_AT" -gt 0 ] && [ "$SNAPSHOT_CORRUPT" != 1 ]; } || { [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" != fallback ]; }; }; then
+    BACKFILL_NODES="$BACKFILL_NODES $JOIN_NODE"
+fi
+for i in $BACKFILL_NODES; do
+    # an even node running BIN_ALT has no backward sync
+    if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then BACKFILL_NODES=$(echo " $BACKFILL_NODES " | sed "s/ $i / /"); fi
+done
+is_backfill_node() { [[ " $BACKFILL_NODES " == *" $1 "* ]]; }
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -508,8 +531,9 @@ api_settings() {
             echo "apiexec_port=0"
             return
         fi
-        if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
-            # every node answers block queries: the official ones are compared with n1 by block hash
+        if [ "$BIN_ALT_OFFICIAL" = 1 ] || is_backfill_node "$i" || { [ "$i" -eq 1 ] && [ -n "${BACKFILL_NODES// /}" ]; }; then
+            # every node answers block queries: the official ones are compared with n1 by block hash;
+            # so are the nodes that backfill, and n1
             echo "port=$(api_port "$i")"
         else
             echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
@@ -1173,6 +1197,9 @@ PY
         for i in 5 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
         sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n5/config.ini"
         sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_RATE" ] || sed -i "/^prune_keep_blocks=0/a backfill_rate=$BACKFILL_RATE" "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_BATCH" ] || sed -i "/^prune_keep_blocks=0/a backfill_batch=$BACKFILL_BATCH" "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_PER_TURN" ] || sed -i "/^prune_keep_blocks=0/a backfill_store_per_turn=$BACKFILL_PER_TURN" "$WORK/n6/config.ini"
         switch_lines5=$(wc -l < "$WORK/n5/node.log")
         switch_lines6=$(wc -l < "$WORK/n6/node.log")
         for i in 5 6; do start_node "$i"; done
@@ -1739,6 +1766,95 @@ if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
         || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
     echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
 fi
+# backward sync under load: the consensus while the trusted n6 backfills, against the two minutes
+# after it (both after the restart of the storage switch); BACKFILL_MEASURE=report only prints
+if [ "$BACKFILL_MEASURE" != 0 ] && [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
+    python3 - "$WORK/n1/node.log" "$WORK/n6/node.log" "$BACKFILL_MEASURE" <<'PY' || { echo "FAIL: the consensus slowed down while n6 backfilled"; exit 1; }
+import re, sys, datetime
+stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
+def t(line):
+    m = stamp.match(line)
+    return datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() if m else None
+def read(path):
+    rounds, seqs, lines = [], [], []
+    for line in open(path, errors="replace"):
+        x = t(line)
+        if x is None:
+            continue
+        if " R-" in line and "=====" in line:
+            rounds.append(x)
+        elif "Last written sequence = " in line:
+            m = re.search(r"Last written sequence = ([0-9']+)", line)
+            if m:
+                seqs.append((x, int(m.group(1).replace("'", ""))))
+        if "BACKFILL: " in line:
+            lines.append((x, line.strip()))
+    return rounds, seqs, lines
+def stats(rounds, seqs, a, b):
+    r = sorted(y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b)
+    s = [q for x, q in seqs if a <= x < b]
+    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
+    return rate, p95, (max(r) if r else 0.0), len(r)
+judge = sys.argv[3] == "1"
+n1 = read(sys.argv[1])
+n6 = read(sys.argv[2])
+first = next((x for x, l in n6[2] if "full node with blocks" in l), None)
+end = next((x for x, l in n6[2] if "full history stored" in l), None)
+if first is None or end is None:
+    print("FAIL: n6 did not backfill")
+    sys.exit(1)
+# the requests start once n6 is in sync after its restart: the first "resumed", if it paused
+start = next((x for x, l in n6[2] if x >= first and "BACKFILL: resumed" in l), first)
+done_line = next(l for x, l in n6[2] if "full history stored" in l)
+m = re.search(r"longest turn (\d+) ms", done_line)
+longest = int(m.group(1)) if m else -1
+print(f"backfill under load: n6 fetched for {end - start:.1f} s: {done_line.split('BACKFILL: ')[1]}")
+ok = True
+for name, (rounds, seqs, _) in (("n1", n1), ("n6", n6)):
+    # every round that starts from the first request to 60 s later, against the two minutes after
+    during = stats(rounds, seqs, start, max(end, start + 60))
+    after = stats(rounds, seqs, end + 30, end + 150)
+    print(f"backfill under load: {name}: while backfilling {during[0]:.2f} blocks/s, round p95 {during[1]:.2f} s, longest {during[2]:.2f} s "
+          f"({during[3]} rounds); after {after[0]:.2f} blocks/s, round p95 {after[1]:.2f} s, longest {after[2]:.2f} s ({after[3]} rounds)")
+    if not judge or during[3] < 10 or after[3] < 10:
+        continue
+    if during[0] < 0.8 * after[0]:
+        print(f"FAIL: {name}: block rate {100 * (1 - during[0] / after[0]):.0f} % lower while backfilling (20 % allowed)")
+        ok = False
+    if during[1] > 1.5 * after[1]:
+        print(f"FAIL: {name}: round time p95 {100 * (during[1] / after[1] - 1):.0f} % higher while backfilling (50 % allowed)")
+        ok = False
+if judge and longest > 250:
+    print(f"FAIL: n6 held the processor thread {longest} ms in one turn (250 ms allowed)")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+# backward sync: each full node that started above block 0 fetched the older blocks from its peers,
+# refused none, ends with block 0 stored, and holds the same blocks as n1 (every 100th, over the API)
+for i in $BACKFILL_NODES; do
+    blog="$WORK/n$i/node.log"
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        grep -aq 'BACKFILL: full history stored' "$blog" \
+            || { echo "FAIL: n$i did not finish backward sync"; { grep -a 'BACKFILL' "$blog" || true; } | tail -20; exit 1; }
+        ! grep -aq 'BACKFILL: block .* rejected' "$blog" || { echo "FAIL: n$i refused blocks of honest peers"; grep -a 'rejected' "$blog" | head -5; exit 1; }
+        last_status=$(grep -a 'Last written sequence = ' "$blog" | tail -1)
+        [[ "$last_status" == *"oldest stored = 0"* ]] || { echo "FAIL: n$i last status line: $last_status"; exit 1; }
+    elif grep -aq 'pruned storage: oldest block stored is' "$blog"; then
+        echo "FAIL: n$i started above block 0 and did not start backward sync"; exit 1
+    else
+        # a snapshot from full sources holds every block from 0 (snapshot_blocks covers the chain)
+        echo "backward sync: n$i holds the chain from block 0, nothing to fetch"
+    fi
+    s1=$(seq_of 1); si=$(seq_of "$i")
+    bhead=$(( ${s1:-0} < ${si:-0} ? ${s1:-0} : ${si:-0} ))
+    (cd "$HERE" && python3 blockhashes.py --head "$bhead" "1:$(api_port 1)" "$i:$(api_port "$i")") \
+        || { echo "FAIL: n$i holds other blocks than n1 after backward sync"; exit 1; }
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        echo "backward sync: n$i $(grep -a -m1 'BACKFILL: full node with blocks' "$blog" | sed 's/.*BACKFILL: //'); $(grep -a -m1 'BACKFILL: full history stored' "$blog" | sed 's/.*BACKFILL: //')"
+    fi
+done
 if [ "$CONVERT_AT" -gt 0 ]; then
     for i in 4 6; do
         want=$([ "$i" = 4 ] && echo lmdb || echo rocksdb)

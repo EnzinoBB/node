@@ -68,6 +68,12 @@ struct StorageData {
     std::string dbBackend = "berkeleydb";   // runtime DB backend: berkeleydb, rocksdb or lmdb (lmdb also as block_db=lmdb)
     size_t rocksdbBlockCacheMb = 1024;      // RocksDB shared block cache (MiB); 0 = built-in default
     size_t rocksdbMemtableMb = 256;         // RocksDB write_buffer_size (MiB); 0 = built-in default
+    // backward sync: a node whose storage starts above its floor (block 0 for a full node) fetches
+    // the older blocks from its neighbours (docs/specs/2026-10-17-backward-sync-design.md)
+    bool backfill = true;                   // backfill=on|off
+    size_t backfillBatch = 100;             // blocks per request, 1..1000
+    size_t backfillRate = 1000;             // blocks requested per second, 0 = unlimited
+    size_t backfillStorePerTurn = 50;       // blocks verified and stored per processor-thread turn, 1..1000
 };
 
 // [snapshot]: snapshots served by this node to its p2p neighbours and fetched from them at a first
@@ -389,6 +395,8 @@ private:
 public:
     // the [snapshot] section, defaults for missing keys, a warning and the default for a bad value
     static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
+    // the backfill keys of a [storage] section (backfill, backfill_batch, backfill_rate)
+    static void readBackfillSettings(const boost::property_tree::ptree& storage, StorageData& data);
 private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);

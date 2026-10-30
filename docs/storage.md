@@ -35,6 +35,10 @@ official node.
 | `write_batch_size` | `100` | Blocks written to the database in one write. |
 | `rocksdb_block_cache_mb` | `1024` | RocksDB block cache in MiB (`0` = RocksDB's default). rocksdb only. |
 | `rocksdb_memtable_mb` | `256` | RocksDB write buffer in MiB (`0` = RocksDB's default). rocksdb only. |
+| `backfill` | `on` | Backward sync: a node whose oldest stored block is above its floor fetches the older blocks from its neighbours (see [Backward sync](#backward-sync-backfill)). `off` never does. |
+| `backfill_batch` | `100` | Blocks per request, `1` to `1000`. |
+| `backfill_rate` | `1000` | Blocks requested per second over all peers (`0` = no limit). |
+| `backfill_store_per_turn` | `50` | Blocks checked and stored per turn of the thread that also runs consensus, `1` to `1000`; the rest waits for the next turn, 100 ms later. |
 
 ### Choosing a backend
 
@@ -50,8 +54,9 @@ find its files and would sync from block 0: convert back to berkeleydb before ru
 ### Full and pruned
 
 Going from full to pruned keeps the database: set `prune_keep_blocks` and the old blocks are
-removed at the next checkpoints. Going from pruned to full is not possible, the removed blocks are
-gone: start over from an empty `db/`.
+removed at the next checkpoints. Going from pruned to full keeps it too: set `prune_keep_blocks=0`
+and the node fetches the removed blocks from its neighbours in the background (backward sync,
+below). The Docker image still refuses the switch for now.
 
 The package's `config.pruned.ini` has this section:
 
@@ -62,6 +67,34 @@ checkpoint_keep=2
 prune_keep_blocks=1000
 block_db=lmdb
 ```
+
+### Backward sync (backfill)
+
+A full node whose oldest stored block is above block 0 (it started from a snapshot, or was switched
+from pruned to full) fetches the blocks below it from its neighbours, with the same block requests
+as a forward sync, newest first, down to block 0. Each block must hash to the previous hash of the
+block above it and carry valid signatures of its own confidants; it is stored, never applied to
+the wallets (the state comes from the snapshot), and the API serves it at once: block queries,
+transaction lookups and wallet histories grow downwards while the node runs, with nothing to
+restart.
+
+- **By default a full node started from a snapshot fetches the whole history to disk.** On mainnet
+  that is about 186 million blocks: about two days at the default `backfill_rate=1000` (longer if
+  the peers pace the requests), and the disk of a full node, about 400 GB with lmdb or berkeleydb,
+  about 130 GB with rocksdb. Set `backfill=off` to keep only the blocks of the snapshot.
+- Requests go out only while the node is in sync (not syncing forward, not in a bootstrap round,
+  not fetching a snapshot); a trusted node keeps fetching, at most `backfill_store_per_turn` blocks
+  per turn of the thread that also runs consensus.
+- Up to 4 requests are in flight and up to 8 × `backfill_batch` blocks wait in memory to be stored
+  in order. A peer that sends a block that does not verify, or does not answer, is left out for an
+  hour.
+- A pruned node fetches only down to the bottom of the window it keeps (`checkpoint_every +
+  prune_keep_blocks` below its head at start), which a snapshot usually holds already.
+- Once block 1 is stored, the node knows the chain's identifier and, as a node synced from block
+  0, no longer accepts neighbours that announce another chain.
+- The log shows `BACKFILL: full node with blocks N..M: fetching 0..N-1`, a line every 100,000
+  blocks, every peer left out, and at the end `BACKFILL: full history stored`; the status line
+  gets `, oldest stored = K`. A restart resumes below the oldest stored block.
 
 ## Start-up check
 

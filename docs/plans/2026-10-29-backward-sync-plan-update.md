@@ -102,3 +102,40 @@ RocksDB conversion at the first start. File:line references below are on af50a7c
   once, which can name a wrong key or write a wrong value. This exists on master for the forward
   index; the backfill writes more often. A one-word fix (`static thread_local`) belongs in its own
   pull request before step 3.
+
+## Step 3 (`cs::BackwardSync`, Node wiring), with BS-F
+
+Checked against master af50a7cd and the step-2 branch after the review of #123.
+
+- **`BlockVerifier` exists** (`csnode/blockverifier.hpp`, from the snapshot importer): its
+  `verifySignatures` and `verifyConfirmations` are the plan's checks 3 and the one-block-late
+  confirmations check, with the counts checked before `checkGroupSignature`. `BackwardSync` uses
+  them; the reasons logged are `sequence`, `hash`, `signatures: ...`.
+- **Hooks instead of `BlockChain&`**, as `SnapshotFetcher` does: anchor, store, flush, floor, send,
+  clock and an optional log sink. The unit tests drive a fake chain through them.
+- **Batches are kept per peer** (one in flight per peer), which is also what
+  `hasRequestTo` needs; ranges refused or timed out are asked for again first, highest first.
+  Requests stop eight batches below the next block to store, so the buffer bound holds by
+  construction.
+- **Node references** (`csnode/src/node.cpp`, CRLF, af50a7cd): the chain opens in
+  `initRunning()` (also at the end of the bootstrap mode, `finishBootstrap()`), which now starts
+  the backfill; `bootstrapping_` goes to the `Context`; `getBlockReply` 2341-2388,
+  `getSyncroMessage` 2157-2166, `sendBlockRequest` 2705-2713, `stop` 763-791, `destroy` 793-814,
+  the status line 4562.
+- **Configuration.** `StorageData` has no comparison in `operator==(Config, Config)`: storage keys
+  are not reloaded while the node runs, the backfill keys neither. `Config::readBackfillSettings`
+  parses them (and is what the test calls).
+- **BS-F floor.** `getLoadedVersion()` names the `qs/` directory, and the checkpoint saved at a stop
+  is `qs/0`: it is not the block `C` of the p2p plan's formula. The floor is
+  `max(pruneTarget(), head at start − (checkpoint_every + prune_keep_blocks))`, which is at least
+  the formula's value and never below what pruning has scheduled (the review's L3).
+- **Flush at the end.** `Node::destroy()` calls `flushBackfill()` before `BlockChain::close()` when
+  the backfill stored anything.
+- **Scenarios.** With step 3 three existing robustness rows backfill: `storage-switch` (n6, an
+  initial confidant, pruned to full on LMDB: the plan's `backfill-trusted`),
+  `snapshot-join-rocksdb-full` (a full RocksDB joiner from an imported snapshot) and
+  `snapshot-p2p-join-full` (a full joiner from a snapshot fetched over p2p). `run.sh` now checks, for
+  each: backfill started, `full history stored`, no block refused, `oldest stored = 0` in the last
+  status line, and the same blocks as n1 (every 100th, `blockhashes.py` over the API, which is
+  opened on n1 and on that node). The plan's step 5 keeps the dedicated rows (tamper, crash, order
+  35, mixed) and the history comparison.

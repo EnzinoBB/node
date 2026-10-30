@@ -409,6 +409,15 @@ jobs:
           - name: storage-switch
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=2300 TARGET_SEQ=3300
+          # the same with transfers all along: the consensus while the trusted n6 backfills ~1,700
+          # blocks, against as long a window after it (backward sync, BACKFILL_MEASURE in run.sh);
+          # -unbounded (reported, not judged): no rate limit, batches of 1000, every buffered block in one turn
+          - name: backfill-trusted-load
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=3300 TARGET_SEQ=4300 LOAD_SECONDS=3000 BACKFILL_MEASURE=1
+          - name: backfill-trusted-load-unbounded
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=3300 TARGET_SEQ=4300 LOAD_SECONDS=3000 BACKFILL_MEASURE=report BACKFILL_RATE=0 BACKFILL_BATCH=1000 BACKFILL_PER_TURN=1000
           - name: db-convert
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 TARGET_SEQ=2500
