@@ -51,9 +51,11 @@ install -m 644 "${hosts:-$here/mainnet/known_hosts.txt}" "$dir/known_hosts.txt"
 if [ "$os" = windows ]; then
     install -m 644 "$here/setup/setup.bat" "$here/setup/setup.ps1" "$dir/"
     setup=setup.bat
+    setup_files="setup.bat, setup.ps1"
 else
     install -m 755 "$here/setup/setup.sh" "$dir/"
     setup=./setup.sh
+    setup_files=setup.sh
 fi
 
 # the node accepts an executor only within [executor_commit_min, executor_commit_max], and the
@@ -114,8 +116,19 @@ Changing the block database (db_backend)
   CREDITS_CONVERT_DB=yes. Every [storage] setting and the conversion in detail: https://github.com/EnzinoBB/node/blob/master/docs/storage.md
 
 First time: cd csnode && $setup
-  asks a few questions (pruned or full, database, snapshot, sharing; Enter keeps each default),
-  writes config.ini (the previous one is kept as config.ini.bak-<date>) and starts the node.
+  asks a few questions (pruned or full, database, snapshot, sharing, contract executor; Enter keeps
+  each default), writes config.ini (the previous one is kept as config.ini.bak-<date>) and starts
+  the node.
+
+Upgrading an existing folder (an official one too): stop the node, copy $exe, contract-executor.jar,
+  sc-api-support.jar and $setup_files from this package into it, then run $setup there. Copying only
+  $exe keeps the old executor. The node starts an executor only if its build is within
+  executor_commit_min..executor_commit_max of config.ini: with the official config.ini (1518..1518)
+  it stops the community executor (build $commits) and runs no smart contract. The set-up shows the
+  build in the folder, asks whether to run the community executor or the official one (it can
+  download either: the community one from https://github.com/EnzinoBB/contract-executor/releases,
+  the official one from the CREDITSCOM release), keeps the replaced jars aside and sets the range in
+  config.ini. Both executors give the same contract results: either is compatible with the network.
 
 Start: cd csnode && $start                                  (full storage, as the official node)
   or:  cd csnode && $start --config-file config.pruned.ini     (pruned storage)

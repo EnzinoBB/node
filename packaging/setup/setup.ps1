@@ -1,5 +1,6 @@
-# Guided set-up of the node in this folder (Windows): the same questions and the same config.ini as
-# setup.sh. Started by setup.bat; "setup.bat --defaults" takes every default without asking.
+# Guided set-up of the node in this folder (Windows): the same questions, the same config.ini and the
+# same contract executor choice as setup.sh. Started by setup.bat; "setup.bat --defaults" takes every
+# default without asking.
 param([switch]$Defaults)
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +48,90 @@ function Current([string]$Section, [string]$Key) {
         if ($in -and $l -match "^\s*$Key\s*=\s*(.*?)\s*$") { $value = $Matches[1] }
     }
     return $value
+}
+
+# --- contract executor ---------------------------------------------------------------------------
+# The node runs smart contracts with contract-executor.jar (it loads sc-api-support.jar from the same
+# folder) and starts it only if the build the jar reports (its git commit count) is within
+# [executor_commit_min, executor_commit_max] of [api]; otherwise it stops the executor and runs no
+# contract. The official release is build 1518; community builds add fixes on top and count higher.
+$officialBuild = 1518
+$officialUrl = 'https://github.com/CREDITSCOM/node/releases/download/mainnet-4.2.532.0/Ubuntu20_Mainnet-4.2.532.0.tar.gz'
+$officialShaExecutor = '592510d1586818348c65bea9b443e7f58aa6947113e43aa8906af8426aeef028'
+$officialShaSupport = '395d9a108a66fe1d92c1d2096a9d11f4c7662b51b47af792db0ff4cc91df9807'
+$communityUrl = 'https://github.com/EnzinoBB/contract-executor/releases/latest/download'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+# the build (git commit count) an executor jar reports, 0 when it cannot be read
+function Jar-Build([string]$Jar) {
+    if (-not (Test-Path -LiteralPath $Jar)) { return 0 }
+    try {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path -LiteralPath $Jar).Path)
+        try {
+            $entry = $zip.GetEntry('git.properties')
+            if ($null -eq $entry) { return 0 }
+            $reader = New-Object System.IO.StreamReader($entry.Open())
+            try { $text = $reader.ReadToEnd() } finally { $reader.Dispose() }
+        } finally { $zip.Dispose() }
+        if ($text -match '(?m)^git\.total\.commit\.count=(\d+)') { return [int]$Matches[1] }
+    } catch { }
+    return 0
+}
+
+function Describe-Build([int]$Build) {
+    if ($Build -eq 0) { return 'none or unreadable' }
+    if ($Build -eq $officialBuild) { return "build $Build (official)" }
+    if ($Build -gt $officialBuild) { return "build $Build (community)" }
+    return "build $Build"
+}
+
+function Sha256([string]$Path) { return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLower() }
+
+# downloads the jars of the chosen executor into $Dir; prints the reason and returns $false when it cannot
+function Download-Executor([string]$Kind, [string]$Dir) {
+    if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue)) { Write-Host '   curl.exe is not available.'; return $false }
+    if ($Kind -eq 'community') {
+        foreach ($f in @('contract-executor.jar', 'sc-api-support.jar', 'SHA256SUMS')) {
+            & curl.exe -fsSL -o (Join-Path $Dir $f) "$communityUrl/$f"
+            if ($LASTEXITCODE -ne 0) { Write-Host '   The download from GitHub failed.'; return $false }
+        }
+        $sums = Get-Content -LiteralPath (Join-Path $Dir 'SHA256SUMS')
+        foreach ($f in @('contract-executor.jar', 'sc-api-support.jar')) {
+            $sha = Sha256 (Join-Path $Dir $f)
+            if (-not ($sums | Where-Object { $_ -match "^$sha\s+\*?$([regex]::Escape($f))$" })) {
+                Write-Host "   $f does not match the SHA256SUMS of the release."; return $false
+            }
+        }
+    } else {
+        Write-Host '   The jars come from the official release package (about 350 MB to download, only they are kept).'
+        $archive = Join-Path $Dir 'official.tar.gz'
+        & curl.exe -fsSL -o $archive $officialUrl
+        if ($LASTEXITCODE -ne 0) { Write-Host '   The download of the official release failed.'; return $false }
+        & tar.exe -xzf $archive -C $Dir csnode/contract-executor.jar csnode/sc-api-support.jar
+        if ($LASTEXITCODE -ne 0) { Write-Host '   The official release could not be extracted.'; return $false }
+        Remove-Item -LiteralPath $archive
+        $extracted = Join-Path $Dir 'csnode'
+        Move-Item -LiteralPath (Join-Path $extracted 'contract-executor.jar'), (Join-Path $extracted 'sc-api-support.jar') -Destination $Dir
+        if ((Sha256 (Join-Path $Dir 'contract-executor.jar')) -ne $officialShaExecutor -or
+            (Sha256 (Join-Path $Dir 'sc-api-support.jar')) -ne $officialShaSupport) {
+            Write-Host '   The jars of the official release do not have the expected checksums.'; return $false
+        }
+    }
+    return $true
+}
+
+# key=value in [api] of the lines, added at the end of the section when missing
+function Set-ApiKey([System.Collections.Generic.List[string]]$Lines, [string]$Key, [string]$Value) {
+    $in = $false; $end = -1
+    for ($i = 0; $i -lt $Lines.Count; $i++) {
+        if ($Lines[$i] -match '^\s*\[') {
+            if ($in -and $end -lt 0) { $end = $i }
+            $in = ($Lines[$i] -match '^\s*\[api\]')
+            continue
+        }
+        if ($in -and $Lines[$i] -match "^\s*$Key\s*=") { $Lines[$i] = "$Key=$Value"; return }
+    }
+    if ($in) { $Lines.Add("$Key=$Value") } elseif ($end -ge 0) { $Lines.Insert($end, "$Key=$Value") }
 }
 
 $version = if (Test-Path 'VERSION') { (Get-Content 'VERSION' -Raw).Trim() } else { 'unknown version' }
@@ -132,8 +217,47 @@ Write-Host '   It uses at most 2 MB/s of upload, only while the node is synced, 
 $serve = Ask '   Share snapshots with other nodes? (yes/no)' $serveDefault @('yes', 'no')
 Write-Host ''
 
-# 5. start now
-$start = Ask '5. Start the node when the set-up is done? (yes/no)' 'yes' @('yes', 'no')
+# 5. the contract executor (when config.ini runs one)
+$executorChoice = 'none'
+$executorAction = 'keep'
+if (Current 'api' 'executor_command') {
+    $haveBuild = Jar-Build 'contract-executor.jar'
+    $supportBuild = Jar-Build 'sc-api-support.jar'
+    $curMin = Current 'api' 'executor_commit_min'
+    $curMax = Current 'api' 'executor_commit_max'
+    Write-Host '5. Contract executor'
+    Write-Host '   The node runs smart contracts with contract-executor.jar and sc-api-support.jar, and starts'
+    Write-Host '   the executor only if its build is within executor_commit_min..executor_commit_max of config.ini.'
+    Write-Host ("   In this folder: $(Describe-Build $haveBuild); config.ini accepts " + $(if ($curMin) { $curMin } else { '1506' }) + '..' + $(if ($curMax) { $curMax } else { 'any' }) + '.')
+    if ($haveBuild -and $supportBuild -and $haveBuild -ne $supportBuild) {
+        Write-Host "   sc-api-support.jar is $(Describe-Build $supportBuild): the two jars come from different packages."
+    }
+    Write-Host '   community: the latest community build, the official one with fixes (code of a contract that never'
+    Write-Host '              returns is stopped, tokens of every standard are reported to the API). Contracts give'
+    Write-Host '              the same results as with the official one.'
+    Write-Host "   official:  build $officialBuild of the official release."
+    # unattended (--defaults), nothing is downloaded: the jars in the folder are kept
+    $downloadDefault = if ($Defaults) { 'no' } else { 'yes' }
+    $executorDefault = if ($haveBuild -gt $officialBuild) { 'community' } else { 'official' }
+    $executorChoice = Ask '   Which executor? (community/official)' $executorDefault @('community', 'official')
+    if ($executorChoice -eq 'community' -and $haveBuild -le $officialBuild) {
+        Write-Host '   The jars in this folder are not a community build (copying only node.exe keeps the old ones).'
+        $a = Ask '   Download the latest community executor from GitHub now (about 25 MB)? (yes/no)' $downloadDefault @('yes', 'no')
+        $executorAction = if ($a -eq 'yes') { 'download' } else { 'manual' }
+    } elseif ($executorChoice -eq 'official' -and $haveBuild -ne $officialBuild) {
+        if ((Test-Path 'contract-executor.jar.official') -and (Test-Path 'sc-api-support.jar.official')) {
+            Write-Host '   The official jars set aside by an earlier set-up are here: they are put back.'
+            $executorAction = 'restore'
+        } else {
+            $a = Ask '   Download the official executor now (from the official release, about 350 MB)? (yes/no)' $downloadDefault @('yes', 'no')
+            $executorAction = if ($a -eq 'yes') { 'download' } else { 'manual' }
+        }
+    }
+    Write-Host ''
+}
+
+# 6. start now
+$start = Ask '6. Start the node when the set-up is done? (yes/no)' 'yes' @('yes', 'no')
 Write-Host ''
 
 Write-Host 'Summary'
@@ -146,6 +270,14 @@ switch ($first) {
     'sync'    { Write-Host '  first start:  sync from block 0' }
 }
 Write-Host "  share:        $serve"
+if ($executorChoice -ne 'none') {
+    switch ($executorAction) {
+        'keep'     { Write-Host "  executor:     $executorChoice, the jars in this folder are kept" }
+        'download' { Write-Host "  executor:     $executorChoice, downloaded now (the jars in this folder are set aside)" }
+        'restore'  { Write-Host '  executor:     official, the jars set aside before are put back' }
+        'manual'   { Write-Host "  executor:     $executorChoice, to copy by hand (see below)" }
+    }
+}
 Write-Host "  start now:    $start"
 if (-not $Defaults) {
     if ((Ask 'Write config.ini? (yes/no)' 'yes' @('yes', 'no')) -ne 'yes') { Write-Host 'Nothing changed.'; exit 0 }
@@ -180,9 +312,70 @@ if ($storage -eq 'pruned') {
     $out.Add('checkpoint_keep=2')
     $out.Add('prune_keep_blocks=1000')
 }
+
+# the executor: put the chosen jars in place, then make config.ini accept their build
+$executorNotes = New-Object System.Collections.Generic.List[string]
+if ($executorChoice -ne 'none') {
+    # keeps the jars in this folder aside: as .official when they are the official ones (a later
+    # set-up puts them back without a download), as .bak-<date> otherwise
+    function Set-Aside {
+        $suffix = if ((Jar-Build 'contract-executor.jar') -eq $officialBuild) { '.official' } else { ".bak-$stamp" }
+        foreach ($f in @('contract-executor.jar', 'sc-api-support.jar')) {
+            if (Test-Path $f) { Move-Item -LiteralPath $f -Destination "$f$suffix" -Force }
+        }
+        $executorNotes.Add("The previous executor jars are kept as contract-executor.jar$suffix and sc-api-support.jar$suffix.")
+    }
+    if ($executorAction -eq 'download') {
+        Write-Host ''
+        Write-Host "Downloading the $executorChoice executor..."
+        $dl = Join-Path ([System.IO.Path]::GetTempPath()) ("credits-executor-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $dl | Out-Null
+        if (Download-Executor $executorChoice $dl) {
+            Set-Aside
+            Move-Item -LiteralPath (Join-Path $dl 'contract-executor.jar'), (Join-Path $dl 'sc-api-support.jar') -Destination $PSScriptRoot
+            $executorNotes.Add("contract-executor.jar and sc-api-support.jar replaced: $(Describe-Build (Jar-Build 'contract-executor.jar')).")
+        } else {
+            $executorAction = 'manual'
+            $executorNotes.Add('The jars in this folder are kept.')
+        }
+        Remove-Item -LiteralPath $dl -Recurse -Force
+    } elseif ($executorAction -eq 'restore') {
+        Set-Aside
+        Move-Item -LiteralPath 'contract-executor.jar.official' -Destination 'contract-executor.jar'
+        Move-Item -LiteralPath 'sc-api-support.jar.official' -Destination 'sc-api-support.jar'
+        $executorNotes.Add('The official executor jars are back.')
+    }
+    $build = Jar-Build 'contract-executor.jar'
+    if ($build) {
+        $min = Current 'api' 'executor_commit_min'
+        $max = Current 'api' 'executor_commit_max'
+        if ($min -and $build -lt [int]$min) { Set-ApiKey $out 'executor_commit_min' "$build"; $executorNotes.Add("config.ini: executor_commit_min=$build") }
+        if ($max -and $max -ne '-1' -and $build -gt [int]$max) {
+            Set-ApiKey $out 'executor_commit_max' "$build"
+            $executorNotes.Add("config.ini: executor_commit_max=$build (it was ${max}: the node would not start this executor)")
+        }
+    }
+    if ($executorAction -eq 'manual') {
+        $executorNotes.Add('')
+        $executorNotes.Add("To use the $executorChoice executor, with the node stopped:")
+        if ($executorChoice -eq 'community') {
+            $executorNotes.Add('  copy contract-executor.jar and sc-api-support.jar, both, from the csnode folder of the community')
+            $executorNotes.Add("  package (or from $communityUrl/...) into $PSScriptRoot,")
+        } else {
+            $executorNotes.Add('  copy contract-executor.jar and sc-api-support.jar, both, from the official release')
+            $executorNotes.Add("  ($officialUrl) into $PSScriptRoot,")
+        }
+        $executorNotes.Add('  then run this set-up again: it makes config.ini accept their build (executor_commit_min/max).')
+    }
+    $executorNotes.Add('')
+    $executorNotes.Add('Updating this folder later: a new node.exe is not enough when its package brings a new executor.')
+    $executorNotes.Add('Copy node.exe, contract-executor.jar and sc-api-support.jar together, then run the set-up again.')
+}
+
 # ASCII without a byte-order mark, as the package ships it
 [System.IO.File]::WriteAllLines((Join-Path $PSScriptRoot $config), $out, (New-Object System.Text.ASCIIEncoding))
 Write-Host "config.ini written; the previous one is $backup"
+foreach ($n in $executorNotes) { Write-Host $n }
 
 if ($first -eq 'github') {
     Write-Host ''

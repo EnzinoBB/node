@@ -104,8 +104,8 @@ jobs:
 
       - name: First set-up (pruned, lmdb, snapshot from GitHub, share, do not start)
         run: |
-          # storage, database, first start, share, start, write
-          bash setup-run.sh csnode '\n\n\n\nno\n\n' 2>&1 | tee setup1.txt | grep -av '^download-snapshot: .*%' | tail -40
+          # storage, database, first start, share, executor, start, write
+          bash setup-run.sh csnode '\n\n\n\n\nno\n\n' 2>&1 | tee setup1.txt | grep -av '^download-snapshot: .*%' | tail -40
           python check-config.py csnode/config.ini snapshot "serve=on fetch=off" \
             storage "db_backend=lmdb checkpoint_every=100000 checkpoint_keep=2 prune_keep_blocks=1000"
           ls csnode/config.ini.bak-* && test "$(ls csnode/config.ini.bak-* | wc -l)" -eq 1
@@ -141,8 +141,8 @@ jobs:
       - name: Second set-up (Enter everywhere, do not start) changes nothing
         run: |
           sleep 1
-          # storage, database, share, start, write (no first-start question: the database exists)
-          bash setup-run.sh csnode '\n\n\nno\n\n' 2>&1 | tee setup2.txt | tail -20
+          # storage, database, share, executor, start, write (no first-start question: the database exists)
+          bash setup-run.sh csnode '\n\n\n\nno\n\n' 2>&1 | tee setup2.txt | tail -20
           grep -a "already holds a lmdb database" setup2.txt
           if grep -a "How should the node get the chain" setup2.txt; then echo "asked about the first start"; exit 1; fi
           python check-config.py csnode/config.ini snapshot "serve=on fetch=off" \
@@ -152,8 +152,8 @@ jobs:
 
       - name: Full berkeleydb set-up with a wrong answer first
         run: |
-          # storage (wrong, then full), database, share (no), start, write
-          bash setup-run.sh csnode-clean 'maybe\nfull\n\nno\nno\n\n' 2>&1 | tee setup3.txt | tail -20
+          # storage (wrong, then full), database, share (no), executor, start, write
+          bash setup-run.sh csnode-clean 'maybe\nfull\n\nno\n\nno\n\n' 2>&1 | tee setup3.txt | tail -20
           grep -a "Please answer one of" setup3.txt
           python check-config.py csnode-clean/config.ini snapshot "serve=off fetch=off" storage "db_backend=berkeleydb"
           # the rest of config.ini is the package's
@@ -171,6 +171,24 @@ jobs:
           assert new == old, "the rest of config.ini changed"
           print("the rest of config.ini is unchanged")
           EOF
+
+      - name: Executor of a folder upgraded by copying the node only
+        run: |
+          build=$(python -c "import re, zipfile; print(re.search(r'git.total.commit.count=(\d+)', zipfile.ZipFile('csnode-clean/contract-executor.jar').read('git.properties').decode()).group(1))")
+          echo "community executor in the package: build $build"
+          # the official config.ini kept: the node would refuse the community executor (max 1518)
+          cp -a csnode-clean csnode-exec && rm -f csnode-exec/config.ini.bak-*
+          sed -i.orig 's/^executor_commit_max=.*/executor_commit_max=1518/' csnode-exec/config.ini && rm csnode-exec/config.ini.orig
+          # storage, database, first start (sync), share, executor (Enter: community), start, write
+          bash setup-run.sh csnode-exec 'pruned\nlmdb\nsync\nno\n\nno\n\n' 2>&1 | tee setup4.txt | tail -12
+          grep -a "In this folder: build $build (community); config.ini accepts 1518..1518" setup4.txt
+          grep -q "^executor_commit_max=$build" csnode-exec/config.ini && echo "executor_commit_max=$build"
+          # no executor jars at all: the community one is downloaded from GitHub and checked
+          rm csnode-exec/contract-executor.jar csnode-exec/sc-api-support.jar
+          # storage, database, first start (sync), share, executor (community), download (Enter: yes), start, write
+          bash setup-run.sh csnode-exec 'pruned\nlmdb\nsync\nno\ncommunity\n\nno\n\n' 2>&1 | tee setup5.txt | tail -12
+          grep -a "contract-executor.jar and sc-api-support.jar replaced: build [0-9]* (community)" setup5.txt
+          test -f csnode-exec/contract-executor.jar && test -f csnode-exec/sc-api-support.jar
 
       - name: Collect
         if: always()
