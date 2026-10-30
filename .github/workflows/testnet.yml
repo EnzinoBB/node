@@ -40,6 +40,12 @@ on:
       contracts:
         description: 'Run a contract executor per node and call a contract across the restart test (0 = off)'
         default: '0'
+      tokens:
+        description: 'With contracts: deploy a v1 and a v0 token and use them through the API of tokens_via, checking balances, states and the token API (ci/testnet/tokens.py; 0 = off)'
+        default: '0'
+      tokens_via:
+        description: 'With tokens: the node whose API the token calls go through (e.g. the restarted one; default 1)'
+        default: '1'
       executor_ref:
         description: 'With contracts: branch or commit of EnzinoBB/contract-executor built and run by the even nodes, the odd nodes keep the release executor (empty = all release)'
         default: ''
@@ -270,6 +276,9 @@ jobs:
           DELEGATE: ${{ inputs.delegate || '0' }}
           MIN_STAKE: ${{ inputs.min_stake || '0' }}
           CONTRACTS: ${{ inputs.contracts || '0' }}
+          TOKENS: ${{ inputs.tokens || '0' }}
+          TOKENS_VIA: ${{ inputs.tokens_via || '1' }}
+          TOKENS_STRICT_API: ${{ inputs.tokens || '0' }}
           CONTRACT_LOAD: ${{ inputs.contract_load || '' }}
           RESTART_NODES: ${{ inputs.restart_nodes || '' }}
           FUND: '1'
