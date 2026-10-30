@@ -297,6 +297,7 @@ void PoolSynchronizer::onPingReceived(cs::Sequence sequence, const cs::PublicKey
 
 void PoolSynchronizer::onNeighbourRemoved(const cs::PublicKey& publicKey) {
     neighbours_.erase(publicKey);
+    pacing_.forget(publicKey);
 }
 
 //
@@ -460,8 +461,14 @@ void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessa
         cslog() << "SYNC: " << cs::Utils::byteStreamToHex(sender)
                 << " keeps an anti-duplicate log of requests (special order 35): requests to it are paced";
     }
-    pacing_.onSyncroMessage(sender, msg, cs::Utils::currentTimestamp());
+    const auto now = cs::Utils::currentTimestamp();
+    // an answer to a forward request in flight; any other (the backfill's) only marks the peer active
+    const bool forward = pacing_.inFlight(sender, now);
+    pacing_.onSyncroMessage(sender, msg, now);
     csdebug() << __func__;
+    if (!forward) {
+        return;
+    }
     if (msg == SyncroMessage::AwaitAnswer) {
         changeSynchroLog(sender, msg);
     }
@@ -501,7 +508,9 @@ void PoolSynchronizer::updateSynchroLog() {
     while (it != synchroLog_.end()) {
         auto msg = std::get<1>(it->second);
         auto timeEvent = std::get<2>(it->second);
-        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + 2000))) {
+        // an AwaitAnswer whose reply was lost: asked again after 30 s
+        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + 2000))
+            || (msg == SyncroMessage::AwaitAnswer && timeNow > timeEvent + SyncroPacing::kInFlightMs)) {
             it = synchroLog_.erase(it);
         }
         else {
