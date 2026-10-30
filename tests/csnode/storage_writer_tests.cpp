@@ -13,105 +13,13 @@
 #include <csdb/pool.hpp>
 #include <csdb/storage.hpp>
 
+#include "memorydb.hpp"
+
 // The asynchronous block writer of csdb::Storage (used with RocksDB), on an in-memory database whose
 // put_batch can be held or made to fail.
 namespace {
 
 using namespace std::chrono_literals;
-
-class MemoryDb : public csdb::Database {
-public:
-    bool is_open() const override { return true; }
-
-    bool put(const cs::Bytes& key, uint32_t seq, const cs::Bytes& value) override {
-        std::lock_guard<std::mutex> l(m_);
-        byHash_[key] = {seq, value};
-        bySeq_[seq] = value;
-        return true;
-    }
-    bool get(const cs::Bytes& key, cs::Bytes* value = nullptr) override {
-        std::lock_guard<std::mutex> l(m_);
-        auto it = byHash_.find(key);
-        if (it == byHash_.end()) return false;
-        if (value) *value = it->second.second;
-        return true;
-    }
-    bool get(const uint32_t seq, cs::Bytes* value = nullptr) override {
-        std::lock_guard<std::mutex> l(m_);
-        auto it = bySeq_.find(seq);
-        if (it == bySeq_.end()) return false;
-        if (value) *value = it->second;
-        return true;
-    }
-    bool remove(const cs::Bytes& key) override {
-        std::lock_guard<std::mutex> l(m_);
-        auto it = byHash_.find(key);
-        if (it == byHash_.end()) return false;
-        bySeq_.erase(it->second.first);
-        byHash_.erase(it);
-        return true;
-    }
-    bool seq_no(const cs::Bytes& key, uint32_t* value) override {
-        std::lock_guard<std::mutex> l(m_);
-        auto it = byHash_.find(key);
-        if (it == byHash_.end()) return false;
-        if (value) *value = it->second.first;
-        return true;
-    }
-    bool write_batch(const ItemList&) override { return true; }
-    bool updateContractData(const cs::Bytes&, const cs::Bytes&) override { return true; }
-    bool getContractData(const cs::Bytes&, cs::Bytes&) override { return false; }
-
-    // put_batch waits while held, fails while failing; calls are counted
-    bool put_batch(const std::vector<PendingWrite>& items) override {
-        std::unique_lock<std::mutex> l(gate_);
-        ++calls_;
-        gateCond_.notify_all();
-        gateCond_.wait(l, [this] { return permits_ > 0 || !held_; });
-        if (held_) --permits_;
-        if (failing_) return false;
-        l.unlock();
-        return Database::put_batch(items);
-    }
-
-    void hold() { std::lock_guard<std::mutex> l(gate_); held_ = true; permits_ = 0; }
-    void permit(int n) { std::lock_guard<std::mutex> l(gate_); permits_ += n; gateCond_.notify_all(); }
-    void release() { std::lock_guard<std::mutex> l(gate_); held_ = false; gateCond_.notify_all(); }
-    void fail(bool on) { std::lock_guard<std::mutex> l(gate_); failing_ = on; }
-    bool waitCalls(int n, std::chrono::milliseconds limit = 5s) {
-        std::unique_lock<std::mutex> l(gate_);
-        return gateCond_.wait_for(l, limit, [&] { return calls_ >= n; });
-    }
-
-    size_t stored() { std::lock_guard<std::mutex> l(m_); return byHash_.size(); }
-    bool has(const csdb::PoolHash& h) { return get(h.to_binary()); }
-
-    class EmptyIterator : public Iterator {
-    public:
-        bool is_valid() const override { return false; }
-        void seek_to_first() override {}
-        void seek_to_last() override {}
-        void seek(const cs::Bytes&) override {}
-        void seek(const uint32_t) override {}
-        void next() override {}
-        void prev() override {}
-        uint32_t key() const override { return 0; }
-        cs::Bytes value() const override { return {}; }
-    };
-    IteratorPtr new_iterator() override { return std::make_shared<EmptyIterator>(); }
-
-private:
-    std::mutex m_;
-    std::map<cs::Bytes, std::pair<uint32_t, cs::Bytes>> byHash_;
-    std::map<uint32_t, cs::Bytes> bySeq_;
-
-    std::mutex gate_;
-    std::condition_variable gateCond_;
-    bool held_ = false;
-    int permits_ = 0;
-    bool failing_ = false;
-    int calls_ = 0;
-};
 
 std::vector<csdb::Pool> chain(size_t count) {
     std::vector<csdb::Pool> pools;
