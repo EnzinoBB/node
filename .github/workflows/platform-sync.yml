@@ -109,11 +109,12 @@ jobs:
             package: '*-windows-x64.zip'
             node: ./node.exe
           - os: macos
-            runner: macos-14
+            runner: macos-15
             package: '*-macos-arm64.tar.gz'
             node: ./node
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
+    # macOS measured 7-8 min (snapshot restore and sync to the head); the other systems keep 90
+    timeout-minutes: ${{ matrix.os == 'macos' && 40 || 90 }}
     defaults:
       run:
         shell: bash
