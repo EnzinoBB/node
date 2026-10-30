@@ -49,6 +49,10 @@ fee is still charged. The reverse applies to v0 tokens. A wallet reads the types
 - `[api] tokens_cache=true` turns the cache on. It is off by default. The RelMonitor and
   RelWallet builds always have it on, as the official monitor and wallet nodes do. With the
   cache off, the token methods answer "This node doesn't provide such info".
+- **RelMonitor and RelWallet builds.** These are the official monitor and wallet configurations
+  (`-DMONITOR_NODE`, `-DWEB_WALLET_NODE`). The community CI neither builds nor tests them, and a
+  private network of RelWallet nodes did not get past its first round in our tests. Use a normal
+  build with `tokens_cache=true` instead: it serves the same token methods.
 - **What it records.** A token is recorded at its deploy. After each successful call, the node
   records:
   - the initiator, and every argument that is a wallet address, as holders of the token;
