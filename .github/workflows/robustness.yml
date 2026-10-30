@@ -424,6 +424,12 @@ jobs:
           - name: backfill-order35
             official: 'no'   # n6 exports the snapshot: an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 SYNCRO_ROUND=100 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # step 6: n4, a pruned BerkeleyDB node from block 0, switched to full: every block it pruned is
+          # written again into its deleted Recno record, fetched from the peers; all blocks compared
+          - name: backfill-berkeleydb
+            official: 'no'   # needs a feature of this fork on an even node
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb,rocksdb,berkeleydb STORAGE_SWITCH_AT=2300 STORAGE_SWITCH_NODE=4 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+            fixed: true
           # with node_alt_ref=official: the history comes from official nodes too (the even ones); the
           # joiner, even, runs this build (JOIN_COMMUNITY)
           - name: backfill-join-official
