@@ -44,6 +44,7 @@ lines under the new release.
 | #126 | api: after a quick start at the last stored block, contract calls through the API returned "Transaction in progress" and never their result; the node now marks its stored blocks as read when it runs |
 | #127 | ci: token tests: `ci/contracts/executor_harness.py` compares contract executors on token contracts without a node, and `TOKENS=1` runs `ci/testnet/tokens.py` (v1 and v0 tokens, balances and states on every node, the token API; `TOKENS_VIA` through another node) on the private network |
 | #128 | api: the token cache (`[api] tokens_cache=true`, any build) follows v1/v2 tokens (BigDecimal amounts, standards 3 and 4) and only successful calls. It reads balances from the contract for the wallets a call involves, refreshes them in the background at start, and is rebuilt from the chain when the checkpoint holds none. `approve()` without arguments no longer reads out of bounds. `TokensListGet` filters before paging, and the token lists sort without exceptions or invalid orderings. `TokenTransfersListGet` reports the signer as the sender. See [tokens.md](tokens.md) |
+| #131 | packaging: a guided set-up in every package (`setup.sh`, `setup.bat`): pruned or full, database, how the first start gets the chain, snapshot sharing, and the contract executor (community or official: it shows the build in the folder, can download either, checked, and sets `executor_commit_min/max` so that the node starts it; an upgrade by copying only the node binary keeps the old executor) |
 
 ## community.14 — 2026-10-27
 
