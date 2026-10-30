@@ -1908,7 +1908,11 @@ if [ -n "$BACKFILL_NODE" ]; then
         [ "$bf_mid_checked" = 1 ] || fail_bf "was never caught fetching to compare its histories midway"
         (cd "$HERE" && python3 compare_histories.py "$WORK" "$NODES" "$MASTER_PUB" "$(api_port 1)" "$(api_port "$b")") \
             | sed 's/^/backward sync: at the end: /' || fail_bf "holds other histories than n1"
-        ! grep -aq 'Inconsistent transaction index\|trxIndex: rebuilding' "$blog" || fail_bf "rebuilt or found an inconsistent transaction index"
+        # the index is rebuilt once at the first start from a snapshot (the stored blocks only); after
+        # the backfill started it is the online index, never the rebuild
+        ! grep -aq 'Inconsistent transaction index' "$blog" || fail_bf "found an inconsistent transaction index"
+        since=$(sed -n '/BACKFILL: full node with blocks/,$p' "$blog")
+        ! grep -aq 'trxIndex: rebuilding' <<<"$since" || fail_bf "rebuilt its transaction index after the backfill started"
     fi
     if [ -n "$BACKFILL_CRASH" ]; then
         [ "$bf_step" -eq "${#BF_STEPS[@]}" ] || fail_bf "went through $bf_step of the ${#BF_STEPS[@]} steps of BACKFILL_CRASH before it finished"
