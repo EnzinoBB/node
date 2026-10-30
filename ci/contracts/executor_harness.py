@@ -366,7 +366,7 @@ class Recorder:
 
 
 # what only the node's API reads, never contract execution: an executor may improve it
-API_ONLY = ("tokenStandard",)
+API_ONLY = ("tokenStandard", "stopped_when_the_client_left")
 
 
 def comparable(step):
