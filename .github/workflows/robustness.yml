@@ -286,9 +286,10 @@ jobs:
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300
-          # p2p packet headers announcing 2^40, 2^30 and 256 MiB + 1 bytes to every node of this build
-          # (the odd ones with node_alt_ref): each closes the connections at once (frame limit of the p2p
-          # fork), keeps running with its memory flat and stays in consensus
+          # p2p packet headers above the limits of the p2p fork (64 bytes before registration, 256 MiB
+          # after) and just below them, to every node of this build (the odd ones with node_alt_ref):
+          # each closes the oversized ones at once, holds almost no memory for the others, keeps running
+          # and stays in consensus
           - name: net-huge-frame
             env: HUGE_FRAME_AT=150
           # all at once, on a mixed-backend network

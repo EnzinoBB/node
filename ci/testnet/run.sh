@@ -73,9 +73,10 @@
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
 #        HUGE_FRAME_AT (default 0 = off): from that sequence huge_frame.py opens connections to the p2p
 #        TCP port of every node of this build (the odd ones when the even nodes run BIN_ALT, which may
-#        have no frame limit) and sends packet headers announcing 2^40, 2^30 and 256 MiB + 1 bytes: each
-#        node must close every connection at once, log the limit, keep running with its memory flat
-#        (Linux: at most +64 MiB) and stay in consensus
+#        have no frame limit) and sends packet headers above the limits (2^40 and 65 bytes before a
+#        registration, 2^40 and 256 MiB + 1 after one: closed at once, a limit line logged) and just
+#        below them without data (64 bytes, 256 MiB - 1: held until the 10 s idle timeout); each node
+#        must keep running with its memory flat (Linux: at most +64 MiB per step) and stay in consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -1037,22 +1038,33 @@ while :; do
     fi
     if [ "$HUGE_FRAME_AT" -gt 0 ] && [ "$huge_frame_done" -eq 0 ] && [ "$min" -ge "$HUGE_FRAME_AT" ]; then
         huge_frame_done=1
-        echo "huge frame: packet headers announcing 2^40, 2^30 and 256 MiB + 1 bytes to the p2p port of every node of this build, from sequence $min"
+        echo "huge frame: oversized and just-below-limit packet headers to the p2p port of every node of this build, from sequence $min"
         for i in $(seq 1 "$NODES"); do
             # the even nodes of BIN_ALT (the official node, another ref) may have no frame limit
             [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
             pid_arg=""
             [ "$OS_KIND" != linux ] || pid_arg="--pid ${PIDS[$i]}"
+            hf="python3 $HERE/huge_frame.py $(node_ip "$i") $((BASE_PORT + i)) --connections 4 $pid_arg"
             hf_status=0
-            python3 "$HERE/huge_frame.py" "$(node_ip "$i")" $((BASE_PORT + i)) --size $((1 << 40)) --size $((1 << 30)) \
-                --size $(( (256 << 20) + 1 )) --connections 4 $pid_arg > "$WORK/huge-frame-n$i.log" 2>&1 || hf_status=$?
+            {
+                # before registration: at most 64 bytes, closed at once
+                $hf --size $((1 << 40)) --size 65 || hf_status=$?
+                # after a registration: at most 256 MiB, closed at once
+                $hf --registered --size $((1 << 40)) --size $(( (256 << 20) + 1 )) || hf_status=$?
+                # just below the limits, no data sent: the node waits for the data (reading it in 1 MiB
+                # chunks, so it holds almost nothing) and closes on its 10 s idle timeout
+                $hf --expect hold --size 64 || hf_status=$?
+                $hf --registered --expect hold --size $(( (256 << 20) - 1 )) || hf_status=$?
+            } > "$WORK/huge-frame-n$i.log" 2>&1
             sed "s/^/huge frame: n$i: /" "$WORK/huge-frame-n$i.log"
-            [ "$hf_status" -eq 0 ] || { echo "FAIL: n$i did not close every connection announcing a huge frame, or its memory grew"; exit 1; }
+            [ "$hf_status" -eq 0 ] || { echo "FAIL: n$i did not treat the oversized or just-below-limit headers as expected, or its memory grew"; exit 1; }
             sleep 1
             kill -0 "${PIDS[$i]}" 2>/dev/null || { echo "FAIL: n$i stopped after the huge frame headers"; exit 1; }
-            grep -aq 'announces .* bytes, above the limit of 268435456' "$WORK/n$i"/*.log \
-                || { echo "FAIL: n$i logged no frame limit line"; exit 1; }
-            echo "huge frame: n$i: $(grep -ah 'announces .* bytes, above the limit' "$WORK/n$i"/*.log | awk 'NR == 1' | sed 's/.*ERROR [^]]*\] //')"
+            for lim in 64 268435456; do
+                grep -aq "announces .* bytes, above the limit of $lim:" "$WORK/n$i"/*.log \
+                    || { echo "FAIL: n$i logged no limit line for $lim bytes"; exit 1; }
+            done
+            grep -ah 'announces .* bytes, above the limit' "$WORK/n$i"/*.log | awk 'NR <= 2' | sed "s/.*ERROR [^]]*\] /huge frame: n$i: /"
         done
     fi
 

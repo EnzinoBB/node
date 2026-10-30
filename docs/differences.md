@@ -73,8 +73,8 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   requests of its p2p neighbours while it is synced with the network, within `serve_rate_kbps`
   (KB/s, all peers together; half for one peer), `serve_max_peers` peers within 30 s, and half of
   that while it is a confidant or the writer. It announces it in its p2p host data at start, with
-  its community version; community peers refresh that value from each datagram the node sends
-  them, so a restart with another `serve` value is seen within seconds (official peers keep the
+  its community version; community peers refresh that value from the node's answers to their
+  pings, so a restart with another `serve` value is seen within about a minute (official peers keep the
   value they first saw until the node leaves their routing table). Official nodes neither see nor
   answer these messages.
 - **A first start fetches a snapshot from the network.** A node whose `db/` holds no database,
@@ -184,14 +184,17 @@ consensus rules.
   region, an empty packet, or a pool whose lengths point past its data. Also fixed: a data race
   in `LockFreeChanger`.
 - **A size limit on p2p packets.** The node runs its own fork of the p2p library
-  ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the commit the official node uses). A
-  packet header may announce at most 256 MiB of data, far above any packet the node sends;
-  above that the connection is closed before anything is allocated, with an error line at most
-  once a minute per address (`Packet header from <address> announces <n> bytes, above the limit
-  of 268435456: connection dropped (...)`). Official nodes accept any announced size. The fork
-  also shows a peer's latest host data (version, snapshot capability) instead of the first one
-  seen, passes each received datagram with its own length, and stops its routing table (threads,
-  UDP socket) with the p2p host at exit.
+  ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the commit the official node uses). The
+  first packet of a connection (the registration) may announce at most 64 bytes of data, any
+  later packet at most 256 MiB, far above any packet the node sends; above that the connection is
+  closed before anything is allocated, with an error line at most once a minute per address
+  (`Packet header from <address> announces <n> bytes, above the limit of <limit>: connection
+  dropped (...)`). Below the limit the data is read in chunks of 1 MiB, so the memory held follows
+  the bytes actually received, not the size announced. Official nodes allocate whatever size is
+  announced. The fork also shows a peer's latest host data (version, snapshot capability),
+  refreshed from its answers to our pings, instead of the first one seen; passes each received
+  datagram with its own length; and stops its routing table (threads, UDP socket) with the p2p
+  host at exit.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;
