@@ -209,6 +209,11 @@ jobs:
           - name: pruned-peers-join
             official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=lmdb,lmdb,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
+          # the same with node_alt_ref=official: the even nodes, which answer the joiner (n9, this build)
+          # with the low blocks, are official responders with their anti-duplicate log (special order 35)
+          - name: pruned-peers-join-official
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,lmdb:pruned,berkeleydb,lmdb:pruned,berkeleydb,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
+            fixed: true
             fixed: true
           # kills that land while the node prunes, or right after a checkpoint it prunes from
           - name: rocksdb-pruned-crash

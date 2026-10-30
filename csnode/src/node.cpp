@@ -2156,12 +2156,15 @@ void Node::sendSyncroMessage(cs::Byte msg, const cs::PublicKey& target) {
 
 void Node::getSyncroMessage(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
     //csdebug() << __func__;
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
-    cs::Byte msg;
+    cs::Byte msg = cs::SyncroMessage::NoAnswer;
     cs::IDataStream stream(data, size);
     stream >> msg;
+    if (!stream.isValid() || msg > cs::SyncroMessage::Sent) {
+        return;
+    }
+    // a responder sends these only once special order 35 is active on its side, which a node that
+    // syncs from block 0 does not know yet: the synchronizer reads them whatever this node knows of
+    // that round, and paces its requests to that responder
     poolSynchronizer_->getSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
 }
 

@@ -54,6 +54,7 @@ add_library(csnode
   include/csnode/walletsids_serializer.hpp
   include/csnode/blockhashes.hpp
   include/csnode/poolsynchronizer.hpp
+  include/csnode/syncropacing.hpp
   include/csnode/fee.hpp
   include/csnode/transactionsvalidator.hpp
   include/csnode/walletsstate.hpp
@@ -103,6 +104,7 @@ add_library(csnode
   src/walletsids_serializer.cpp
   src/blockhashes.cpp
   src/poolsynchronizer.cpp
+  src/syncropacing.cpp
   src/fee.cpp
   src/transactionsvalidator.cpp
   src/transactionsindex.cpp
