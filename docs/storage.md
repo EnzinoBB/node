@@ -56,7 +56,7 @@ find its files and would sync from block 0: convert back to berkeleydb before ru
 Going from full to pruned keeps the database: set `prune_keep_blocks` and the old blocks are
 removed at the next checkpoints. Going from pruned to full keeps it too: set `prune_keep_blocks=0`
 and the node fetches the removed blocks from its neighbours in the background (backward sync,
-below). The Docker image still refuses the switch for now.
+below), in Docker as well.
 
 The package's `config.pruned.ini` has this section:
 
@@ -95,6 +95,23 @@ restart.
 - The log shows `BACKFILL: full node with blocks N..M: fetching 0..N-1`, a line every 100,000
   blocks, every peer left out, and at the end `BACKFILL: full history stored`; the status line
   gets `, oldest stored = K`. A restart resumes below the oldest stored block.
+
+### A full node from a snapshot
+
+Without Docker, in the folder of the full package (`config.ini`):
+
+1. in `config.ini`, `[storage]` with `db_backend=lmdb` or `db_backend=rocksdb` and no
+   `prune_keep_blocks` (a snapshot cannot start a berkeleydb database: it starts above block 0);
+2. `./node --download-snapshot` (node stopped, empty `db/`): it downloads the published snapshot,
+   checks every file against its signed manifest and restores it into the configured backend (see
+   [snapshots.md](snapshots.md));
+3. start the node. It checks the snapshot's state digest at its first start (and stops if it
+   differs), syncs the last blocks forward, takes part in the network and logs
+   `BACKFILL: full node with blocks N..M: fetching 0..N-1 from peers in the background`.
+
+With an empty `db/` and `[snapshot] fetch=auto` (the default), the node also takes a snapshot from
+its p2p neighbours by itself at its first start. In Docker: `CREDITS_STORAGE=full` with
+`CREDITS_DB_BACKEND=lmdb` or `rocksdb` (packaging/docker/README.md).
 
 ## Start-up check
 

@@ -32,6 +32,7 @@ each key and its default.
 | `db_backend` | Chooses the block database: `berkeleydb` (the default, the official format), `lmdb` or `rocksdb`. RocksDB is about a third of the BerkeleyDB size on mainnet. |
 | `prune_keep_blocks` | Pruned storage: the node keeps only the latest blocks and removes older ones at each periodic checkpoint. Pruned storage runs on LMDB. |
 | `async_write_queue_size`, `write_batch_size`, `rocksdb_block_cache_mb`, `rocksdb_memtable_mb` | Tune the database writer and RocksDB. |
+| `backfill`, `backfill_batch`, `backfill_rate`, `backfill_store_per_turn` | Backward sync: a full node whose oldest block is above block 0 (started from a snapshot on lmdb or rocksdb, or switched from pruned to full) fetches the older blocks from its neighbours in the background, with the existing block requests, checks each against the chain's hashes and its signatures and stores it without applying it; the API serves each block and history as it arrives. On by default; `backfill=off` keeps only the snapshot's blocks. |
 
 ### Converting the block database
 
@@ -288,5 +289,7 @@ rounds for both).
 - **Known hosts.** `known_hosts.txt` is refreshed weekly from a verified list of seed nodes.
 - **Docker image.** The image is `ghcr.io/enzinobb/credits-node`. By default it runs a pruned
   node that starts from a snapshot of the chain, published every 12 hours, instead of syncing
-  from block 0. The snapshot's checksum and its state digest are verified before use. See
-  [packaging/docker/README.md](../packaging/docker/README.md).
+  from block 0. The snapshot's checksum and its state digest are verified before use. A full node
+  on lmdb or rocksdb starts from the snapshot too and fetches the older blocks in the background
+  (`CREDITS_BACKFILL=off` to keep only the snapshot's blocks); switching from pruned to full is
+  allowed. See [packaging/docker/README.md](../packaging/docker/README.md).
