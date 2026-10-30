@@ -41,7 +41,7 @@ lines under the new release.
 |---|---|
 | #119 | ci: the release checks the Windows and macOS packages on mainnet before publishing them (a node of each system restores the published snapshot, syncs to the head, logs the same state digests as Linux and stops cleanly), and the same check runs weekly on the latest published release |
 | #120 | ci: a private network of 7 nodes (with the restart of one at block 300) runs on macOS and on Windows every night and on demand (`testnet-platforms.yml`): the nodes reach the same state digests as on Linux and a stopped node quick-starts again; Linux-only scenarios (network faults, slow nodes, full disks) stay on Linux |
-| #124 | lmdbxx: integer keys and values of the cache databases (transaction index, block hashes) are converted to text in a buffer of each call instead of one shared buffer, which the processor thread and API threads could use at once (a lookup could name another block, a write store another number); Linux and Windows, macOS was not affected |
+| #124 | lmdbxx: two races in the cache databases (transaction index, block hashes) between the processor thread and API threads: integer keys and values are converted to text in a buffer of each call instead of one shared buffer (a lookup could name another block, a write store another number; Linux and Windows), and the map grows only while no transaction is open (a reader could be left on the old mapping and crash) |
 
 ## community.14 — 2026-10-27
 
