@@ -52,6 +52,7 @@ lines under the new release.
 | #132 | api: `TransactionFlow` refuses a contract call that no method of the contract matches (unknown method, wrong argument count, or a Variant that cannot match the declared type, such as a token amount as `v_string` for a `BigDecimal`), which would fail on every node with its fee paid; ci: `testnet.yml` inputs `tokens`/`tokens_via`, the executor harness compares only the answers |
 | #134 | api: token API leftovers: a failed transfer no longer takes a place in the pages of `TokenTransfersGet`/`TokenWalletTransfersGet`; `TokenTransferGet` answers only for a transfer of that token (it listed any transaction and added entries to the operations map); token counters above 2^31 report the largest i32 instead of wrapping; the token cache is saved, loaded and hashed under its lock (the background refresh could change it during a checkpoint) |
 | #135 | samples: a token template (`samples/contracts/Token.java`: checked amounts and decimals, balances at the token's scale, ERC-20 `approve()`, sale through `payable()`), run by the executor harness, and a Python client that calls a contract with the argument types it declares (`samples/python/token_client.py`) |
+| #138 | ci: macOS jobs run on `macos-15` (GitHub retires the macOS 14 images on 2026-11-02 and fails them during brownouts until then), with binaries built for macOS 14 and later, and time out after their measured duration plus a margin (build 60, platform sync 40, private network 60 minutes instead of 240, 90, 150) |
 
 ## community.14 — 2026-10-27
 
