@@ -36,11 +36,30 @@ not have, a wrong number of arguments, or an argument whose Variant cannot match
 mismatches are refused: with types other than `String`, `BigDecimal`, `boolean`, `int`, `long`,
 `double` (and their wrappers) and `byte[]` the call goes on as before.
 
+## A template and a client
+
+- `samples/contracts/Token.java`: a token to start from (ExtensionTokenStandard v1, token standard
+  4). It checks every amount (positive, no more decimals than the token has), keeps balances at the
+  token's scale, sets allowances with `approve()` as ERC-20 does, and sells tokens for CS through
+  `payable()`. The executor harness runs it (`template_token`).
+- `samples/python/token_client.py`: lists a contract's methods, reads a getter for free, and signs
+  and sends a call, converting each argument to the type the method declares:
+
+  ```sh
+  python3 samples/python/token_client.py methods <token>
+  python3 samples/python/token_client.py get <token> balanceOf <wallet>
+  python3 samples/python/token_client.py --seed <private key> call <token> transfer <wallet> 12.5
+  ```
+
 ## The token cache
 
 - `[api] tokens_cache=true` turns the cache on. It is off by default. The RelMonitor and
   RelWallet builds always have it on, as the official monitor and wallet nodes do. With the
   cache off, the token methods answer "This node doesn't provide such info".
+- **RelMonitor and RelWallet builds.** These are the official monitor and wallet configurations
+  (`-DMONITOR_NODE`, `-DWEB_WALLET_NODE`). The community CI neither builds nor tests them, and a
+  private network of RelWallet nodes did not get past its first round in our tests. Use a normal
+  build with `tokens_cache=true` instead: it serves the same token methods.
 - **What it records.** A token is recorded at its deploy. After each successful call, the node
   records:
   - the initiator, and every argument that is a wallet address, as holders of the token;
