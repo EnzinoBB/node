@@ -2502,6 +2502,45 @@ void Node::sendBlockReply(const cs::PoolsBlock& poolsBlock, const cs::PublicKey&
         csdetails() << "#" << it.sequence() << " signs = " << it.signatures().size();
     }
 
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-tamper-replies holds "<kind> <below>", and every block served
+    // below that sequence goes out altered, as a dishonest peer would send it (ci/testnet/run.sh
+    // BACKFILL_TAMPER): kind signature flips a byte of its first signature (outside the hash),
+    // content a digit of its timestamp (inside the hash, so its hash changes). Both still parse
+    if (std::ifstream marker("testnet-tamper-replies"); marker) {
+        std::string kind;
+        cs::Sequence below = 0;
+        if (marker >> kind >> below) {
+            cs::PoolsBlock altered;
+            for (const auto& pool : poolsBlock) {
+                cs::Bytes bytes = pool.to_binary();
+                bool changed = false;
+                if (pool.sequence() > 0 && pool.sequence() < below) {
+                    cs::Bytes needle;
+                    if (kind == "signature" && !pool.signatures().empty()) {
+                        needle.assign(pool.signatures().front().begin(), pool.signatures().front().end());
+                    }
+                    else if (kind == "content" && pool.user_field_ids().count(BlockChain::kFieldTimestamp) > 0) {
+                        const auto text = pool.user_field(BlockChain::kFieldTimestamp).value<std::string>();
+                        needle.assign(text.begin(), text.end());
+                    }
+                    const auto at = needle.empty() ? bytes.end() : std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end());
+                    if (at != bytes.end()) {
+                        auto& byte = *(at + static_cast<std::ptrdiff_t>(needle.size() - 1));
+                        byte = static_cast<cs::Byte>(kind == "content" ? (byte ^ 1) : (byte ^ 0x5a));   // a digit stays a digit
+                        changed = true;
+                    }
+                }
+                altered.push_back(changed ? csdb::Pool::from_binary(std::move(bytes)) : pool);
+            }
+            cswarning() << "NODE> TESTNET build: blocks below " << below << " served with an altered " << kind;
+            auto region = compressor_.compress(altered);
+            changeSynchroRequestsLog(target, cs::SyncroMessage::Sent);
+            sendDirect(target, MsgTypes::RequestedBlock, cs::Conveyer::instance().currentRoundNumber(), region);
+            return;
+        }
+    }
+#endif
     auto region = compressor_.compress(poolsBlock);
     csdebug() << "NODE> block package compressed";
     changeSynchroRequestsLog(target, cs::SyncroMessage::Sent);

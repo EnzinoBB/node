@@ -449,7 +449,20 @@ bool BlockChain::storeBackfilledBlock(const csdb::Pool& pool) {
     // the index first and outside dbLock_: it reads the wallet cache, whose lock is never taken
     // while dbLock_ is held. Only the processor thread writes the index, as for the live blocks
     const bool firstFloor = trxIndex_->backfillFloor() == cs::kWrongSequence;
-    trxIndex_->indexBackfilledBlock(pool);
+    bool crashUnindexed = false;
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-backfill-crash-unindexed stores this block without its
+    // index entries and stops the node at once, as a crash between the two writes would leave it
+    // (ci/testnet/run.sh BACKFILL_CRASH): the next start must index it again
+    if (std::ifstream marker("testnet-backfill-crash-unindexed"); marker) {
+        marker.close();
+        std::remove("testnet-backfill-crash-unindexed");
+        crashUnindexed = true;
+    }
+#endif
+    if (!crashUnindexed) {
+        trxIndex_->indexBackfilledBlock(pool);
+    }
     if (firstFloor) {
         // the start-up repairs run only where the index holds a backfill floor: the first one goes
         // to disk before any block is stored, or a power cut before the first flushBackfill could
@@ -481,6 +494,13 @@ bool BlockChain::storeBackfilledBlock(const csdb::Pool& pool) {
     }
     firstStoredSeq_ = seq;
     backfillAnchor_ = BackfillAnchor{seq, pool.previous_hash()};
+    if (crashUnindexed) {
+        trxIndex_->flush();
+        blockHashes_->flush();
+        storage_.flush();
+        cserror() << "BACKFILL: TESTNET build: block " << seq << " stored without its index entries, stopping at once";
+        std::_Exit(9);
+    }
     if (seq == 1 && uuid_ == 0) {
         // as recordBlock does: a node from a snapshot has read no block 1 so far
         uuid_ = uuidFromBlock(pool);
