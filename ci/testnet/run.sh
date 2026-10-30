@@ -76,6 +76,12 @@
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
+#        HUGE_FRAME_AT (default 0 = off): from that sequence huge_frame.py opens connections to the p2p
+#        TCP port of every node of this build (the odd ones when the even nodes run BIN_ALT, which may
+#        have no frame limit) and sends packet headers above the limits (2^40 and 65 bytes before a
+#        registration, 2^40 and 256 MiB + 1 after one: closed at once, a limit line logged) and just
+#        below them without data (64 bytes, 256 MiB - 1: held until the 10 s idle timeout); each node
+#        must keep running with its memory flat (Linux: at most +64 MiB per step) and stay in consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -360,6 +366,7 @@ SLOW_CPU=${SLOW_CPU:-20}
 GARBAGE_AT=${GARBAGE_AT:-0}
 GARBAGE_SECONDS=${GARBAGE_SECONDS:-300}
 GARBAGE_RATE=${GARBAGE_RATE:-200}
+HUGE_FRAME_AT=${HUGE_FRAME_AT:-0}
 for v in "$NET_FAULT_NODES" "$SLOW_NODES"; do
     echo "$v" | grep -qE '^([0-9]+(,[0-9]+)*)?$' || { echo "bad node list '$v'"; exit 1; }
 done
@@ -851,6 +858,7 @@ net_fault_done=0
 snapshot_done=0
 storage_switched=0
 GARBAGE_PID=
+huge_frame_done=0
 if [ -n "$SLOW_NODES" ]; then
     echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
 fi
@@ -1038,6 +1046,37 @@ while :; do
         echo "garbage: $GARBAGE_RATE random datagrams a second to every node for $GARBAGE_SECONDS s, from sequence $min"
         python3 "$HERE/garbage.py" "$BASE_PORT" "$ALL_NODES" "$GARBAGE_SECONDS" "$GARBAGE_RATE" > "$WORK/garbage.log" 2>&1 &
         GARBAGE_PID=$!
+    fi
+    if [ "$HUGE_FRAME_AT" -gt 0 ] && [ "$huge_frame_done" -eq 0 ] && [ "$min" -ge "$HUGE_FRAME_AT" ]; then
+        huge_frame_done=1
+        echo "huge frame: oversized and just-below-limit packet headers to the p2p port of every node of this build, from sequence $min"
+        for i in $(seq 1 "$NODES"); do
+            # the even nodes of BIN_ALT (the official node, another ref) may have no frame limit
+            [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
+            pid_arg=""
+            [ "$OS_KIND" != linux ] || pid_arg="--pid ${PIDS[$i]}"
+            hf="python3 $HERE/huge_frame.py $(node_ip "$i") $((BASE_PORT + i)) --connections 4 $pid_arg"
+            hf_status=0
+            {
+                # before registration: at most 64 bytes, closed at once
+                $hf --size $((1 << 40)) --size 65 || hf_status=$?
+                # after a registration: at most 256 MiB, closed at once
+                $hf --registered --size $((1 << 40)) --size $(( (256 << 20) + 1 )) || hf_status=$?
+                # just below the limits, no data sent: the node waits for the data (reading it in 1 MiB
+                # chunks, so it holds almost nothing) and closes on its 10 s idle timeout
+                $hf --expect hold --size 64 || hf_status=$?
+                $hf --registered --expect hold --size $(( (256 << 20) - 1 )) || hf_status=$?
+            } > "$WORK/huge-frame-n$i.log" 2>&1
+            sed "s/^/huge frame: n$i: /" "$WORK/huge-frame-n$i.log"
+            [ "$hf_status" -eq 0 ] || { echo "FAIL: n$i did not treat the oversized or just-below-limit headers as expected, or its memory grew"; exit 1; }
+            sleep 1
+            kill -0 "${PIDS[$i]}" 2>/dev/null || { echo "FAIL: n$i stopped after the huge frame headers"; exit 1; }
+            for lim in 64 268435456; do
+                grep -aq "announces .* bytes, above the limit of $lim:" "$WORK/n$i"/*.log \
+                    || { echo "FAIL: n$i logged no limit line for $lim bytes"; exit 1; }
+            done
+            grep -ah 'announces .* bytes, above the limit' "$WORK/n$i"/*.log | awk 'NR <= 2' | sed "s/.*ERROR [^]]*\] /huge frame: n$i: /"
+        done
     fi
 
     if [ "$SNAPSHOT_AT" -gt 0 ] && [ "$snapshot_done" -eq 0 ] && [ "$min" -ge "$SNAPSHOT_AT" ]; then
@@ -1931,8 +1970,8 @@ if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
     serving=""
     late=""
     for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
-        # a late serving node announced the capability only at its restart, and peers keep the value
-        # they first saw (the routing table is not refreshed, design 4.1, plan P9): either value is fine
+        # a late serving node announced the capability only at its restart: peers refresh the value from
+        # its own datagrams (p2p fork, plan P9), so it must be seen too (listed apart in the output)
         if [[ ",$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]]; then late="$late,${KEYS[$((i - 1))]}"; else serving="$serving ${KEYS[$((i - 1))]}"; fi
     done
     python3 - "$WORK/n$observer/known_peers.json" "$late" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
@@ -1941,11 +1980,13 @@ peers = {p["id"]: p for p in json.load(open(sys.argv[1]))}
 late = set(k for k in sys.argv[2].split(",") if k)
 serving = set(sys.argv[3:])
 bad = [k for k in serving if peers.get(k, {}).get("capabilities") != 1]
+late_bad = [k for k in late if peers.get(k, {}).get("capabilities") != 1]
 extra = [k for k, p in peers.items() if k not in serving and k not in late and p["capabilities"] != 0]
 community = sum(1 for p in peers.values() if p["minor"] > 0)
 print(f"capabilities: {len(peers)} known peers, {len(serving) - len(bad)} of {len(serving)} serving nodes announce snapshots, "
+      f"{len(late) - len(late_bad)} of {len(late)} late serving nodes do since their restart, "
       f"{len(extra)} others do, {community} announce a community version")
-sys.exit(1 if bad or extra else 0)
+sys.exit(1 if bad or late_bad or extra else 0)
 PY
     PIDS[$observer]=""
 fi
