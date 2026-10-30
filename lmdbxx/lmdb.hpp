@@ -1,8 +1,12 @@
 #ifndef LMDBXX_HPP
 #define LMDBXX_HPP
 
+#include <array>
 #include <cassert>
+#include <limits>
+#include <mutex>
 #include <numeric>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 
@@ -137,6 +141,7 @@ public:
     // name - table name at current path, nullptr if only one table exist
     size_t size(const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
             auto dbi = lmdb::dbi::open(transaction, name);
 
@@ -168,6 +173,7 @@ public:
         checkMapSize();
 
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_);
             auto dbi = lmdb::dbi::open(transaction, name);
 
@@ -177,6 +183,7 @@ public:
             dbi.put(transaction, key, value, flags);
             transaction.commit();
 
+            // emitted under the shared lock: a slot must not write to this database (it would wait for itself)
             emit commited(keyData, keySize);
         }
         catch(const lmdb::error& error) {
@@ -204,6 +211,7 @@ public:
         checkMapSize();
 
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr);
             auto dbi = lmdb::dbi::open(transaction, name, flags);
 
@@ -212,6 +220,7 @@ public:
 
             if (result) {
                 transaction.commit();
+                // emitted under the shared lock, as commited
                 emit removed(data, size);
             }
 
@@ -235,6 +244,7 @@ public:
     // name - table name at current path
     bool isKeyExists(const char* data, size_t size, const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
             auto dbi = lmdb::dbi::open(transaction, name);
             auto cursor = lmdb::cursor::open(transaction, dbi);
@@ -259,6 +269,7 @@ public:
     template<typename T>
     T value(const char* data, size_t size, const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, MDB_RDONLY);
             auto dbi = lmdb::dbi::open(transaction, name);
             auto cursor = lmdb::cursor::open(transaction, dbi);
@@ -308,6 +319,7 @@ protected:
     template<typename Key, typename Value>
     std::pair<Key, Value> keyValueImpl(unsigned int mdbFlag, MDB_cursor_op cursorFlag, const char* name = nullptr) const {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);   // see checkMapSize
             auto transaction = lmdb::txn::begin(*env_, nullptr, mdbFlag);
             auto dbi = lmdb::dbi::open(transaction, name);
             auto cursor = lmdb::cursor::open(transaction, dbi);
@@ -330,7 +342,9 @@ protected:
 
     void flushImpl(bool force) {
         try {
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);
             env_->sync(force);
+            // emitted under the shared lock, as commited
             emit flushed();
         }
         catch(const lmdb::error& error) {
@@ -342,20 +356,31 @@ protected:
         emit failed(LmdbException(error));
     }
 
+    // the decimal text of a number, held by value (empty if it does not fit)
+    template<size_t N>
+    struct Digits {
+        std::array<char, N> bytes{};
+        size_t length = 0;
+        const char* data() const { return bytes.data(); }
+        size_t size() const { return length; }
+    };
+
     template<typename T, typename = std::enable_if_t<(std::is_integral_v<T> || std::is_floating_point_v<T>)>>
     auto cast(const T& value) const {
 #ifndef __APPLE__
 #ifdef  LMDBXX_FP_SUPPORT
         if constexpr (std::is_integral_v<T>) {
 #endif
-            static std::array<char, std::numeric_limits<T>::digits10 * 2> bytes{};
-            const auto result = std::to_chars(bytes.data(), bytes.data() + bytes.size(), value);
+            // the text lives in the returned object, not in a buffer shared by every call: the
+            // processor thread writes integer values while API threads look up integer keys
+            Digits<std::numeric_limits<T>::digits10 * 2> text;
+            const auto result = std::to_chars(text.bytes.data(), text.bytes.data() + text.bytes.size(), value);
 
-            if (result.ec != std::errc{}) {
-                return std::string_view{};
+            if (result.ec == std::errc{}) {
+                text.length = static_cast<size_t>(result.ptr - text.bytes.data());
             }
 
-            return std::string_view(bytes.data(), result.ptr - bytes.data());
+            return text;
 #ifdef  LMDBXX_FP_SUPPORT
         }
         else if constexpr (std::is_floating_point_v<T>) {
@@ -457,18 +482,33 @@ protected:
         return temp;
     }
 
+    // LMDB grows the map only while this process has no transaction open (mdb_env_set_mapsize):
+    // every transaction of this class holds mapMutex_ shared, the growth holds it alone. Before,
+    // a write could grow the map under a read transaction of an API thread
     void checkMapSize() {
-        Info metaInfo = info();
-        Stats metaStats = stats();
-
-        auto freeSpace = metaInfo.me_mapsize - (metaStats.ms_psize * metaInfo.me_last_pgno);
-
-        if (freeSpace < increaseSize_/2) {
-            auto newSize = mapSize() + increaseSize_;
-            setMapSize(newSize);
-
-            emit mapSizeIncreased(newSize);
+        auto needsGrowth = [this] {
+            Info metaInfo = info();
+            Stats metaStats = stats();
+            auto freeSpace = metaInfo.me_mapsize - (metaStats.ms_psize * metaInfo.me_last_pgno);
+            return freeSpace < increaseSize_ / 2;
+        };
+        {
+            // the meta page is read under the shared lock too: a growth by another writer remaps it
+            std::shared_lock<std::shared_mutex> mapLock(mapMutex_);
+            if (!needsGrowth()) {
+                return;
+            }
         }
+        size_t newSize = 0;
+        {
+            std::unique_lock<std::shared_mutex> mapLock(mapMutex_);
+            if (!needsGrowth()) {
+                return;   // another writer grew it meanwhile
+            }
+            newSize = mapSize() + increaseSize_;
+            setMapSize(newSize);
+        }
+        emit mapSizeIncreased(newSize);
     }
 
     auto environment(const unsigned flags) const {
@@ -482,6 +522,8 @@ private:
     bool isOpen_ = false;
     unsigned int flags_;
     size_t increaseSize_ = DefaultIncreaseSize;
+    // shared by every transaction, held alone to grow the map (checkMapSize)
+    mutable std::shared_mutex mapMutex_;
 
 public signals:
 

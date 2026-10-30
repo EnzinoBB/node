@@ -3,7 +3,9 @@
 
 #include <csstats.hpp>
 
+#include <atomic>
 #include <deque>
+#include <thread>
 #include <queue>
 #include <tuple>
 
@@ -173,7 +175,7 @@ public:
         return executor_;
     }
 
-    bool isBDLoaded() { return isBDLoaded_; }
+    bool isBDLoaded() { return isBDLoaded_.load(std::memory_order_acquire); }
     
 private:
 #ifdef USE_DEPRECATED_STATS
@@ -182,7 +184,14 @@ private:
     cs::Executor& executor_;
     cs::DumbCv dumbCv_;
 
-    bool isBDLoaded_{ false };
+    std::atomic<bool> isBDLoaded_{ false };
+    // the stored blocks are read (the last one, or run() after a quick start that read none): the
+    // token cache is refreshed once
+    void onBaseLoaded(bool refreshInBackground);
+    // an empty token cache on a node that has contracts (the cache was off when its checkpoint
+    // was saved): find the tokens among the contracts and their holders in the chain
+    void rebuildTokenCache();
+    std::thread tokensRefresh_;
 
     struct smart_trxns_queue {
         cs::SpinLock lock{ATOMIC_FLAG_INIT};
@@ -299,6 +308,9 @@ private:
     ::csdb::Transaction makeTransaction(const ::api::Transaction&);
     void dumbTransactionFlow(api::TransactionFlowResult& _return, const csdb::Transaction& tr);
     void smartTransactionFlow(api::TransactionFlowResult& _return, const ::api::Transaction&, csdb::Transaction& send_transaction);
+    std::vector<general::MethodDescription> contractMethods(const csdb::Address& contract, const std::vector<general::ByteCodeObject>& byteCode);
+    std::mutex contractMethodsLock_;
+    std::unordered_map<csdb::Address, std::vector<general::MethodDescription>> contractMethods_;
     void processTransaction(csdb::Transaction trx, uint64_t requestId);
     void processSmartTransaction(const Transaction& transaction, csdb::Transaction transactionToSend, uint64_t requestId);
 
