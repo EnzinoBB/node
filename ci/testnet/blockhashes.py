@@ -5,7 +5,7 @@ the lowest head, and of that head, must be the same on every node as on the firs
 Used by run.sh with BIN_ALT_OFFICIAL=1, where the official nodes log no state digest: holding the
 same blocks as the community nodes is what they are checked on.
 
-    blockhashes.py --head 1100 [--partial 3,9] 1:9090 2:9102 3:9103 ...
+    blockhashes.py --head 1100 [--partial 3,9] [--step 100] 1:9090 2:9102 3:9103 ...
 
 --partial names the nodes that do not hold the oldest blocks (pruned, or started from a snapshot):
 blocks missing below the first one they hold are not counted.
@@ -32,11 +32,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--head", type=int, required=True, help="lowest head of the nodes compared")
     parser.add_argument("--partial", default="", help="comma-separated nodes that may lack the oldest blocks")
+    parser.add_argument("--step", type=int, default=100, help="every how many blocks, from 0 when 1")
     parser.add_argument("nodes", nargs="+", help="node:port, the first is the reference")
     args = parser.parse_args()
     partial = {n for n in args.partial.split(",") if n}
 
-    sequences = list(range(100, args.head, 100)) + [args.head]
+    sequences = list(range(0 if args.step == 1 else args.step, args.head, args.step)) + [args.head]
     reference = None
     failed = False
     for entry in args.nodes:
