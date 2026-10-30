@@ -339,6 +339,9 @@ void TransactionsIndex::trimToFloor(Sequence floor) {
     size_t deleted = 0;
     size_t rewrittenAtFloor = 0;
 
+    // transactions on env() directly, outside cs::Lmdb's lock against a growth of the map: this
+    // runs only at start-up (--set-bc-top, or an index ahead of the chain), before any other thread
+    // reads the index
     // Phase 1: collect keys to delete (curr_seq > floor) and keys at floor with prev_seq > floor.
     std::vector<std::vector<uint8_t>> toDelete;
     std::vector<std::vector<uint8_t>> toRewrite;
@@ -659,6 +662,8 @@ bool TransactionsIndex::hasIndexEntries() const {
     if (!db_->isOpen()) {
         return false;
     }
+    // a transaction on env() directly, outside cs::Lmdb's lock against a growth of the map: called
+    // from the constructor only, before any other thread reads the index
     try {
         auto& env = db_->env();
         auto txn = lmdb::txn::begin(env, nullptr, MDB_RDONLY);

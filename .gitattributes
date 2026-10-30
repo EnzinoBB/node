@@ -1,1 +1,2 @@
 ci/official/*.patch -text
+packaging/setup/*.bat text eol=crlf
