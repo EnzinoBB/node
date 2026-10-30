@@ -94,6 +94,13 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   `snapshot.mismatch` exists. An import interrupted by a kill leaves `db/.importing`; the next
   start removes what that import wrote before it looks at `db/`.
 
+### Token cache
+
+`[api] tokens_cache=true` turns on the token cache behind the `Token*` API methods in any build.
+The official node has it only in its monitor and wallet builds. The cache follows tokens of every
+standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
+rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
+
 ## Start-up behaviour
 
 - **Database check.** Before opening the block database, the node looks at `db/`. It writes the
@@ -171,6 +178,12 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
     1000 rounds while some remain;
   - `[params] sync_contract_execution` (default `true`): `false` skips the re-execution while
     syncing altogether, and every state comes from the confidants.
+
+- **Contract results after a quick start.** A node that quick-starts from a checkpoint at its last
+  stored block reads no block. The official node then never marks its stored blocks as read, and
+  every contract call sent through its API ends with "Transaction in progress" and no result,
+  even though the network executed the call. The community node marks the blocks as read when
+  it starts running.
 
 ## Security and correctness fixes
 
