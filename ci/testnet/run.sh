@@ -36,6 +36,11 @@
 #        contract scenario never kills, partitions or slows n1
 #        SYNC_CONTRACT_EXECUTION=0: every node runs with sync_contract_execution=false (no contract
 #        re-execution while reading the blockchain; states fetched from the confidants once live)
+#        TOKENS=1 (with CONTRACTS): tokens.py also deploys a v1 and a v0 token from the wallet of the
+#        last node once fund.py's load is over, runs transfers, approvals, payable and a sale through
+#        n1, and checks the balances on every node, the states, and the token API of n1 (an API
+#        mismatch is reported; TOKENS_STRICT_API=1 fails the run on it); TOKENS_VIA=N sends them
+#        through node N instead (e.g. the node of the restart test, once it restarted)
 #        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
 #        times before the restart test; a node that syncs through the plays re-executes them
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
@@ -245,6 +250,9 @@ JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
 CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
 CONTRACT_DICE=${CONTRACT_DICE:-0}
+TOKENS=${TOKENS:-0}
+TOKENS_STRICT_API=${TOKENS_STRICT_API:-0}
+TOKENS_VIA=${TOKENS_VIA:-1}
 SYNC_CONTRACT_EXECUTION=${SYNC_CONTRACT_EXECUTION:-1}
 [ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
     || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
@@ -514,6 +522,8 @@ api_settings() {
     echo "executor_port=$((9300 + i))"
     echo "executor_command=$WORK/n$i/executor.sh"
     echo "executor_multi_instance=true"
+    # the token cache behind the Token* API methods (read by builds that have the key)
+    [ "$TOKENS" != "1" ] || echo "tokens_cache=true"
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
@@ -840,6 +850,7 @@ crash_next=0
 crashed_all=0
 FUND_PID=
 CONTRACTS_PID=
+TOKENS_PID=
 disk_filled_at=0
 disk_freed=0
 net_fault_at=0
@@ -1420,6 +1431,13 @@ PY
             --stats-file "$WORK/contracts-stats.json" $([ "$CONTRACT_DICE" = 1 ] && echo --dice)) > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
+    if [ "$TOKENS" = "1" ] && [ "$CONTRACTS" = "1" ] && [ -z "$TOKENS_PID" ] && grep -q "load transfers sent" "$WORK/fund.log" 2>/dev/null \
+        && { [ "$TOKENS_VIA" -eq 1 ] || [ "$RESTART_AT" -eq 0 ] || [ -e "$WORK/restart-done" ]; }; then
+        echo "tokens: deploying and using tokens through node $TOKENS_VIA"
+        (cd "$HERE" && python3 tokens.py "$WORK" "$NODES" --via "$TOKENS_VIA" --json "$WORK/tokens.json" \
+            $([ "$TOKENS_STRICT_API" = 1 ] && echo --strict-api)) > "$WORK/tokens.log" 2>&1 &
+        TOKENS_PID=$!
+    fi
     # contracts.py ended before its first calls were done: nothing would release the restart test
     if [ -n "$CONTRACTS_PID" ] && [ ! -e "$WORK/contracts-ready" ] && ! kill -0 "$CONTRACTS_PID" 2>/dev/null; then
         cat "$WORK/contracts.log"
@@ -1472,6 +1490,24 @@ if [ -n "$CONTRACTS_PID" ]; then
     fi
 elif [ "$CONTRACTS" = "1" ]; then
     echo "FAIL: contracts.py never started"
+    exit 1
+fi
+
+if [ -n "$TOKENS_PID" ]; then
+    tokens_deadline=$(( $(date +%s) + 900 ))
+    while kill -0 "$TOKENS_PID" 2>/dev/null && [ "$(date +%s)" -lt "$tokens_deadline" ]; do sleep 5; done
+    if kill -0 "$TOKENS_PID" 2>/dev/null; then
+        kill "$TOKENS_PID" 2>/dev/null || true
+        cat "$WORK/tokens.log"
+        echo "FAIL: tokens.py did not finish within 15 min of the target"
+        exit 1
+    fi
+    tokens_status=0
+    wait "$TOKENS_PID" || tokens_status=$?
+    cat "$WORK/tokens.log"
+    [ "$tokens_status" -eq 0 ] || { echo "FAIL: token checks failed"; exit 1; }
+elif [ "$TOKENS" = "1" ]; then
+    echo "FAIL: tokens.py never started (TOKENS=1 needs CONTRACTS=1 and FUND=1)"
     exit 1
 fi
 

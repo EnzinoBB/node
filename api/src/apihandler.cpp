@@ -70,6 +70,9 @@ void APIHandler::run() {
     stats.run(stats_);
 #endif
     state_updater_running.test_and_set(std::memory_order_acquire);
+    // the node runs once its stored blocks are read; a quick start at the last stored block reads
+    // none, so baseLoaded() is never called then
+    onBaseLoaded(true);
 }
 
 APIHandler::~APIHandler() {
@@ -77,6 +80,9 @@ APIHandler::~APIHandler() {
 
     if (state_updater.joinable()) {
         state_updater.join();
+    }
+    if (tokensRefresh_.joinable()) {
+        tokensRefresh_.join();
     }
 }
 
@@ -1870,26 +1876,83 @@ void APIHandler::store_block_slot(const csdb::Pool& pool) {
 
 void APIHandler::baseLoaded(const csdb::Pool& pool) {
     if (maxReadSequence && pool.sequence() == maxReadSequence) {
-        isBDLoaded_ = true;
-#ifdef TOKENS_CACHE   
-        tm_.loadTokenInfo([&](const TokensMap& tokens, const HoldersMap&) {
-            int count{}, i{};
-            size_t tokenSize = tokens.size();
-            cslog() << "tokens are loading(" << tokenSize << ")...";
-            for (auto& tk : tokens) {
-                if (tokenSize > static_cast<size_t>(100) && !(i++ % (tokenSize / 10)))
-                    cslog() << "loading tokens: " << 10 * (count++) << "%";
-                tm_.refreshTokenState(tk.first, cs::SmartContracts::get_contract_state(get_s_blockchain(), tk.first), true);
-            }
-            cslog() << "tokens loaded!";
-            });
-#endif
+        onBaseLoaded(false);
     }
+}
+
+void APIHandler::onBaseLoaded(bool refreshInBackground) {
+    if (isBDLoaded_.exchange(true)) {
+        return;
+    }
+#ifdef TOKENS_CACHE
+    auto refresh = [this]() {
+        if (tm_.enabled() && tm_.empty()) {
+            rebuildTokenCache();
+        }
+        tm_.refreshAll();
+    };
+    if (refreshInBackground) {
+        tokensRefresh_ = std::thread(refresh);
+    }
+    else {
+        refresh();
+    }
+#else
+    csunused(refreshInBackground);
+#endif
+}
+
+void APIHandler::rebuildTokenCache() {
+    std::vector<csdb::Address> contracts;
+    {
+        auto origins = lockedReference(this->smart_origin);
+        for (const auto& item : *origins) {
+            contracts.push_back(item.first);
+        }
+    }
+    if (contracts.empty()) {
+        return;
+    }
+    cslog() << "API: token cache is empty, looking for tokens among " << contracts.size() << " contracts";
+    size_t found = 0;
+    for (const auto& addr : contracts) {
+        const auto deploy = solver_.smart_contracts().get_contract_deploy(addr);
+        if (!deploy.is_valid()) {
+            continue;
+        }
+        const auto deployer = blockchain_.getAddressByType(deploy.source(), BlockChain::AddressType::PublicKey);
+        tm_.checkNewDeploy(addr, deployer, fetch_smart(deploy));
+        if (!tm_.isToken(addr)) {
+            continue;
+        }
+        ++found;
+        // newest first: a call's new_state comes after the call
+        std::set<csdb::TransactionID> succeeded;
+        std::vector<csdb::Transaction> calls;
+        for (auto it = cs::TransactionsIterator(blockchain_, addr); it.isValid(); it.next()) {
+            const auto& t = *it;
+            if (is_smart_state(t)) {
+                if (blockchain_.getAddressByType(t.target(), BlockChain::AddressType::PublicKey) == addr && cs::SmartContracts::is_state_updated(t)) {
+                    cs::SmartContractRef ref(t.user_field(cs::trx_uf::new_state::RefStart));
+                    succeeded.insert(csdb::TransactionID(ref.sequence, ref.transaction));
+                }
+            }
+            else if (succeeded.erase(t.id()) != 0) {
+                calls.push_back(t);
+            }
+        }
+        for (auto it = calls.rbegin(); it != calls.rend(); ++it) {
+            const auto caller = blockchain_.getAddressByType(it->source(), BlockChain::AddressType::PublicKey);
+            const auto sci = is_smart(*it) ? fetch_smart(*it) : api::SmartContractInvocation{};
+            tm_.checkNewState(addr, caller, is_smart_deploy(sci) ? api::SmartContractInvocation{} : sci, std::string{}, false);
+        }
+    }
+    cslog() << "API: " << found << " tokens found";
 }
 
 void APIHandler::maxBlocksCount(cs::Sequence lastBlockNum) {
     if (!lastBlockNum) {
-        isBDLoaded_ = true;
+        isBDLoaded_.store(true, std::memory_order_release);
     }
 
     maxReadSequence = lastBlockNum;
@@ -2095,7 +2158,11 @@ bool APIHandler::updateSmartCachesTransaction(csdb::Transaction trxn, cs::Sequen
                 }
             }
 
-            if (!newStateStr.empty() || !newHashStr.empty()) { // update tokens
+            // update tokens: only from a successful execution (a failed one leaves the state as it
+            // was), and only for the contract called, whose method and arguments these are (the
+            // state of a contract it called through invokeExternalContract comes with the same call)
+            const bool primaryState = blockchain_.getAddressByType(execTrans.target(), BlockChain::AddressType::PublicKey) == target_pk;
+            if ((!newStateStr.empty() || !newHashStr.empty()) && primaryState && cs::SmartContracts::is_state_updated(trxn)) {
                 auto caller_pk = blockchain_.getAddressByType(execTrans.source(), BlockChain::AddressType::PublicKey);
 
                 if (is_smart_deploy(smart)) {
@@ -2680,13 +2747,11 @@ void APIHandler::ExecuteCountGet(ExecuteCountGetResult& _return, const std::stri
 }
 
 void APIHandler::TokenBalancesGet(api::TokenBalancesResult& _return, const general::Address& address) {
-    #ifndef MONITOR_NODE
-        #ifndef WEB_WALLET_NODE
-            _return.status.code = int8_t(ERROR_CODE);
-            _return.status.message = "This node doesn't provide such info";
-            return;
-        #endif
-    #endif
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     const csdb::Address addr = BlockChain::getAddressFromKey(address);
     tm_.loadTokenInfo([&_return, &addr](const TokensMap& tokens, const HoldersMap& holders) {
         auto holderIt = holders.find(addr);
@@ -2718,17 +2783,20 @@ void APIHandler::TokenBalancesGet(api::TokenBalancesResult& _return, const gener
 }
 
 void APIHandler::TokenTransfersGet(api::TokenTransfersResult& _return, const general::Address& token, int64_t offset, int64_t limit) {
-    #ifndef MONITOR_NODE
-        #ifndef WEB_WALLET_NODE
-            _return.status.code = int8_t(ERROR_CODE);
-            _return.status.message = "This node doesn't provide such info";
-            return;
-        #endif
-    #endif
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     tokenTransactionsInternal(_return, *this, tm_, token, true, false, offset, limit);
 }
 
 void APIHandler::TokenTransferGet(api::TokenTransfersResult& _return, const general::Address& token, const TransactionId& id) {
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     const csdb::TransactionID trxn_id = csdb::TransactionID(cs::Sequence(id.poolSeq), cs::Sequence(id.index));
     const csdb::Transaction trxn = executor_.loadTransactionApi(trxn_id);
     const csdb::Address addr = BlockChain::getAddressFromKey(token);
@@ -2802,21 +2870,35 @@ void APIHandler::TransactionsListGet(api::TransactionsGetResult& _return, int64_
 }
 
 void APIHandler::TokenTransfersListGet(api::TokenTransfersResult& _return, int64_t offset, int64_t limit) {
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     if (!validatePagination(_return, *this, offset, limit)) {
         return;
     }
 
     uint64_t totalTransfers = 0;
     std::multimap<cs::Sequence, csdb::Address> tokenTransPools;
+    std::vector<csdb::Address> tokenAddresses;
 
-    tm_.loadTokenInfo([&totalTransfers, &tokenTransPools, this](const TokensMap& tm_, const HoldersMap&) {
+    tm_.loadTokenInfo([&totalTransfers, &tokenAddresses](const TokensMap& tm_, const HoldersMap&) {
         for (auto& t : tm_) {
             totalTransfers += t.second.transfersCount;
-            tokenTransPools.insert(std::make_pair(blockchain_.getLastTransaction(t.first).pool_seq(), t.first));
+            tokenAddresses.push_back(t.first);
         }
     });
+    // chain reads outside the token cache's lock
+    const std::set<csdb::Address> tokenSet(tokenAddresses.begin(), tokenAddresses.end());
+    for (const auto& token : tokenAddresses) {
+        const auto lastSeq = blockchain_.getLastTransaction(token).pool_seq();
+        if (lastSeq != cs::kWrongSequence) {
+            tokenTransPools.insert(std::make_pair(lastSeq, token));
+        }
+    }
 
-    _return.count = int32_t(totalTransfers);
+    _return.count = int32_t(std::min<uint64_t>(totalTransfers, std::numeric_limits<int32_t>::max()));
 
     cs::Sequence seq = blockchain_.getLastNonEmptyBlock().first;
     while (limit && seq != cs::kWrongSequence && tokenTransPools.size()) {
@@ -2828,6 +2910,10 @@ void APIHandler::TokenTransfersListGet(api::TokenTransfersResult& _return, int64
                 if (!is_smart(t)) {
                     continue;
                 }
+                csdb::Address target_pk = blockchain_.getAddressByType(t.target(), BlockChain::AddressType::PublicKey);
+                if (tokenSet.count(target_pk) == 0) {
+                    continue;
+                }
                 const auto smart = fetch_smart(t);
                 if (!TokensMaster::isTransfer(smart.method, smart.params)) {
                     continue;
@@ -2835,8 +2921,9 @@ void APIHandler::TokenTransfersListGet(api::TokenTransfersResult& _return, int64
                 if (--offset >= 0) {
                     continue;
                 }
-                csdb::Address target_pk = blockchain_.getAddressByType(t.target(), BlockChain::AddressType::PublicKey);
-                auto addrPair = TokensMaster::getTransferData(target_pk, smart.method, smart.params);
+                // the sender of a transfer() is the wallet that signed it
+                csdb::Address source_pk = blockchain_.getAddressByType(t.source(), BlockChain::AddressType::PublicKey);
+                auto addrPair = TokensMaster::getTransferData(source_pk, smart.method, smart.params);
                 addTokenResult(_return, target_pk, "", pool, t, smart, addrPair);
                 if (--limit == 0) {
                     break;
@@ -2871,29 +2958,30 @@ void APIHandler::TokenTransfersListGet(api::TokenTransfersResult& _return, int64
 }
 
 void APIHandler::TokenWalletTransfersGet(api::TokenTransfersResult& _return, const general::Address& token, const general::Address& address, int64_t offset, int64_t limit) {
-    #ifndef MONITOR_NODE
-        #ifndef WEB_WALLET_NODE
-            _return.status.code = int8_t(ERROR_CODE);
-            _return.status.message = "This node doesn't provide such info";
-            return;
-        #endif
-    #endif
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     const csdb::Address wallet = BlockChain::getAddressFromKey(address);
     tokenTransactionsInternal(_return, *this, tm_, token, true, true, offset, limit, wallet);
 }
 
 void APIHandler::TokenTransactionsGet(api::TokenTransactionsResult& _return, const general::Address& token, int64_t offset, int64_t limit) {
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     tokenTransactionsInternal(_return, *this, tm_, token, false, false, offset, limit);
 }
 
 void APIHandler::TokenInfoGet(api::TokenInfoResult& _return, const general::Address& token) {
-    #ifndef MONITOR_NODE
-        #ifndef WEB_WALLET_NODE
-            _return.status.code = int8_t(ERROR_CODE);
-            _return.status.message = "This node doesn't provide such info";
-            return;
-        #endif
-    #endif
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     bool found = false;
     const csdb::Address addr = BlockChain::getAddressFromKey(token);
     tm_.loadTokenInfo([&token, &addr, &found, &_return](const TokensMap& tm_, const HoldersMap&) {
@@ -2927,15 +3015,24 @@ static std::function<bool(const T&, const T&)> getComparator(const FieldType fie
     return [field, desc](const T& lhs, const T& rhs) { return desc ? (lhs.second.*field > rhs.second.*field) : (lhs.second.*field < rhs.second.*field); };
 }
 
+// an amount the token cache holds ("12.5", "0", or "" when the getter failed); never throws
+static double amountValue(const std::string& amount) {
+    return amount.empty() ? 0.0 : std::strtod(amount.c_str(), nullptr);
+}
+
+// a strict weak ordering in both directions (desc ^ (a < b) is not one when a == b)
+template <typename T, typename F>
+static std::function<bool(const T&, const T&)> orderBy(F value, const bool desc) {
+    return [value, desc](const T& lhs, const T& rhs) { return desc ? value(rhs) < value(lhs) : value(lhs) < value(rhs); };
+}
+
 void APIHandler::TokenHoldersGet(api::TokenHoldersResult& _return, const general::Address& token, int64_t offset, int64_t limit, const TokenHoldersSortField order,
                                  const bool desc) {
-    #ifndef MONITOR_NODE
-        #ifndef WEB_WALLET_NODE
-            _return.status.code = int8_t(ERROR_CODE);
-            _return.status.message = "This node doesn't provide such info";
-            return;
-        #endif
-    #endif
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     if (!validatePagination(_return, *this, offset, limit)) {
         return;
     }
@@ -2948,11 +3045,12 @@ void APIHandler::TokenHoldersGet(api::TokenHoldersResult& _return, const general
     std::function<bool(const HT&, const HT&)> comparator;
 
     switch (order) {
-        case TH_Balance:
-            comparator = [desc](const HT& lhs, const HT& rhs) { return desc ^ (stod(lhs.second.balance) < stod(rhs.second.balance)); };
-            break;
         case TH_TransfersCount:
             comparator = getComparator<HT>(&Token::HolderInfo::transfersCount, desc);
+            break;
+        case TH_Balance:
+        default:
+            comparator = orderBy<HT>([](const HT& h) { return amountValue(h.second.balance); }, desc);
             break;
     }
 
@@ -2993,13 +3091,11 @@ void APIHandler::TokenHoldersGet(api::TokenHoldersResult& _return, const general
 }
 
 void APIHandler::TokensListGet(api::TokensListResult& _return, int64_t offset, int64_t limit, const TokensListSortField order, const bool desc, const TokenFilters& filters) {
-    #ifndef MONITOR_NODE
-        #ifndef WEB_WALLET_NODE
-            _return.status.code = int8_t(ERROR_CODE);
-            _return.status.message = "This node doesn't provide such info";
-            return;
-        #endif
-    #endif
+    if (!tm_.enabled()) {
+        _return.status.code = int8_t(ERROR_CODE);
+        _return.status.message = "This node doesn't provide such info (the token cache is off: [api] tokens_cache=true)";
+        return;
+    }
     if (!validatePagination(_return, *this, offset, limit)) {
         return;
     }
@@ -3015,10 +3111,10 @@ void APIHandler::TokensListGet(api::TokensListResult& _return, int64_t offset, i
             comparator = getComparator<VT>(&Token::name, desc);
             break;
         case TL_TotalSupply:
-            comparator = [desc](const VT& lhs, const VT& rhs) { return desc ^ (stod(lhs.second.totalSupply) < stod(rhs.second.totalSupply)); };
+            comparator = orderBy<VT>([](const VT& t) { return amountValue(t.second.totalSupply); }, desc);
             break;
         case TL_Address:
-            comparator = [desc](const VT& lhs, const VT& rhs) { return desc ^ (lhs.first < rhs.first); };
+            comparator = [desc](const VT& lhs, const VT& rhs) { return desc ? rhs.first < lhs.first : lhs.first < rhs.first; };
             break;
         case TL_HoldersCount:
             comparator = getComparator<VT>(&Token::realHoldersCount, desc);
@@ -3029,36 +3125,38 @@ void APIHandler::TokensListGet(api::TokensListResult& _return, int64_t offset, i
         case TL_TransactionsCount:
             comparator = getComparator<VT>(&Token::transactionsCount, desc);
             break;
+        default:
+            comparator = getComparator<VT>(&Token::symbol, desc);
+            break;
     }
 
+    // a filter field left empty (0 for the standard) matches every token; offset, limit and count
+    // apply to the tokens the filters keep
+    auto matches = [&filters](const Token& t) {
+        return (filters.name.empty() || t.name.find(filters.name) != std::string::npos) &&
+               (filters.code.empty() || t.symbol.find(filters.code) != std::string::npos) &&
+               (filters.tokenStandard == 0 || t.tokenStandard == filters.tokenStandard);
+    };
+
     tm_.loadTokenInfo([&, comparator](const TokensMap& tm_, const HoldersMap&) {
-        _return.count = static_cast<int32_t>(tm_.size());
+        int64_t matching = 0;
         applyToSortedMap(tm_, comparator, [&](const TokensMap::value_type& t) {
-            if (--offset >= 0) {
+            if (!matches(t.second)) {
+                return true;
+            }
+            ++matching;
+            if (--offset >= 0 || limit <= 0) {
                 return true;
             }
 
             api::TokenInfo tok;
             putTokenInfo(tok, fromByteArray(t.first.public_key()), t.second);
-
-            // filters
-            auto posName = tok.name.find(filters.name);
-            auto posCode = tok.code.find(filters.code);
-            if ((posName != std::string::npos && posCode != std::string::npos && tok.tokenStandard == filters.tokenStandard) ||
-                (posName && posCode && !tok.tokenStandard) ||
-                (posName && filters.code.empty() && !tok.tokenStandard) ||
-                (filters.name.empty() && posCode && tok.tokenStandard) ||
-                (filters.name.empty() && posCode && !tok.tokenStandard) ||
-                (filters.name.empty() && filters.code.empty() && tok.tokenStandard) ||
-                (filters.name.empty() && filters.code.empty() && !tok.tokenStandard))
-                _return.tokens.push_back(tok);
-
-            if (--limit == 0)
-                return false;
-
+            _return.tokens.push_back(tok);
+            --limit;
             return true;
-            });
         });
+        _return.count = static_cast<int32_t>(std::min<int64_t>(matching, std::numeric_limits<int32_t>::max()));
+    });
 
     SetResponseStatus(_return.status, APIRequestStatusType::SUCCESS);
 }
