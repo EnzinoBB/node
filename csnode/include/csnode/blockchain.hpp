@@ -100,6 +100,23 @@ public:
     // pruned storage: the blocks below this one are being or will be removed (0: nothing scheduled)
     cs::Sequence pruneTarget() const;
 
+    // Backward sync (docs/specs/2026-10-17-backward-sync-design.md): the block below the first
+    // stored one must have the hash prevHash. first is 0 when the storage holds the chain from block
+    // 0; prevHash is empty then, and when the first stored block cannot be read
+    struct BackfillAnchor {
+        cs::Sequence first = 0;
+        csdb::PoolHash prevHash;
+    };
+    BackfillAnchor getBackfillAnchor() const;
+    // stores a verified block first - 1 without applying it to the caches: transaction index, block
+    // hashes, non-empty blocks, storage, then the first stored sequence, in that order. false if it
+    // was not stored; the index and the block hashes may then hold it ahead of the storage, which
+    // the next attempt and the start-up repair both take as it is
+    bool storeBackfilledBlock(const csdb::Pool& pool);
+    // the backfilled blocks to disk: the index, the block hashes, then the storage, so that after a
+    // power cut the first two are not behind the storage
+    bool flushBackfill();
+
     // return unique id of database if at least one unique block has written, otherwise (only genesis block) 0
     uint64_t uuid() const;
 
@@ -499,6 +516,8 @@ private:
     class TransactionsLoader;
 
     void updateNonEmptyBlocks(const csdb::Pool&);
+    // backward sync: a backfilled block with transactions joins the chain of non-empty blocks
+    void mergeNonEmptyBlock(const csdb::Pool&);
 
     bool good_;
 
@@ -633,6 +652,10 @@ private:
     void pruneStep();
     std::atomic<cs::Sequence> firstStoredSeq_ = 0;
     cs::Sequence pruneUpTo_ = 0;
+    // backward sync: the anchor of the first stored block, kept while that block stays the first
+    // (under dbLock_)
+    BackfillAnchor backfillAnchorLocked() const;
+    mutable BackfillAnchor backfillAnchor_;
     // consensus settings persisted in quick-start caches; same defaults as BlockChain_Serializer::clear()
     int32_t blockRewardIntegral_ = 0;
     uint64_t blockRewardFraction_ = 0;

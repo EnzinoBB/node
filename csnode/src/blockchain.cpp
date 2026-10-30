@@ -287,6 +287,17 @@ bool BlockChain::init(
         }
     }
 
+    // backward sync writes the index and the block hashes of a block before the block itself: a
+    // stop in between leaves the bottom edge to repair, before the checks below would take it for
+    // damage. Only on a node whose index has a backfill floor; the others have nothing to repair
+    if (!stop_ && !storage_.last_hash().is_empty() && trxIndex_->backfillFloor() != cs::kWrongSequence) {
+        const auto load = [this](cs::Sequence seq) { return storage_.pool_load(seq); };
+        if (!trxIndex_->rebuildDeferred()) {
+            trxIndex_->repairBackfillFloor(firstStoredSeq_.load(), load);
+        }
+        blockHashes_->repairBottom(firstStoredSeq_.load(), lastSequence_.load(), load);
+    }
+
     if (trxIndex_->rebuildDeferred()) {
         const bool rebuilt = trxIndex_->rebuildFrom(firstStoredSeq_.load(), lastSequence_.load(),
             [this](cs::Sequence seq) { return storage_.pool_load(seq); },
@@ -398,6 +409,94 @@ void BlockChain::pruneStep() {
     }
 }
 
+BlockChain::BackfillAnchor BlockChain::getBackfillAnchor() const {
+    std::lock_guard lock(dbLock_);
+    return backfillAnchorLocked();
+}
+
+BlockChain::BackfillAnchor BlockChain::backfillAnchorLocked() const {
+    const cs::Sequence first = firstStoredSeq_;
+    if (first == 0 || !storage_.isOpen()) {
+        return BackfillAnchor{};
+    }
+    if (backfillAnchor_.first == first && !backfillAnchor_.prevHash.is_empty()) {
+        return backfillAnchor_;
+    }
+    BackfillAnchor anchor;
+    anchor.first = first;
+    const csdb::Pool pool = storage_.pool_load(first);
+    if (pool.is_valid()) {
+        anchor.prevHash = pool.previous_hash();
+        backfillAnchor_ = anchor;
+    }
+    return anchor;
+}
+
+bool BlockChain::storeBackfilledBlock(const csdb::Pool& pool) {
+    const cs::Sequence seq = pool.sequence();
+    {
+        // the caller verified the block against the one above it: checked once more, it costs a
+        // comparison and keeps a mistake of the caller out of the storage
+        std::lock_guard lock(dbLock_);
+        const BackfillAnchor anchor = backfillAnchorLocked();
+        if (!pool.is_valid() || anchor.prevHash.is_empty() || seq + 1 != anchor.first || pool.hash() != anchor.prevHash) {
+            cserror() << "BACKFILL: block " << seq << " is not the block below the first stored block "
+                      << anchor.first << ", not stored";
+            return false;
+        }
+    }
+
+    // the index first and outside dbLock_: it reads the wallet cache, whose lock is never taken
+    // while dbLock_ is held. Only the processor thread writes the index, as for the live blocks
+    const bool firstFloor = trxIndex_->backfillFloor() == cs::kWrongSequence;
+    trxIndex_->indexBackfilledBlock(pool);
+    if (firstFloor) {
+        // the start-up repairs run only where the index holds a backfill floor: the first one goes
+        // to disk before any block is stored, or a power cut before the first flushBackfill could
+        // keep the blocks and lose the floor, and leave them unindexed
+        trxIndex_->flush();
+    }
+
+    std::lock_guard lock(dbLock_);
+    if (firstStoredSeq_ != seq + 1) {
+        cswarning() << "BACKFILL: the first stored block moved to " << firstStoredSeq_.load() << ", block " << seq << " not stored";
+        return false;
+    }
+    blockHashes_->update(pool);
+    mergeNonEmptyBlock(pool);
+    bool stored = false;
+    try {
+        stored = storage_.pool_save_backfill(pool);
+    }
+    catch (const std::exception& e) {
+        // as saveDeferredBlock: an engine that needs recovery until a restart stops the node
+        cserror() << "BACKFILL: block " << seq << " cannot be stored, the database must be recovered: " << e.what()
+                  << "; stopping the node";
+        Node::stopOnError();
+        return false;
+    }
+    if (!stored) {
+        cswarning() << "BACKFILL: block " << seq << " not stored: " << storage_.last_error_message();
+        return false;
+    }
+    firstStoredSeq_ = seq;
+    backfillAnchor_ = BackfillAnchor{seq, pool.previous_hash()};
+    if (seq == 1 && uuid_ == 0) {
+        // as recordBlock does: a node from a snapshot has read no block 1 so far
+        uuid_ = uuidFromBlock(pool);
+        csdebug() << kLogPrefix << "UUID = " << uuid_;
+    }
+    csdebug() << "BACKFILL: block " << seq << " stored";
+    return true;
+}
+
+bool BlockChain::flushBackfill() {
+    // no dbLock_, as for the flushes of a live checkpoint: the engines sync on their own
+    trxIndex_->flush();
+    blockHashes_->flush();
+    return storage_.flush();
+}
+
 uint64_t BlockChain::uuid() const {
     return uuid_;
 }
@@ -484,6 +583,43 @@ inline void BlockChain::updateNonEmptyBlocks(const csdb::Pool& pool) {
 
         lastNonEmptyBlock_.poolSeq = pool.sequence();
         lastNonEmptyBlock_.transCount = static_cast<uint32_t>(transactionsCount);
+    }
+}
+
+// The map links each non-empty block to the previous one. A node from a snapshot inherits a map
+// that covers the whole chain (its lineage synced from block 0), so a backfilled block is found
+// linked already; where the map has a gap, the block goes in between its neighbours
+void BlockChain::mergeNonEmptyBlock(const csdb::Pool& pool) {
+    const auto transactionsCount = pool.transactions_count();
+    if (transactionsCount == 0) {
+        return;
+    }
+    const cs::Sequence seq = pool.sequence();
+    const NonEmptyBlockData block{seq, static_cast<uint32_t>(transactionsCount)};
+
+    // the lowest non-empty block known above this one, which must name it as its previous
+    cs::Sequence above = cs::kWrongSequence;
+    const auto next = previousNonEmpty_.upper_bound(seq);
+    if (next != previousNonEmpty_.end()) {
+        const cs::Sequence previous = next->second.poolSeq;
+        if (previous == seq) {
+            return;
+        }
+        if (previous < seq) {
+            previousNonEmpty_.emplace(seq, next->second);
+            next->second = block;
+            return;
+        }
+        if (previous >= next->first) {
+            return;   // not a previous block: left alone
+        }
+        above = previous;    // the oldest block of the map, which has no entry of its own
+    }
+    else if (lastNonEmptyBlock_.transCount > 0 && lastNonEmptyBlock_.poolSeq > seq) {
+        above = lastNonEmptyBlock_.poolSeq;
+    }
+    if (above != cs::kWrongSequence) {
+        previousNonEmpty_.emplace(above, block);
     }
 }
 

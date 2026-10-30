@@ -1,6 +1,7 @@
 #include "gtest/gtest.h"
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -83,5 +84,101 @@ TEST(BlockHashes, MissingHashesAreInconsistent) {
         hashes.remove(s);
     }
     EXPECT_FALSE(hashes.consistentWith(0, 999, [](cs::Sequence s) { return block(s).hash(); }));
+    hashes.close();
+}
+
+namespace {
+// the stored blocks from..to, as a load callback answers them
+std::function<csdb::Pool(cs::Sequence)> storedBlocks(cs::Sequence from, cs::Sequence to) {
+    return [from, to](cs::Sequence s) { return s >= from && s <= to ? block(s) : csdb::Pool{}; };
+}
+}  // namespace
+
+// Backward sync wrote the hashes of blocks 10 and 11 but stopped before storing them: the first
+// stored block is 12, and the entries below it go.
+TEST(BlockHashes, RepairBottomRemovesEntriesBelowTheFirstStoredBlock) {
+    auto dir = freshDir("bottom_below");
+    cs::BlockHashes hashes(dir.string());
+    for (cs::Sequence s = 10; s <= 20; ++s) {
+        hashes.update(block(s));
+    }
+    EXPECT_EQ(hashes.repairBottom(12, 20, storedBlocks(12, 20)), 2u);
+    EXPECT_TRUE(hashes.find(10).is_empty());
+    EXPECT_TRUE(hashes.find(11).is_empty());
+    EXPECT_EQ(hashes.find(block(11).hash()), cs::kWrongSequence);
+    EXPECT_EQ(hashes.find(12), block(12).hash());
+    EXPECT_EQ(hashes.size(), 9u);
+    EXPECT_TRUE(hashes.consistentWith(12, 20, [](cs::Sequence s) { return block(s).hash(); }));
+    hashes.close();
+}
+
+// The storage kept blocks 12 and 13, the hash databases lost them (a power cut before a flush):
+// they are inserted from the storage.
+TEST(BlockHashes, RepairBottomInsertsTheLowestStoredBlocks) {
+    auto dir = freshDir("bottom_missing");
+    cs::BlockHashes hashes(dir.string());
+    for (cs::Sequence s = 14; s <= 20; ++s) {
+        hashes.update(block(s));
+    }
+    EXPECT_EQ(hashes.repairBottom(12, 20, storedBlocks(12, 20)), 2u);
+    for (cs::Sequence s = 12; s <= 13; ++s) {
+        EXPECT_EQ(hashes.find(s), block(s).hash()) << s;
+        EXPECT_EQ(hashes.find(block(s).hash()), s) << s;
+    }
+    EXPECT_TRUE(hashes.consistentWith(12, 20, [](cs::Sequence s) { return block(s).hash(); }));
+    hashes.close();
+}
+
+// Nothing to do: nothing changes, and the walks stop at once.
+TEST(BlockHashes, RepairBottomOfConsistentDatabasesChangesNothing) {
+    auto dir = freshDir("bottom_none");
+    cs::BlockHashes hashes(dir.string());
+    for (cs::Sequence s = 12; s <= 20; ++s) {
+        hashes.update(block(s));
+    }
+    size_t loads = 0;
+    const auto load = [&loads](cs::Sequence s) { ++loads; return block(s); };
+    EXPECT_EQ(hashes.repairBottom(12, 20, load), 0u);
+    EXPECT_EQ(loads, 1u);
+    EXPECT_EQ(hashes.size(), 9u);
+    const auto nothingStored = [](cs::Sequence) { return csdb::Pool{}; };
+    EXPECT_EQ(hashes.repairBottom(0, 0, nothingStored), 0u);
+    hashes.close();
+}
+
+// Both at once, and a stale hash at the first stored block (another block of that sequence) and a
+// lost hash -> sequence entry are replaced.
+TEST(BlockHashes, RepairBottomMixed) {
+    auto dir = freshDir("bottom_mixed");
+    {
+        cs::BlockHashes hashes(dir.string());
+        for (cs::Sequence s : {8u, 9u, 10u, 11u}) {
+            hashes.update(block(s));
+        }
+        hashes.update(block(12, " (another)"));
+        for (cs::Sequence s = 14; s <= 20; ++s) {
+            hashes.update(block(s));
+        }
+        hashes.close();
+    }
+    {
+        // the hash -> sequence entry of block 14 is lost
+        cs::Lmdb hashDb(dir.string() + "/hashdb");
+        hashDb.setMapSize(cs::Lmdb::Default1GbMapSize);
+        hashDb.open();
+        hashDb.remove(block(14).hash().to_binary());
+        hashDb.close();
+    }
+    cs::BlockHashes hashes(dir.string());
+    EXPECT_EQ(hashes.repairBottom(12, 20, storedBlocks(12, 20)), 4u + 3u);
+    EXPECT_TRUE(hashes.find(11).is_empty());
+    EXPECT_TRUE(hashes.find(8).is_empty());
+    EXPECT_EQ(hashes.find(block(12, " (another)").hash()), cs::kWrongSequence);
+    for (cs::Sequence s = 12; s <= 20; ++s) {
+        EXPECT_EQ(hashes.find(s), block(s).hash()) << s;
+        EXPECT_EQ(hashes.find(block(s).hash()), s) << s;
+    }
+    EXPECT_TRUE(hashes.consistentWith(12, 20, [](cs::Sequence s) { return block(s).hash(); }));
+    hashes.flush();
     hashes.close();
 }
