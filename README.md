@@ -22,7 +22,8 @@ This repository is the community continuation of [CREDITSCOM/node](https://githu
 | What changes from the official node | [docs/differences.md](docs/differences.md) |
 | Every change, pull request by pull request | [docs/CHANGES.md](docs/CHANGES.md) |
 | Block database, pruned storage, conversion | [docs/storage.md](docs/storage.md) |
-| Docker (pruned node from a snapshot) | [packaging/docker/README.md](packaging/docker/README.md) |
+| Docker (pruned node from a snapshot, or a full node from a snapshot that fetches the older blocks in the background) | [packaging/docker/README.md](packaging/docker/README.md) |
+| A full node from a snapshot without Docker (backward sync) | [docs/storage.md](docs/storage.md#a-full-node-from-a-snapshot) |
 | Packages (Linux x86-64, Windows x64, macOS Apple Silicon; `config.ini` full and `config.pruned.ini` pruned, one package per system) | [Releases](https://github.com/EnzinoBB/node/releases) |
 
 Replacing the official binaries with the community ones, with the official `config.ini`, keeps the same BerkeleyDB database and the same behaviour on the network. The new features (other block databases, pruned storage, conversion) are opt-in.
