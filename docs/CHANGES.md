@@ -49,7 +49,7 @@ lines under the new release.
 | #131 | packaging: a guided set-up in every package (`setup.sh`, `setup.bat`): pruned or full, database, how the first start gets the chain, snapshot sharing, and the contract executor (community or official: it shows the build in the folder, can download either, checked, and sets `executor_commit_min/max` so that the node starts it; an upgrade by copying only the node binary keeps the old executor) |
 | #132 | api: `TransactionFlow` refuses a contract call that no method of the contract matches (unknown method, wrong argument count, or a Variant that cannot match the declared type, such as a token amount as `v_string` for a `BigDecimal`), which would fail on every node with its fee paid; ci: `testnet.yml` inputs `tokens`/`tokens_via`, the executor harness compares only the answers |
 | #135 | samples: a token template (`samples/contracts/Token.java`: checked amounts and decimals, balances at the token's scale, ERC-20 `approve()`, sale through `payable()`), run by the executor harness, and a Python client that calls a contract with the argument types it declares (`samples/python/token_client.py`) |
-| #138 | ci: macOS jobs time out after their measured duration plus a margin (build 60, platform sync 40, private network 60 minutes instead of 240, 90, 150) |
+| #138 | ci: macOS jobs run on `macos-15` (GitHub retires the macOS 14 images on 2026-11-02 and fails them during brownouts until then), with binaries built for macOS 14 and later, and time out after their measured duration plus a margin (build 60, platform sync 40, private network 60 minutes instead of 240, 90, 150) |
 
 ## community.14 — 2026-10-27
 
