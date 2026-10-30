@@ -31,6 +31,7 @@ BackwardSync::BackwardSync(Hooks hooks, Settings settings)
         hooks_.clock = steadyMs;
     }
     settings_.batch = std::clamp<size_t>(settings_.batch, 1, 1000);
+    settings_.storePerTurn = std::clamp<size_t>(settings_.storePerTurn, 1, 1000);
 }
 
 uint64_t BackwardSync::now() const {
@@ -70,6 +71,8 @@ BackwardSync::Stats BackwardSync::stats() const {
     s.confirmationErrors = confirmationErrors_;
     s.inFlight = inFlightCount_;
     s.buffered = bufferedCount_;
+    s.busyUs = busyUs_;
+    s.longestTurnUs = longestTurnUs_;
     s.started = started_;
     s.done = done_;
     return s;
@@ -163,7 +166,8 @@ void BackwardSync::tick(const Context& ctx) {
         const double hoursLeft = rate > 0 ? static_cast<double>(next_ - floor_) / rate / 3600.0 : 0;
         log("BACKFILL: stored down to #" + std::to_string(next_ + 1) + ", " + std::to_string(static_cast<size_t>(rate)) +
             " blocks/s over the last " + std::to_string(stored_ - progressStored_) + ", " + std::to_string(inFlight_.size()) +
-            " peers in use, about " + std::to_string(static_cast<size_t>(hoursLeft + 0.5)) + " h left");
+            " peers in use, about " + std::to_string(static_cast<size_t>(hoursLeft + 0.5)) + " h left, " +
+            std::to_string(busyUs_ / 1000) + " ms of processor thread so far (longest turn " + std::to_string(longestTurnUs_ / 1000) + " ms)");
         progressAt_ = t;
         progressStored_ = stored_;
     }
@@ -193,11 +197,15 @@ void BackwardSync::request(const Context& ctx) {
         }
         else if (!requestedAll_) {
             const Sequence window = static_cast<Sequence>(kBufferBatches * settings_.batch);
+            if (nextToRequest_ < floor_) {
+                requestedAll_ = true;   // the floor rose (pruning) past what is left to ask for
+                break;
+            }
             if (next_ - nextToRequest_ >= window) {
                 break;
             }
             const Sequence hi = nextToRequest_;
-            const Sequence lo = hi - floor_ + 1 > settings_.batch ? hi - settings_.batch + 1 : floor_;
+            const Sequence lo = hi - floor_ >= settings_.batch ? hi - settings_.batch + 1 : floor_;
             for (Sequence s = lo; s <= hi; ++s) {
                 sequences.insert(s);
             }
@@ -308,6 +316,11 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
     if (batch.missing.empty()) {
         inFlight_.erase(it);
         auto& state = peers_[sender];
+        if (state.paced && !state.awaitingAnswer) {
+            // served without AwaitAnswer: its anti-duplicate log is not active (any more)
+            state.paced = false;
+            csdebug() << "BACKFILL: " << keyText(sender) << " served a batch without AwaitAnswer: no pacing";
+        }
         state.awaitingAnswer = false;
         state.failures = 0;
         state.nextRequestAt = now() + (state.paced ? kPacedMs : kUnpacedMs);
@@ -318,7 +331,15 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
 }
 
 void BackwardSync::onSyncroMessage(const PublicKey& sender, SyncroMessage msg) {
+    if (!started_ || done_) {
+        return;
+    }
     const bool ours = inFlight_.count(sender) != 0;
+    // AwaitAnswer tells whether a peer's anti-duplicate log is active, whatever request it answers;
+    // the others concern the backfill only when it has a batch with that peer
+    if (!ours && msg != SyncroMessage::AwaitAnswer) {
+        return;
+    }
     auto& state = peers_[sender];
     const Sequence highest = ours && !inFlight_[sender].missing.empty() ? *inFlight_[sender].missing.rbegin() : next_;
     switch (msg) {
@@ -450,7 +471,20 @@ void BackwardSync::drain() {
     if (storeFailing_ && t < retryStoreAt_) {
         return;
     }
-    while (!done_) {
+    if (buffer_.count(next_) == 0) {
+        return;
+    }
+    // pruning may have moved the bottom of a pruned node's window above the next block
+    if (hooks_.floor) {
+        floor_ = std::max(floor_, hooks_.floor());
+        if (next_ < floor_) {
+            finish();
+            return;
+        }
+    }
+    const auto startedAt = std::chrono::steady_clock::now();
+    size_t storedNow = 0;
+    while (!done_ && storedNow < settings_.storePerTurn) {
         const auto it = buffer_.find(next_);
         if (it == buffer_.end()) {
             break;
@@ -490,6 +524,7 @@ void BackwardSync::drain() {
         buffer_.erase(it);
         first_ = next_;
         ++stored_;
+        ++storedNow;
         ++storedSinceFlush_;
         if (next_ <= floor_) {
             finish();
@@ -498,6 +533,12 @@ void BackwardSync::drain() {
         --next_;
     }
     bufferedCount_ = buffer_.size();
+    const auto us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - startedAt).count());
+    busyUs_ += us;
+    if (us > longestTurnUs_) {
+        longestTurnUs_ = us;
+    }
     flushIfDue(false);
 }
 
@@ -520,11 +561,13 @@ void BackwardSync::flushIfDue(bool force) {
 void BackwardSync::finish() {
     done_ = true;
     flushIfDue(true);
+    const std::string cost = ", " + std::to_string(stored_.load()) + " blocks stored in " + std::to_string(busyUs_ / 1000) +
+                             " ms of processor thread, longest turn " + std::to_string(longestTurnUs_ / 1000) + " ms";
     if (floor_ == 0) {
-        log("BACKFILL: full history stored, blocks 0.." + std::to_string(head_) + " and later");
+        log("BACKFILL: full history stored, blocks 0.." + std::to_string(head_) + " and later" + cost);
     }
     else {
-        log("BACKFILL: stored down to the floor " + std::to_string(floor_) + " (pruned node)");
+        log("BACKFILL: stored down to the floor " + std::to_string(floor_) + " (pruned node)" + cost);
     }
     inFlight_.clear();
     buffer_.clear();

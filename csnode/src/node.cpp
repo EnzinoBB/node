@@ -413,8 +413,14 @@ bool Node::initRunning() {
 
 void Node::startBackfill() {
     const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
-    if (backwardSync_ || !sto.backfill) {
+    if (!sto.backfill) {
         return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+        if (backwardSync_) {
+            return;
+        }
     }
     backfillStartSeq_ = blockChain_.getLastSeq();
     cs::BackwardSync::Hooks hooks;
@@ -431,12 +437,17 @@ void Node::startBackfill() {
     cs::BackwardSync::Settings settings;
     settings.batch = sto.backfillBatch;
     settings.rate = sto.backfillRate;
-    backwardSync_ = std::make_unique<cs::BackwardSync>(std::move(hooks), settings);
-    // ticks are queued to the processor thread, which also handles the replies
+    settings.storePerTurn = sto.backfillStorePerTurn;
+    // created under the lock that stop() takes to read the pointer (finishBootstrap runs this on the
+    // processor thread while a stop may come from another one)
     std::lock_guard<std::mutex> lock(backfillTimerMutex_);
-    if (!bootstrapStop_) {
-        backfillTimer_.start(500, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+    if (bootstrapStop_) {
+        return;
     }
+    backwardSync_ = std::make_unique<cs::BackwardSync>(std::move(hooks), settings);
+    // ticks are queued to the processor thread, which also handles the replies; every 100 ms, as a
+    // tick stores at most storePerTurn blocks
+    backfillTimer_.start(100, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
 }
 
 void Node::stopBackfillTimer() {
@@ -845,9 +856,12 @@ void Node::stop() {
         worker.join();
     }
 
-    stopBackfillTimer();
-    if (backwardSync_) {
-        backwardSync_->stop();
+    {
+        std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+        backfillTimer_.stop();
+        if (backwardSync_) {
+            backwardSync_->stop();
+        }
     }
 
     if (poolSynchronizer_) {

@@ -59,6 +59,9 @@ public:
     struct Settings {
         size_t batch = 100;    // blocks per request, 1..1000
         size_t rate = 1000;    // blocks requested per second over all peers, 0: unlimited
+        // blocks verified and stored per call (a tick or a reply), so that the processor thread,
+        // which also runs consensus, is never held long; the rest waits for the next call
+        size_t storePerTurn = 50;
     };
 
     struct Stats {
@@ -69,6 +72,8 @@ public:
         size_t confirmationErrors = 0;
         size_t inFlight = 0;
         size_t buffered = 0;
+        uint64_t busyUs = 0;         // processor-thread time spent verifying and storing
+        uint64_t longestTurnUs = 0;  // the longest single call
         bool started = false;
         bool done = false;
     };
@@ -174,6 +179,8 @@ private:
     std::atomic<size_t> confirmationErrors_{0};
     std::atomic<size_t> inFlightCount_{0};
     std::atomic<size_t> bufferedCount_{0};
+    std::atomic<uint64_t> busyUs_{0};
+    std::atomic<uint64_t> longestTurnUs_{0};
 };
 
 }  // namespace cs

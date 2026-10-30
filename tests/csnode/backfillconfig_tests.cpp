@@ -25,13 +25,15 @@ TEST(BackfillConfig, Defaults) {
     EXPECT_TRUE(d.backfill);
     EXPECT_EQ(d.backfillBatch, 100u);
     EXPECT_EQ(d.backfillRate, 1000u);
+    EXPECT_EQ(d.backfillStorePerTurn, 50u);
 }
 
 TEST(BackfillConfig, EveryKey) {
-    const auto d = parse("backfill=off\nbackfill_batch=250\nbackfill_rate=0\n");
+    const auto d = parse("backfill=off\nbackfill_batch=250\nbackfill_rate=0\nbackfill_store_per_turn=20\n");
     EXPECT_FALSE(d.backfill);
     EXPECT_EQ(d.backfillBatch, 250u);
     EXPECT_EQ(d.backfillRate, 0u);
+    EXPECT_EQ(d.backfillStorePerTurn, 20u);
     EXPECT_TRUE(parse("backfill=on\n").backfill);
     EXPECT_FALSE(parse("backfill=false\n").backfill);
 }

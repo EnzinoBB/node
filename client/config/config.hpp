@@ -73,6 +73,7 @@ struct StorageData {
     bool backfill = true;                   // backfill=on|off
     size_t backfillBatch = 100;             // blocks per request, 1..1000
     size_t backfillRate = 1000;             // blocks requested per second, 0 = unlimited
+    size_t backfillStorePerTurn = 50;       // blocks verified and stored per processor-thread turn, 1..1000
 };
 
 // [snapshot]: snapshots served by this node to its p2p neighbours and fetched from them at a first

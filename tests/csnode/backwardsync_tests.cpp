@@ -109,6 +109,15 @@ const Chain& chain() {
     return c;
 }
 
+// the tests store every buffered block in one call unless they say otherwise
+cs::BackwardSync::Settings settingsOf(size_t batch = 100, size_t rate = 1000, size_t perTurn = 1000) {
+    cs::BackwardSync::Settings s;
+    s.batch = batch;
+    s.rate = rate;
+    s.storePerTurn = perTurn;
+    return s;
+}
+
 cs::PublicKey peerKey(uint8_t n) {
     cs::PublicKey k{};
     k.fill(n);
@@ -125,7 +134,7 @@ protected:
         make();
     }
 
-    void make(cs::BackwardSync::Settings settings = {}) {
+    void make(cs::BackwardSync::Settings settings = settingsOf()) {
         cs::BackwardSync::Hooks hooks;
         hooks.anchor = [this] {
             return cs::BackwardSync::Anchor{first_, first_ == 0 ? csdb::PoolHash{} : chain().blocks[first_].previous_hash()};
@@ -334,7 +343,7 @@ TEST_F(BackfillTest, ASilentPeerIsReplaced) {
 // delays it 10 s; NoSuchBlocks after AwaitAnswer leaves it out for good
 TEST_F(BackfillTest, OrderThirtyFivePeersArePaced) {
     peers_.resize(2);
-    make({10, 0});
+    make(settingsOf(10, 0));
     tick();
     ASSERT_EQ(requests_.size(), 2u);
     const auto paced = requests_[0].first;
@@ -347,6 +356,10 @@ TEST_F(BackfillTest, OrderThirtyFivePeersArePaced) {
         tick();
         for (const auto& r : requests_) {
             askedAt[r.first].push_back(now_);
+            if (r.first == paced) {
+                // its anti-duplicate log is active: every request gets AwaitAnswer first
+                sync_->onSyncroMessage(paced, cs::SyncroMessage::AwaitAnswer);
+            }
         }
         answerAll();
     }
@@ -399,7 +412,7 @@ TEST_F(BackfillTest, OrderThirtyFivePeersArePaced) {
 
 // (6) the buffer is bounded: a reply is taken only up to eight batches waiting to be stored
 TEST_F(BackfillTest, TheBufferIsBounded) {
-    make({50, 0});   // batches of 50, no rate limit: at most 400 blocks wait
+    make(settingsOf(50, 0));   // batches of 50, no rate limit: at most 400 blocks wait
     tick();
     ASSERT_EQ(requests_.size(), 4u);
     // the batch the storage waits for never comes; the others do, and more are asked for
@@ -458,7 +471,7 @@ TEST_F(BackfillTest, ARestartResumesBelowTheFirstStoredBlock) {
 
 // (9) backfill_rate: no more blocks asked for than the rate allows, beyond the burst of 4 batches
 TEST_F(BackfillTest, TheRateIsRespected) {
-    make({5, 20});
+    make(settingsOf(5, 20));
     size_t asked = 0;
     const uint64_t start = now_;
     for (int i = 0; i < 20; ++i) {   // 10 s
@@ -519,4 +532,60 @@ TEST_F(BackfillTest, StopEndsIt) {
     tick();
     EXPECT_TRUE(requests_.empty());
     EXPECT_FALSE(sync_->isActive());
+}
+
+// at most storePerTurn blocks per call: the processor thread also runs consensus; the rest is
+// stored on the next ticks
+TEST_F(BackfillTest, TheWorkPerTurnIsBounded) {
+    make(settingsOf(100, 0, 30));
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    EXPECT_EQ(first_, kFirst - 30);
+    tick();
+    EXPECT_EQ(first_, kFirst - 60);
+    tick();
+    tick();
+    EXPECT_EQ(first_, kFirst - 100);
+    EXPECT_GT(sync_->stats().busyUs, 0u);
+    EXPECT_GT(sync_->stats().longestTurnUs, 0u);
+}
+
+// L7: pruning raised the floor above blocks waiting in the buffer: the backfill ends, nothing is
+// stored below the floor
+TEST_F(BackfillTest, AFloorRaisedByPruningEndsIt) {
+    floor_ = 100;
+    tick();
+    const auto pending = requests_;
+    floor_ = 420;   // pruning removed blocks up to 419: the bottom of the window is above the next block
+    sync_->onBlocks(pending[0].first, blocksFor(pending[0].second));
+    EXPECT_TRUE(sync_->stats().done);
+    EXPECT_EQ(first_, kFirst);
+    EXPECT_EQ(logged("could not be stored"), 0u);
+}
+
+// L5: a peer that once answered AwaitAnswer and then serves a batch without it is no longer paced
+TEST_F(BackfillTest, PacingEndsWhenAPeerServesWithoutAwaitAnswer) {
+    peers_.resize(1);
+    make(settingsOf(10, 0));
+    tick();
+    const auto peer = requests_[0].first;
+    sync_->onSyncroMessage(peer, cs::SyncroMessage::AwaitAnswer);
+    answerAll();
+    tick();
+    EXPECT_TRUE(requests_.empty()) << "paced: 6 s";
+    tick(6'000);
+    ASSERT_EQ(requests_.size(), 1u);
+    answerAll();   // no AwaitAnswer this time
+    tick();
+    EXPECT_EQ(requests_.size(), 1u) << "not paced any more";
+}
+
+// L4: messages for requests that are not the backfill's leave no trace
+TEST_F(BackfillTest, OtherSyncroMessagesAreIgnored) {
+    const auto stranger = peerKey(99);
+    sync_->onSyncroMessage(stranger, cs::SyncroMessage::NoSuchBlocks);   // not started
+    tick();
+    sync_->onSyncroMessage(stranger, cs::SyncroMessage::NoSuchBlocks);
+    sync_->onSyncroMessage(stranger, cs::SyncroMessage::DuplicatedRequest);
+    EXPECT_EQ(logged("BACKFILL: peer"), 0u);
 }

@@ -109,7 +109,12 @@
 #        FORGE_NODE / CORRUPT_NODE (odd, a CREDITS_TESTNET build): that serving node declares a forged
 #        state digest / flips a byte of every third piece it serves
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
-#        node 5 is restarted as a pruned node and node 6 as a full one
+#        node 5 is restarted as a pruned node and node 6 as a full one; n6 then fetches the blocks it
+#        pruned from its peers (backward sync). BACKFILL_RATE / BACKFILL_BATCH / BACKFILL_PER_TURN set
+#        its [storage] backfill_rate / backfill_batch / backfill_store_per_turn. BACKFILL_MEASURE=1:
+#        n1's and n6's block rate and round times while n6 backfills (a trusted node: n6 is an initial
+#        confidant), compared with as long a window after it; the block rate may fall by 20 %, the
+#        round time p95 rise by 50 % (with at least 10 rounds in each window)
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
 #        after its second batch and again with every block converted (testnet-convert-kill), its
@@ -320,6 +325,10 @@ ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo $((JOIN_NODE + JOIN_EXTRA)) || echo "
 is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
 EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
+BACKFILL_RATE=${BACKFILL_RATE:-}
+BACKFILL_BATCH=${BACKFILL_BATCH:-}
+BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
+BACKFILL_MEASURE=${BACKFILL_MEASURE:-0}
 declare -a STORE_BACKEND STORE_PRUNED
 if [ -n "$NODE_STORAGE" ]; then
     IFS=, read -r -a entries <<<"$NODE_STORAGE"
@@ -1137,6 +1146,9 @@ PY
         for i in 5 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
         sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n5/config.ini"
         sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_RATE" ] || sed -i "/^prune_keep_blocks=0/a backfill_rate=$BACKFILL_RATE" "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_BATCH" ] || sed -i "/^prune_keep_blocks=0/a backfill_batch=$BACKFILL_BATCH" "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_PER_TURN" ] || sed -i "/^prune_keep_blocks=0/a backfill_store_per_turn=$BACKFILL_PER_TURN" "$WORK/n6/config.ini"
         switch_lines5=$(wc -l < "$WORK/n5/node.log")
         switch_lines6=$(wc -l < "$WORK/n6/node.log")
         for i in 5 6; do start_node "$i"; done
@@ -1677,6 +1689,65 @@ if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
     ! grep -aq 'pruned storage: blocks before .* removed' <<<"$after6" \
         || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
     echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
+fi
+# backward sync under load: the consensus while the trusted n6 backfills, against as long a window
+# after it (both after the restart of the storage switch)
+if [ "$BACKFILL_MEASURE" = 1 ] && [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
+    python3 - "$WORK/n1/node.log" "$WORK/n6/node.log" <<'PY' || { echo "FAIL: the consensus slowed down while n6 backfilled"; exit 1; }
+import re, sys, datetime
+stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
+def t(line):
+    m = stamp.match(line)
+    return datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() if m else None
+def read(path):
+    rounds, seqs, lines = [], [], []
+    for line in open(path, errors="replace"):
+        x = t(line)
+        if x is None:
+            continue
+        if " R-" in line and "=====" in line:
+            rounds.append(x)
+        elif "Last written sequence = " in line:
+            m = re.search(r"Last written sequence = ([0-9']+)", line)
+            if m:
+                seqs.append((x, int(m.group(1).replace("'", ""))))
+        if "BACKFILL: " in line:
+            lines.append((x, line.strip()))
+    return rounds, seqs, lines
+def stats(rounds, seqs, a, b):
+    r = sorted(y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b)
+    s = [q for x, q in seqs if a <= x < b]
+    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
+    mean = sum(r) / len(r) if r else 0.0
+    return rate, p95, mean, len(r)
+n1 = read(sys.argv[1])
+n6 = read(sys.argv[2])
+start = next((x for x, l in n6[2] if "full node with blocks" in l), None)
+end = next((x for x, l in n6[2] if "full history stored" in l), None)
+if start is None or end is None:
+    print("FAIL: n6 did not backfill")
+    sys.exit(1)
+done_line = next(l for x, l in n6[2] if "full history stored" in l)
+print(f"backfill under load: n6 backfilled for {end - start:.1f} s: {done_line.split('BACKFILL: ')[1]}")
+length = max(end - start, 60.0)
+ok = True
+for name, (rounds, seqs, _) in (("n1", n1), ("n6", n6)):
+    during = stats(rounds, seqs, start, start + length)
+    after = stats(rounds, seqs, end + 30, end + 30 + length)
+    print(f"backfill under load: {name}: during {during[0]:.2f} blocks/s, round mean {during[2]:.2f} s p95 {during[1]:.2f} s ({during[3]} rounds); "
+          f"after {after[0]:.2f} blocks/s, round mean {after[2]:.2f} s p95 {after[1]:.2f} s ({after[3]} rounds)")
+    if during[3] < 10 or after[3] < 10:
+        print(f"backfill under load: {name}: fewer than 10 rounds in a window, not judged")
+        continue
+    if during[0] < 0.8 * after[0]:
+        print(f"FAIL: {name}: block rate {100 * (1 - during[0] / after[0]):.0f} % lower while backfilling (20 % allowed)")
+        ok = False
+    if during[1] > 1.5 * after[1]:
+        print(f"FAIL: {name}: round time p95 {100 * (during[1] / after[1] - 1):.0f} % higher while backfilling (50 % allowed)")
+        ok = False
+sys.exit(0 if ok else 1)
+PY
 fi
 # backward sync: each full node that started above block 0 fetched the older blocks from its peers,
 # refused none, ends with block 0 stored, and holds the same blocks as n1 (every 100th, over the API)
