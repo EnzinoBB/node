@@ -25,9 +25,16 @@ contract the two executors report the same id.
 
 A call must pass each argument in the type the method declares. A v1 token's
 `transfer(String, BigDecimal)` takes the amount as `v_big_decimal`. Sent as `v_string`, the
-call fails with "Cannot find a method by name and parameters specified", and the transaction
-fee is still charged. The reverse applies to v0 tokens. A wallet reads the types from
-`ContractMethodsGet` (or `SmartContractGet`) before it builds the call.
+call would fail on every node with "Cannot find a method by name and parameters specified", and
+the transaction fee would still be charged. The reverse applies to v0 tokens. A wallet reads the
+types from `ContractMethodsGet` (or `SmartContractGet`) before it builds the call.
+
+`TransactionFlow` refuses such a call before it reaches the network: a method the contract does
+not have, a wrong number of arguments, or an argument whose Variant cannot match the declared type
+(for example `transfer(java.lang.String, java.math.BigDecimal): argument 2 is java.math.BigDecimal
+(v_big_decimal), the call passes v_string`). Nothing is sent and no fee is paid. Only certain
+mismatches are refused: with types other than `String`, `BigDecimal`, `boolean`, `int`, `long`,
+`double` (and their wrappers) and `byte[]` the call goes on as before.
 
 ## A template and a client
 

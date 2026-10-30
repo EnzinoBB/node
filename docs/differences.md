@@ -179,6 +179,10 @@ rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md
   - `[params] sync_contract_execution` (default `true`): `false` skips the re-execution while
     syncing altogether, and every state comes from the confidants.
 
+- **Contract calls that cannot run are refused.** `TransactionFlow` checks the method and the types
+  of the arguments of a contract call against the contract, and refuses a call that no method
+  matches, which would fail on every node with its fee paid (a token amount passed as a string to
+  a method that takes a BigDecimal, or the reverse). See [tokens.md](tokens.md).
 - **Contract results after a quick start.** A node that quick-starts from a checkpoint at its last
   stored block reads no block. The official node then never marks its stored blocks as read, and
   every contract call sent through its API ends with "Transaction in progress" and no result,
