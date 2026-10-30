@@ -120,7 +120,9 @@
 #        FORGE_NODE / CORRUPT_NODE (odd, a CREDITS_TESTNET build): that serving node declares a forged
 #        state digest / flips a byte of every third piece it serves
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
-#        node 5 is restarted as a pruned node and node 6 as a full one; n6 then fetches the blocks it
+#        node 5 is restarted as a pruned node and node 6 as a full one; with STORAGE_SWITCH_NODE=<i>
+#        (another pruned node, e.g. a berkeleydb one of NODE_STORAGE) only that node goes from pruned to
+#        full; the node switched to full then fetches the blocks it
 #        pruned from its peers (backward sync). BACKFILL_RATE / BACKFILL_BATCH / BACKFILL_PER_TURN set
 #        its [storage] backfill_rate / backfill_batch / backfill_store_per_turn. BACKFILL_MEASURE=1:
 #        n1's and n6's block rate and round times from n6's first request (a trusted node: n6 is an
@@ -338,6 +340,9 @@ fi
 NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && [ "$JOIN_SOURCES" != keys ] && echo 1 || echo 0)}
 node_ip() { if [ "$NODE_NETS" = 1 ]; then echo "127.0.$1.1"; else echo 127.0.0.1; fi; }
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
+STORAGE_SWITCH_NODE=${STORAGE_SWITCH_NODE:-6}
+# the node switched from full to pruned at the same time: n5, with the default n6 only
+SWITCH_TO_PRUNED=$([ "$STORAGE_SWITCH_NODE" = 6 ] && echo 5 || true)
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
 INDEX_LOSS_NODE=${INDEX_LOSS_NODE:-$PRUNE_NODE}
@@ -387,7 +392,7 @@ done | tr '\n' ' ')
 # blocks from their peers (backward sync) and must hold the whole chain at the end. n6 after the
 # storage switch; the full joiner of a snapshot (imported, or fetched over p2p)
 BACKFILL_NODES=""
-if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then BACKFILL_NODES="6"; fi
+if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then BACKFILL_NODES="$STORAGE_SWITCH_NODE"; fi
 if [ "$JOIN_FULL" = 1 ] && { { [ "$SNAPSHOT_AT" -gt 0 ] && [ "$SNAPSHOT_CORRUPT" != 1 ]; } || { [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" != fallback ]; }; }; then
     BACKFILL_NODES="$BACKFILL_NODES $JOIN_NODE"
 fi
@@ -1254,19 +1259,20 @@ PY
 
     if [ "$STORAGE_SWITCH_AT" -gt 0 ] && [ "$storage_switched" -eq 0 ] && [ "$min" -ge "$STORAGE_SWITCH_AT" ]; then
         storage_switched=1
-        pruned_before=$(grep -a 'pruned storage: blocks before .* removed' "$WORK/n6"/node.log | tail -1 | sed -E "s/.*blocks before ([0-9']+) removed.*/\1/" | tr -d "'")
-        for i in 5 6; do kill -TERM "${PIDS[$i]}"; done
-        for i in 5 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
-        sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n5/config.ini"
-        sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n6/config.ini"
-        [ -z "$BACKFILL_RATE" ] || sed -i "/^prune_keep_blocks=0/a backfill_rate=$BACKFILL_RATE" "$WORK/n6/config.ini"
-        [ -z "$BACKFILL_BATCH" ] || sed -i "/^prune_keep_blocks=0/a backfill_batch=$BACKFILL_BATCH" "$WORK/n6/config.ini"
-        [ -z "$BACKFILL_PER_TURN" ] || sed -i "/^prune_keep_blocks=0/a backfill_store_per_turn=$BACKFILL_PER_TURN" "$WORK/n6/config.ini"
-        switch_lines5=$(wc -l < "$WORK/n5/node.log")
-        switch_lines6=$(wc -l < "$WORK/n6/node.log")
-        for i in 5 6; do start_node "$i"; done
-        [ "$BACKFILL_NODE" != 6 ] || backfill_node_started
-        echo "storage switch: n5 full -> pruned, n6 pruned -> full at sequence $min (n6 had pruned up to ${pruned_before:-none})"
+        sw=$STORAGE_SWITCH_NODE
+        pruned_before=$(grep -a 'pruned storage: blocks before .* removed' "$WORK/n$sw"/node.log | tail -1 | sed -E "s/.*blocks before ([0-9']+) removed.*/\1/" | tr -d "'")
+        for i in $SWITCH_TO_PRUNED $sw; do kill -TERM "${PIDS[$i]}"; done
+        for i in $SWITCH_TO_PRUNED $sw; do wait "${PIDS[$i]}" 2>/dev/null || true; done
+        [ -z "$SWITCH_TO_PRUNED" ] || sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n$SWITCH_TO_PRUNED/config.ini"
+        sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n$sw/config.ini"
+        [ -z "$BACKFILL_RATE" ] || sed -i "/^prune_keep_blocks=0/a backfill_rate=$BACKFILL_RATE" "$WORK/n$sw/config.ini"
+        [ -z "$BACKFILL_BATCH" ] || sed -i "/^prune_keep_blocks=0/a backfill_batch=$BACKFILL_BATCH" "$WORK/n$sw/config.ini"
+        [ -z "$BACKFILL_PER_TURN" ] || sed -i "/^prune_keep_blocks=0/a backfill_store_per_turn=$BACKFILL_PER_TURN" "$WORK/n$sw/config.ini"
+        [ -z "$SWITCH_TO_PRUNED" ] || switch_lines5=$(wc -l < "$WORK/n$SWITCH_TO_PRUNED/node.log")
+        switch_lines6=$(wc -l < "$WORK/n$sw/node.log")
+        for i in $SWITCH_TO_PRUNED $sw; do start_node "$i"; done
+        [ "$BACKFILL_NODE" != "$sw" ] || backfill_node_started
+        echo "storage switch: ${SWITCH_TO_PRUNED:+n$SWITCH_TO_PRUNED full -> pruned, }n$sw pruned -> full at sequence $min (n$sw had pruned up to ${pruned_before:-none})"
     fi
 
     # backward sync under faults: the steps of BACKFILL_CRASH, each while the node fetches
@@ -1871,17 +1877,20 @@ elif [ "$JOIN_FETCH" = p2p ]; then
 fi
 if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
     # no "tail | grep -q" under pipefail: grep -q stops at the first match and tail fails on SIGPIPE
-    after5=$(tail -n +"$((switch_lines5 + 1))" "$WORK/n5/node.log")
-    grep -aq 'pruned storage: blocks before .* removed' <<<"$after5" \
-        || { echo "FAIL: n5 did not prune after switching to pruned storage"; exit 1; }
-    # n6, now full, must still start from the block its last pruning left, and prune no more
-    after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n6/node.log")
+    sw=$STORAGE_SWITCH_NODE
+    if [ -n "$SWITCH_TO_PRUNED" ]; then
+        after5=$(tail -n +"$((switch_lines5 + 1))" "$WORK/n$SWITCH_TO_PRUNED/node.log")
+        grep -aq 'pruned storage: blocks before .* removed' <<<"$after5" \
+            || { echo "FAIL: n$SWITCH_TO_PRUNED did not prune after switching to pruned storage"; exit 1; }
+    fi
+    # the node now full must still start from the block its last pruning left, and prune no more
+    after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n$sw/node.log")
     oldest_after=$(grep -a -m1 'oldest block stored is' <<<"$after6" | sed -E 's/.*stored is //' | tr -d "'" || true)
     [ -n "$pruned_before" ] && [ "$oldest_after" = "$pruned_before" ] \
-        || { echo "FAIL: n6 had pruned up to ${pruned_before:-none}, its oldest block after the switch is ${oldest_after:-none}"; exit 1; }
+        || { echo "FAIL: n$sw had pruned up to ${pruned_before:-none}, its oldest block after the switch is ${oldest_after:-none}"; exit 1; }
     ! grep -aq 'pruned storage: blocks before .* removed' <<<"$after6" \
-        || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
-    echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
+        || { echo "FAIL: n$sw kept pruning as a full node"; exit 1; }
+    echo "storage switch: ${SWITCH_TO_PRUNED:+n$SWITCH_TO_PRUNED pruned after the switch; }n$sw, now full, keeps its oldest block $oldest_after and prunes no more"
 fi
 # backward sync under load: the consensus while the trusted n6 backfills, against the two minutes
 # after it (both after the restart of the storage switch); BACKFILL_MEASURE=report only prints
