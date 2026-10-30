@@ -418,6 +418,34 @@ jobs:
           - name: backfill-trusted-load-unbounded
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=3300 TARGET_SEQ=4300 LOAD_SECONDS=3000 BACKFILL_MEASURE=report BACKFILL_RATE=0 BACKFILL_BATCH=1000 BACKFILL_PER_TURN=1000
+          # backward sync of a full node joining from the snapshot of a pruned node (blocks 0..699
+          # to fetch), slowed down (backfill_rate) so that the faults land while it fetches; every block
+          # compared with n1 over the API, and the wallet histories midway (the newest part of n1's)
+          # and at the end (equal)
+          - name: backfill-join
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=5 BACKFILL_BATCH=5 BACKFILL_HISTORY=1 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # killed while it fetches, right after a flush, and once with a block stored but not indexed
+          - name: backfill-crash
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=3 BACKFILL_BATCH=3 BACKFILL_CRASH=kill,flushed,unindexed BACKFILL_HISTORY=1 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3600
+          # the whole network killed while it fetches
+          - name: backfill-power-cut
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=5 BACKFILL_BATCH=5 BACKFILL_CRASH=powercut BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # two peers serve altered blocks (a signature, a timestamp inside the hash)
+          - name: backfill-tamper
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 BACKFILL_TAMPER=3:signature,5:content BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # special order 35: the responders' anti-duplicate log, detected and respected per peer
+          - name: backfill-order35
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 SYNCRO_ROUND=100 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # with node_alt_ref=official: the history comes from official nodes too (the even ones); the
+          # joiner, even, runs this build (JOIN_COMMUNITY)
+          - name: backfill-join-official
+            env: NODE_STORAGE=lmdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned,berkeleydb,lmdb,lmdb PRUNE_NODE=5 SNAPSHOT_AT=2300 JOIN_FULL=1 JOIN_COMMUNITY=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 BACKFILL_HISTORY=1 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+            fixed: true
           - name: db-convert
             official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 TARGET_SEQ=2500
