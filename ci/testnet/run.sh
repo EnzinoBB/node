@@ -76,6 +76,12 @@
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
+#        HUGE_FRAME_AT (default 0 = off): from that sequence huge_frame.py opens connections to the p2p
+#        TCP port of every node of this build (the odd ones when the even nodes run BIN_ALT, which may
+#        have no frame limit) and sends packet headers above the limits (2^40 and 65 bytes before a
+#        registration, 2^40 and 256 MiB + 1 after one: closed at once, a limit line logged) and just
+#        below them without data (64 bytes, 256 MiB - 1: held until the 10 s idle timeout); each node
+#        must keep running with its memory flat (Linux: at most +64 MiB per step) and stay in consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -114,7 +120,28 @@
 #        FORGE_NODE / CORRUPT_NODE (odd, a CREDITS_TESTNET build): that serving node declares a forged
 #        state digest / flips a byte of every third piece it serves
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
-#        node 5 is restarted as a pruned node and node 6 as a full one
+#        node 5 is restarted as a pruned node and node 6 as a full one; n6 then fetches the blocks it
+#        pruned from its peers (backward sync). BACKFILL_RATE / BACKFILL_BATCH / BACKFILL_PER_TURN set
+#        its [storage] backfill_rate / backfill_batch / backfill_store_per_turn. BACKFILL_MEASURE=1:
+#        n1's and n6's block rate and round times from n6's first request (a trusted node: n6 is an
+#        initial confidant) to 60 s later, against the two minutes after the backfill: the block
+#        rate may fall by 20 %, the round time p95 rise by 50 % (at least 10 rounds in each window),
+#        and n6's longest turn of storing must stay under 250 ms; BACKFILL_MEASURE=report only prints
+#        Backward sync of the first node of BACKFILL_NODES (n6 after the storage switch, or the full
+#        joiner of a snapshot, JOIN_FULL=1): the BACKFILL_* keys above apply to it in both cases.
+#        BACKFILL_COMPARE_ALL=1: every block 0..head compared with n1 over the API (not every 100th).
+#        BACKFILL_HISTORY=1: the wallet histories of every node key and the master key, read on n1 and
+#        on that node over the API: while it backfills, its list must be the newest part of n1's (never
+#        another transaction) and the wallet counts equal; at the end, the lists equal.
+#        BACKFILL_CRASH=<steps> (comma separated, in order, each while it fetches): kill (SIGKILL),
+#        flushed (SIGKILL right after a "BACKFILL: flushed" line), unindexed (a CREDITS_TESTNET build
+#        stores one block without its index entries and stops, ./testnet-backfill-crash-unindexed: the
+#        next start must index it again), powercut (every node SIGKILLed and the network restarted);
+#        each restart resumes below its lowest block, and nothing may be missing at the end.
+#        BACKFILL_TAMPER=<node>:<kind>,... (a CREDITS_TESTNET build): once that node joins, those nodes
+#        serve blocks below 1000 altered (./testnet-tamper-replies; kind signature or content): it must
+#        refuse them ("rejected (signatures", "rejected (hash)"), leave those peers out and finish.
+#        JOIN_COMMUNITY=1: the joining node runs this build even if it is even (BIN_ALT, official)
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
 #        after its second batch and again with every block converted (testnet-convert-kill), its
@@ -326,8 +353,19 @@ JOIN_EXTRA=${JOIN_EXTRA:-0}
 ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo $((JOIN_NODE + JOIN_EXTRA)) || echo "$NODES")
 # the joining nodes: the first one and the JOIN_EXTRA others after it
 is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
+# node i runs BIN_ALT: the even ones, but the joining node with JOIN_COMMUNITY=1
+alt_node() { [ -n "$BIN_ALT" ] && [ $(( $1 % 2 )) -eq 0 ] && ! { [ "${JOIN_COMMUNITY:-0}" = 1 ] && [ "$1" -eq "$JOIN_NODE" ]; }; }
 EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
 STRESS_WINDOW=${STRESS_WINDOW:-0}
+BACKFILL_RATE=${BACKFILL_RATE:-}
+BACKFILL_BATCH=${BACKFILL_BATCH:-}
+BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
+BACKFILL_MEASURE=${BACKFILL_MEASURE:-0}
+BACKFILL_COMPARE_ALL=${BACKFILL_COMPARE_ALL:-0}
+BACKFILL_HISTORY=${BACKFILL_HISTORY:-0}
+BACKFILL_CRASH=${BACKFILL_CRASH:-}
+BACKFILL_TAMPER=${BACKFILL_TAMPER:-}
+JOIN_COMMUNITY=${JOIN_COMMUNITY:-0}
 declare -a STORE_BACKEND STORE_PRUNED
 if [ -n "$NODE_STORAGE" ]; then
     IFS=, read -r -a entries <<<"$NODE_STORAGE"
@@ -345,6 +383,23 @@ fi
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
     if [ "$i" -eq "$PRUNE_NODE" ] || { is_joiner "$i" && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
+# the full nodes whose storage starts above block 0 and run this build: they backfill the older
+# blocks from their peers (backward sync) and must hold the whole chain at the end. n6 after the
+# storage switch; the full joiner of a snapshot (imported, or fetched over p2p)
+BACKFILL_NODES=""
+if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then BACKFILL_NODES="6"; fi
+if [ "$JOIN_FULL" = 1 ] && { { [ "$SNAPSHOT_AT" -gt 0 ] && [ "$SNAPSHOT_CORRUPT" != 1 ]; } || { [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" != fallback ]; }; }; then
+    BACKFILL_NODES="$BACKFILL_NODES $JOIN_NODE"
+fi
+for i in $BACKFILL_NODES; do
+    # an even node running BIN_ALT has no backward sync
+    if alt_node "$i"; then BACKFILL_NODES=$(echo " $BACKFILL_NODES " | sed "s/ $i / /"); fi
+done
+is_backfill_node() { [[ " $BACKFILL_NODES " == *" $1 "* ]]; }
+BACKFILL_NODE=$(echo $BACKFILL_NODES | awk '{print $1}')
+if { [ -n "$BACKFILL_CRASH" ] || [ -n "$BACKFILL_TAMPER" ] || [ "$BACKFILL_HISTORY" = 1 ]; } && [ -z "$BACKFILL_NODE" ]; then
+    echo "FAIL: BACKFILL_CRASH, BACKFILL_TAMPER and BACKFILL_HISTORY need a node that backfills (STORAGE_SWITCH_AT, or SNAPSHOT_AT with JOIN_FULL=1)"; exit 1
+fi
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -360,6 +415,7 @@ SLOW_CPU=${SLOW_CPU:-20}
 GARBAGE_AT=${GARBAGE_AT:-0}
 GARBAGE_SECONDS=${GARBAGE_SECONDS:-300}
 GARBAGE_RATE=${GARBAGE_RATE:-200}
+HUGE_FRAME_AT=${HUGE_FRAME_AT:-0}
 for v in "$NET_FAULT_NODES" "$SLOW_NODES"; do
     echo "$v" | grep -qE '^([0-9]+(,[0-9]+)*)?$' || { echo "bad node list '$v'"; exit 1; }
 done
@@ -429,7 +485,7 @@ if [ "$OS_KIND" = windows ]; then
 fi
 
 # official even nodes: refuse what they cannot take part in (see BIN_ALT_OFFICIAL above)
-official_node() { [ "$BIN_ALT_OFFICIAL" = 1 ] && [ $(( $1 % 2 )) -eq 0 ]; }
+official_node() { [ "$BIN_ALT_OFFICIAL" = 1 ] && alt_node "$1"; }
 if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
     refuse() { echo "FAIL: $1 needs a feature the official node lacks (BIN_ALT_OFFICIAL=1: the even nodes are official)"; exit 1; }
     for p in $PRUNED_NODES; do ! official_node "$p" || refuse "pruned storage on n$p"; done
@@ -501,8 +557,9 @@ api_settings() {
             echo "apiexec_port=0"
             return
         fi
-        if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
-            # every node answers block queries: the official ones are compared with n1 by block hash
+        if [ "$BIN_ALT_OFFICIAL" = 1 ] || is_backfill_node "$i" || { [ "$i" -eq 1 ] && [ -n "${BACKFILL_NODES// /}" ]; }; then
+            # every node answers block queries: the official ones are compared with n1 by block hash;
+            # so are the nodes that backfill, and n1
             echo "port=$(api_port "$i")"
         else
             echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
@@ -574,6 +631,12 @@ storage_section() {
         lines="${lines}checkpoint_every=1000\ncheckpoint_keep=2\n"
     fi
     [ -n "$backend" ] && lines="${lines}db_backend=$backend\n"
+    # the backfill settings of a joiner that backfills (n6 gets them at the storage switch)
+    if is_backfill_node "$i" && is_joiner "$i"; then
+        [ -z "$BACKFILL_RATE" ] || lines="${lines}backfill_rate=$BACKFILL_RATE\n"
+        [ -z "$BACKFILL_BATCH" ] || lines="${lines}backfill_batch=$BACKFILL_BATCH\n"
+        [ -z "$BACKFILL_PER_TURN" ] || lines="${lines}backfill_store_per_turn=$BACKFILL_PER_TURN\n"
+    fi
     [ -n "$lines" ] && printf "\n[storage]\n$lines"
     return 0
 }
@@ -653,14 +716,14 @@ fi
 
 # the binary node i runs
 bin_of() {
-    if [ -n "$BIN_ALT" ] && [ $(($1 % 2)) -eq 0 ]; then echo "$BIN_ALT"; else echo "$BIN"; fi
+    if alt_node "$1"; then echo "$BIN_ALT"; else echo "$BIN"; fi
 }
 
 start_node() {
     local i=$1
     # core dumps (see core_pattern in the workflow) let a crash be traced afterwards
     local bin=$BIN
-    if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then bin=$BIN_ALT; fi
+    if alt_node "$i"; then bin=$BIN_ALT; fi
     local extra_var="EXTRA_ARGS_$i"
     if [ "$OS_KIND" = windows ]; then
         # a console of its own, so that it can be stopped gracefully (see kill above); PIDS[i] is the
@@ -851,9 +914,39 @@ net_fault_done=0
 snapshot_done=0
 storage_switched=0
 GARBAGE_PID=
+huge_frame_done=0
 if [ -n "$SLOW_NODES" ]; then
     echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
 fi
+# backward sync scenarios (BACKFILL_CRASH, BACKFILL_TAMPER, BACKFILL_HISTORY) on BACKFILL_NODE
+bf_from=0                 # node.log lines before its latest start
+bf_started=0              # it was started as a node that backfills
+bf_step=0                 # BACKFILL_CRASH steps done
+bf_next_at=0              # no step before then
+bf_mid_checked=0
+IFS=, read -r -a BF_STEPS <<< "$BACKFILL_CRASH"
+# the node is fetching (since its latest start): it logged the start of the backfill, and the
+# latest of its pause/resume lines is not a pause, and it has not finished
+backfill_fetching() {
+    local last
+    last=$(tail -n +"$((bf_from + 1))" "$WORK/n$1/node.log" 2>/dev/null \
+        | grep -a 'BACKFILL: \(full node with blocks\|paused\|resumed\|full history stored\)' | tail -1 || true)
+    [[ "$last" == *"full node with blocks"* || "$last" == *"BACKFILL: resumed"* ]]
+}
+# the node that backfills was (re)started: what it serves is tampered by the nodes of BACKFILL_TAMPER
+# from now on (not before: a node restarted earlier syncs blocks below 1000 forward)
+backfill_node_started() {
+    bf_started=1
+    bf_from=$(wc -l < "$WORK/n$BACKFILL_NODE/node.log" 2>/dev/null || echo 0)
+    bf_next_at=$(( $(date +%s) + 15 ))
+    local entry
+    for entry in ${BACKFILL_TAMPER//,/ }; do
+        [ -e "$WORK/n${entry%%:*}/testnet-tamper-replies" ] && continue
+        echo "${entry#*:} 1000" > "$WORK/n${entry%%:*}/testnet-tamper-replies"
+        echo "backfill test: n${entry%%:*} serves blocks below 1000 with an altered ${entry#*:}"
+    done
+}
+
 while :; do
     sleep 20
     line="t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) ))s"
@@ -1039,6 +1132,37 @@ while :; do
         python3 "$HERE/garbage.py" "$BASE_PORT" "$ALL_NODES" "$GARBAGE_SECONDS" "$GARBAGE_RATE" > "$WORK/garbage.log" 2>&1 &
         GARBAGE_PID=$!
     fi
+    if [ "$HUGE_FRAME_AT" -gt 0 ] && [ "$huge_frame_done" -eq 0 ] && [ "$min" -ge "$HUGE_FRAME_AT" ]; then
+        huge_frame_done=1
+        echo "huge frame: oversized and just-below-limit packet headers to the p2p port of every node of this build, from sequence $min"
+        for i in $(seq 1 "$NODES"); do
+            # the even nodes of BIN_ALT (the official node, another ref) may have no frame limit
+            [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
+            pid_arg=""
+            [ "$OS_KIND" != linux ] || pid_arg="--pid ${PIDS[$i]}"
+            hf="python3 $HERE/huge_frame.py $(node_ip "$i") $((BASE_PORT + i)) --connections 4 $pid_arg"
+            hf_status=0
+            {
+                # before registration: at most 64 bytes, closed at once
+                $hf --size $((1 << 40)) --size 65 || hf_status=$?
+                # after a registration: at most 256 MiB, closed at once
+                $hf --registered --size $((1 << 40)) --size $(( (256 << 20) + 1 )) || hf_status=$?
+                # just below the limits, no data sent: the node waits for the data (reading it in 1 MiB
+                # chunks, so it holds almost nothing) and closes on its 10 s idle timeout
+                $hf --expect hold --size 64 || hf_status=$?
+                $hf --registered --expect hold --size $(( (256 << 20) - 1 )) || hf_status=$?
+            } > "$WORK/huge-frame-n$i.log" 2>&1
+            sed "s/^/huge frame: n$i: /" "$WORK/huge-frame-n$i.log"
+            [ "$hf_status" -eq 0 ] || { echo "FAIL: n$i did not treat the oversized or just-below-limit headers as expected, or its memory grew"; exit 1; }
+            sleep 1
+            kill -0 "${PIDS[$i]}" 2>/dev/null || { echo "FAIL: n$i stopped after the huge frame headers"; exit 1; }
+            for lim in 64 268435456; do
+                grep -aq "announces .* bytes, above the limit of $lim:" "$WORK/n$i"/*.log \
+                    || { echo "FAIL: n$i logged no limit line for $lim bytes"; exit 1; }
+            done
+            grep -ah 'announces .* bytes, above the limit' "$WORK/n$i"/*.log | awk 'NR <= 2' | sed "s/.*ERROR [^]]*\] /huge frame: n$i: /"
+        done
+    fi
 
     if [ "$SNAPSHOT_AT" -gt 0 ] && [ "$snapshot_done" -eq 0 ] && [ "$min" -ge "$SNAPSHOT_AT" ]; then
         snapshot_done=1
@@ -1125,6 +1249,7 @@ PY
         if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ "$rc" != 2 ]; then echo "FAIL: a truncated snapshot was restored"; exit 1; fi
         if [ "$SNAPSHOT_CORRUPT" != 1 ] && [ "$rc" != 0 ]; then echo "FAIL: the snapshot was not restored"; exit 1; fi
         start_node "$JOIN_NODE"
+        [ "$BACKFILL_NODE" != "$JOIN_NODE" ] || backfill_node_started
     fi
 
     if [ "$STORAGE_SWITCH_AT" -gt 0 ] && [ "$storage_switched" -eq 0 ] && [ "$min" -ge "$STORAGE_SWITCH_AT" ]; then
@@ -1134,10 +1259,68 @@ PY
         for i in 5 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
         sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n5/config.ini"
         sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_RATE" ] || sed -i "/^prune_keep_blocks=0/a backfill_rate=$BACKFILL_RATE" "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_BATCH" ] || sed -i "/^prune_keep_blocks=0/a backfill_batch=$BACKFILL_BATCH" "$WORK/n6/config.ini"
+        [ -z "$BACKFILL_PER_TURN" ] || sed -i "/^prune_keep_blocks=0/a backfill_store_per_turn=$BACKFILL_PER_TURN" "$WORK/n6/config.ini"
         switch_lines5=$(wc -l < "$WORK/n5/node.log")
         switch_lines6=$(wc -l < "$WORK/n6/node.log")
         for i in 5 6; do start_node "$i"; done
+        [ "$BACKFILL_NODE" != 6 ] || backfill_node_started
         echo "storage switch: n5 full -> pruned, n6 pruned -> full at sequence $min (n6 had pruned up to ${pruned_before:-none})"
+    fi
+
+    # backward sync under faults: the steps of BACKFILL_CRASH, each while the node fetches
+    if [ "$bf_started" = 1 ] && [ -n "$BACKFILL_CRASH" ]; then
+        b=$BACKFILL_NODE
+        if [ -e "$WORK/backfill-crash" ] && ! kill -0 "${PIDS[$b]}" 2>/dev/null; then
+            wait "${PIDS[$b]}" 2>/dev/null || true
+            echo "backfill test: n$b stopped ($(cat "$WORK/backfill-crash")) at its oldest block $(grep -a 'oldest stored = ' "$WORK/n$b/node.log" | tail -1 | sed -E 's/.*oldest stored = ([0-9]+).*/\1/'), started again"
+            rm -f "$WORK/backfill-crash"
+            sleep 5
+            start_node "$b"
+            echo "${PIDS[$b]}" > "$WORK/backfill-pid"
+            backfill_node_started
+        elif [ ! -e "$WORK/backfill-crash" ] && [ "$bf_step" -lt "${#BF_STEPS[@]}" ] && [ "$(date +%s)" -ge "$bf_next_at" ] \
+            && backfill_fetching "$b"; then
+            step=${BF_STEPS[$bf_step]}
+            bf_step=$((bf_step + 1))
+            echo "${PIDS[$b]}" > "$WORK/backfill-pid"
+            case "$step" in
+                kill)
+                    echo kill > "$WORK/backfill-crash"
+                    kill -KILL "${PIDS[$b]}" 2>/dev/null || true ;;
+                flushed)
+                    echo "flushed" > "$WORK/backfill-crash"
+                    n0=$(grep -ac 'BACKFILL: flushed' "$WORK/n$b/node.log" || true)
+                    (
+                        bl="$WORK/n$b/node.log"; bp=$(cat "$WORK/backfill-pid")
+                        while [ "$(grep -ac 'BACKFILL: flushed' "$bl" || true)" -le "$n0" ] && kill -0 "$bp" 2>/dev/null; do sleep 0.1; done
+                        kill -KILL "$bp" 2>/dev/null || true
+                    ) & ;;
+                unindexed)
+                    # the node stores one block without its index entries and stops by itself
+                    echo "unindexed" > "$WORK/backfill-crash"
+                    : > "$WORK/n$b/testnet-backfill-crash-unindexed" ;;
+                powercut)
+                    echo "backfill test: SIGKILL every node while n$b backfills"
+                    for i in $(seq 1 "$ALL_NODES"); do [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true; done
+                    for i in $(seq 1 "$ALL_NODES"); do [ -n "${PIDS[$i]:-}" ] && wait "${PIDS[$i]}" 2>/dev/null || true; done
+                    sleep 10
+                    for i in $(seq 1 "$ALL_NODES"); do [ -n "${PIDS[$i]:-}" ] && start_node "$i"; done
+                    backfill_node_started
+                    echo "backfill test: network restarted" ;;
+                *) echo "FAIL: unknown BACKFILL_CRASH step '$step'"; exit 1 ;;
+            esac
+            echo "backfill test: step $bf_step of ${#BF_STEPS[@]}: $step at sequence $min"
+        fi
+    fi
+    # the histories while it backfills: the newest part of n1's, never another transaction
+    if [ "$bf_started" = 1 ] && [ "$BACKFILL_HISTORY" = 1 ] && [ "$bf_mid_checked" = 0 ] && [ "$(date +%s)" -ge "$bf_next_at" ] \
+        && [ ! -e "$WORK/backfill-crash" ] && backfill_fetching "$BACKFILL_NODE"; then
+        bf_mid_checked=1
+        (cd "$HERE" && python3 compare_histories.py "$WORK" "$NODES" "$MASTER_PUB" "$(api_port 1)" "$(api_port "$BACKFILL_NODE")" --partial) \
+            | sed 's/^/backfill test: while fetching: /' || { echo "FAIL: n$BACKFILL_NODE's histories while it backfills"; exit 1; }
+        echo "backfill test: n$BACKFILL_NODE's oldest block then: $(grep -a 'oldest stored = ' "$WORK/n$BACKFILL_NODE/node.log" | tail -1 | sed -E 's/.*oldest stored = ([0-9]+).*/\1/')"
     fi
 
     if [ "$CONVERT_AT" -gt 0 ] && [ "${converted:-0}" -eq 0 ] && [ "$min" -ge "$CONVERT_AT" ]; then
@@ -1700,6 +1883,142 @@ if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
         || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
     echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
 fi
+# backward sync under load: the consensus while the trusted n6 backfills, against the two minutes
+# after it (both after the restart of the storage switch); BACKFILL_MEASURE=report only prints
+if [ "$BACKFILL_MEASURE" != 0 ] && [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
+    python3 - "$WORK/n1/node.log" "$WORK/n6/node.log" "$BACKFILL_MEASURE" <<'PY' || { echo "FAIL: the consensus slowed down while n6 backfilled"; exit 1; }
+import re, sys, datetime
+stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
+def t(line):
+    m = stamp.match(line)
+    return datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() if m else None
+def read(path):
+    rounds, seqs, lines = [], [], []
+    for line in open(path, errors="replace"):
+        x = t(line)
+        if x is None:
+            continue
+        if " R-" in line and "=====" in line:
+            rounds.append(x)
+        elif "Last written sequence = " in line:
+            m = re.search(r"Last written sequence = ([0-9']+)", line)
+            if m:
+                seqs.append((x, int(m.group(1).replace("'", ""))))
+        if "BACKFILL: " in line:
+            lines.append((x, line.strip()))
+    return rounds, seqs, lines
+def stats(rounds, seqs, a, b):
+    r = sorted(y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b)
+    s = [q for x, q in seqs if a <= x < b]
+    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
+    return rate, p95, (max(r) if r else 0.0), len(r)
+judge = sys.argv[3] == "1"
+n1 = read(sys.argv[1])
+n6 = read(sys.argv[2])
+first = next((x for x, l in n6[2] if "full node with blocks" in l), None)
+end = next((x for x, l in n6[2] if "full history stored" in l), None)
+if first is None or end is None:
+    print("FAIL: n6 did not backfill")
+    sys.exit(1)
+# the requests start once n6 is in sync after its restart: the first "resumed", if it paused
+start = next((x for x, l in n6[2] if x >= first and "BACKFILL: resumed" in l), first)
+done_line = next(l for x, l in n6[2] if "full history stored" in l)
+m = re.search(r"longest turn (\d+) ms", done_line)
+longest = int(m.group(1)) if m else -1
+print(f"backfill under load: n6 fetched for {end - start:.1f} s: {done_line.split('BACKFILL: ')[1]}")
+ok = True
+for name, (rounds, seqs, _) in (("n1", n1), ("n6", n6)):
+    # every round that starts from the first request to 60 s later, against the two minutes after
+    during = stats(rounds, seqs, start, max(end, start + 60))
+    after = stats(rounds, seqs, end + 30, end + 150)
+    print(f"backfill under load: {name}: while backfilling {during[0]:.2f} blocks/s, round p95 {during[1]:.2f} s, longest {during[2]:.2f} s "
+          f"({during[3]} rounds); after {after[0]:.2f} blocks/s, round p95 {after[1]:.2f} s, longest {after[2]:.2f} s ({after[3]} rounds)")
+    if not judge or during[3] < 10 or after[3] < 10:
+        continue
+    if during[0] < 0.8 * after[0]:
+        print(f"FAIL: {name}: block rate {100 * (1 - during[0] / after[0]):.0f} % lower while backfilling (20 % allowed)")
+        ok = False
+    if during[1] > 1.5 * after[1]:
+        print(f"FAIL: {name}: round time p95 {100 * (during[1] / after[1] - 1):.0f} % higher while backfilling (50 % allowed)")
+        ok = False
+if judge and longest > 250:
+    print(f"FAIL: n6 held the processor thread {longest} ms in one turn (250 ms allowed)")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+# backward sync: each full node that started above block 0 fetched the older blocks from its peers,
+# refused none, ends with block 0 stored, and holds the same blocks as n1 (every 100th, over the API)
+for i in $BACKFILL_NODES; do
+    blog="$WORK/n$i/node.log"
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        grep -aq 'BACKFILL: full history stored' "$blog" \
+            || { echo "FAIL: n$i did not finish backward sync"; { grep -a 'BACKFILL' "$blog" || true; } | tail -20; exit 1; }
+        if [ -z "$BACKFILL_TAMPER" ]; then
+            ! grep -aq 'BACKFILL: block .* rejected' "$blog" || { echo "FAIL: n$i refused blocks of honest peers"; grep -a 'rejected' "$blog" | head -5; exit 1; }
+        fi
+        last_status=$(grep -a 'Last written sequence = ' "$blog" | tail -1)
+        [[ "$last_status" == *"oldest stored = 0"* ]] || { echo "FAIL: n$i last status line: $last_status"; exit 1; }
+    elif grep -aq 'pruned storage: oldest block stored is' "$blog"; then
+        echo "FAIL: n$i started above block 0 and did not start backward sync"; exit 1
+    else
+        # a snapshot from full sources holds every block from 0 (snapshot_blocks covers the chain)
+        echo "backward sync: n$i holds the chain from block 0, nothing to fetch"
+    fi
+    s1=$(seq_of 1); si=$(seq_of "$i")
+    bhead=$(( ${s1:-0} < ${si:-0} ? ${s1:-0} : ${si:-0} ))
+    (cd "$HERE" && python3 blockhashes.py --head "$bhead" --step "$([ "$BACKFILL_COMPARE_ALL" = 1 ] && echo 1 || echo 100)" \
+        "1:$(api_port 1)" "$i:$(api_port "$i")") \
+        || { echo "FAIL: n$i holds other blocks than n1 after backward sync"; exit 1; }
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        echo "backward sync: n$i $(grep -a -m1 'BACKFILL: full node with blocks' "$blog" | sed 's/.*BACKFILL: //'); $(grep -a -m1 'BACKFILL: full history stored' "$blog" | sed 's/.*BACKFILL: //')"
+    fi
+done
+if [ -n "$BACKFILL_NODE" ]; then
+    b=$BACKFILL_NODE
+    blog="$WORK/n$b/node.log"
+    fail_bf() { echo "FAIL: n$b $1"; { grep -a 'BACKFILL\|trxIndex: re-indexed' "$blog" || true; } | tail -30; exit 1; }
+    if [ "$BACKFILL_HISTORY" = 1 ]; then
+        [ "$bf_mid_checked" = 1 ] || fail_bf "was never caught fetching to compare its histories midway"
+        (cd "$HERE" && python3 compare_histories.py "$WORK" "$NODES" "$MASTER_PUB" "$(api_port 1)" "$(api_port "$b")") \
+            | sed 's/^/backward sync: at the end: /' || fail_bf "holds other histories than n1"
+        # the index is rebuilt once at the first start from a snapshot (the stored blocks only); after
+        # the backfill started it is the online index, never the rebuild
+        ! grep -aq 'Inconsistent transaction index' "$blog" || fail_bf "found an inconsistent transaction index"
+        since=$(sed -n '/BACKFILL: full node with blocks/,$p' "$blog")
+        ! grep -aq 'trxIndex: rebuilding' <<<"$since" || fail_bf "rebuilt its transaction index after the backfill started"
+    fi
+    if [ -n "$BACKFILL_CRASH" ]; then
+        [ "$bf_step" -eq "${#BF_STEPS[@]}" ] || fail_bf "went through $bf_step of the ${#BF_STEPS[@]} steps of BACKFILL_CRASH before it finished"
+        # every start resumed below the block the one before started from
+        starts=$({ grep -a 'BACKFILL: full node with blocks' "$blog" || true; } | sed -E 's/.*with blocks ([0-9]+)\.\..*/\1/' | tr '\n' ' ')
+        prev=""
+        for f in $starts; do
+            [ -z "$prev" ] || [ "$f" -lt "$prev" ] || fail_bf "started again from block $f after a start from $prev"
+            prev=$f
+        done
+        if [[ ",$BACKFILL_CRASH," == *",unindexed,"* ]]; then
+            grep -aq 'trxIndex: re-indexed 1 backfilled blocks' "$blog" || fail_bf "did not index again the block a crash left unindexed"
+        fi
+        echo "backward sync: n$b went through $BACKFILL_CRASH, started from blocks $starts$(grep -a -m1 'trxIndex: re-indexed' "$blog" | sed 's/.*trxIndex:/;/')"
+    fi
+    if [ -n "$BACKFILL_TAMPER" ]; then
+        for entry in ${BACKFILL_TAMPER//,/ }; do
+            want=$([ "${entry#*:}" = signature ] && echo 'rejected (signatures' || echo 'rejected (hash)')
+            grep -aqF "$want" "$blog" || fail_bf "never logged '$want' for n${entry%%:*}'s altered blocks"
+            grep -aqF "peer ${KEYS[$((${entry%%:*} - 1))]} sent a block that does not verify" "$blog" \
+                || fail_bf "did not leave n${entry%%:*} out"
+        done
+        echo "backward sync: n$b refused $(grep -ac 'BACKFILL: block .* rejected' "$blog") altered blocks and left their peers out"
+    fi
+    if [ "$SYNCRO_ROUND" -gt 0 ]; then
+        grep -aq 'answers with AwaitAnswer' "$blog" || fail_bf "never saw AwaitAnswer, with special order 35 active"
+        dups=$({ grep -a 'refused a request as a duplicate' "$blog" || true; } | sed -E 's/.*peer ([1-9A-HJ-NP-Za-km-z]+) .*/\1/' | sort | uniq -c | awk '$1 > 1' | wc -l)
+        [ "$dups" -eq 0 ] || fail_bf "got DuplicatedRequest more than once from $dups peers"
+        echo "backward sync: order 35: $(grep -ac 'answers with AwaitAnswer' "$blog") peers paced, $(grep -ac 'refused a request as a duplicate' "$blog") duplicates"
+    fi
+fi
 if [ "$CONVERT_AT" -gt 0 ]; then
     for i in 4 6; do
         want=$([ "$i" = 4 ] && echo lmdb || echo rocksdb)
@@ -1931,8 +2250,8 @@ if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
     serving=""
     late=""
     for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
-        # a late serving node announced the capability only at its restart, and peers keep the value
-        # they first saw (the routing table is not refreshed, design 4.1, plan P9): either value is fine
+        # a late serving node announced the capability only at its restart: peers refresh the value from
+        # its own datagrams (p2p fork, plan P9), so it must be seen too (listed apart in the output)
         if [[ ",$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]]; then late="$late,${KEYS[$((i - 1))]}"; else serving="$serving ${KEYS[$((i - 1))]}"; fi
     done
     python3 - "$WORK/n$observer/known_peers.json" "$late" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
@@ -1941,11 +2260,13 @@ peers = {p["id"]: p for p in json.load(open(sys.argv[1]))}
 late = set(k for k in sys.argv[2].split(",") if k)
 serving = set(sys.argv[3:])
 bad = [k for k in serving if peers.get(k, {}).get("capabilities") != 1]
+late_bad = [k for k in late if peers.get(k, {}).get("capabilities") != 1]
 extra = [k for k, p in peers.items() if k not in serving and k not in late and p["capabilities"] != 0]
 community = sum(1 for p in peers.values() if p["minor"] > 0)
 print(f"capabilities: {len(peers)} known peers, {len(serving) - len(bad)} of {len(serving)} serving nodes announce snapshots, "
+      f"{len(late) - len(late_bad)} of {len(late)} late serving nodes do since their restart, "
       f"{len(extra)} others do, {community} announce a community version")
-sys.exit(1 if bad or extra else 0)
+sys.exit(1 if bad or late_bad or extra else 0)
 PY
     PIDS[$observer]=""
 fi

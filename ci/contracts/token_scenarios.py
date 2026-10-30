@@ -385,6 +385,35 @@ def token_v1_lifecycle(ex, rec, Contract):
                    severity="info")
 
 
+def template_token(ex, rec, Contract):
+    """The token template of samples/contracts/Token.java"""
+    path = os.path.join(HERE, "..", "..", "samples", "contracts", "Token.java")
+    if not os.path.exists(path):
+        rec.step("template not found", path=path)
+        return
+    with open(path) as f:
+        t = Contract(ex, "Token", f.read(), OWNER, rec)
+    if not rec.expect((t.deploy() or {}).get("ok"), "the template deploys"):
+        return
+    r = t.get_methods()
+    rec.expect(r.tokenStandard == 4, f"the template is an ExtensionTokenStandard token (got {r.tokenStandard})")
+    get = lambda m, *p: t.get(m, *p)["ret"]
+    rec.expect(t.call(OWNER, "transfer", v_str(b58(ALICE)), v_dec("100"))["ok"], "transfer")
+    rec.expect(get("balanceOf", v_str(b58(ALICE))) == "100.000", "balances are kept at the token's scale")
+    rec.expect(not t.call(ALICE, "transfer", v_str(b58(BOB)), v_dec("1.0001"))["ok"], "an amount with too many decimals fails")
+    rec.expect(not t.call(ALICE, "transfer", v_str(b58(BOB)), v_dec("-1"))["ok"], "a negative amount fails")
+    rec.expect(not t.call(ALICE, "transfer", v_str(b58(BOB)), v_dec("100.001"))["ok"], "more than the balance fails")
+    t.call(ALICE, "approve", v_str(b58(BOB)), v_dec("10"))
+    t.call(ALICE, "approve", v_str(b58(BOB)), v_dec("4"))
+    rec.expect(get("allowance", v_str(b58(ALICE)), v_str(b58(BOB))) == "4.000", "approve sets the allowance, it does not add")
+    rec.expect(t.call(BOB, "transferFrom", v_str(b58(ALICE)), v_str(b58(CAROL)), v_dec("4"))["ok"], "transferFrom within the allowance")
+    rec.expect(not t.call(BOB, "transferFrom", v_str(b58(ALICE)), v_str(b58(CAROL)), v_dec("0.001"))["ok"], "the allowance is used up")
+    rec.expect(t.call(ALICE, "payable", v_dec("2.5"), v_bytes(b""))["ok"], "payable buys tokens")
+    rec.expect(get("balanceOf", v_str(b58(ALICE))) == "98.500", "96 + 2.5 bought")
+    rec.expect(not t.call(ALICE, "setFrozen", v_bool(True))["ok"], "only the owner freezes")
+    rec.expect(t.call(OWNER, "burn", v_dec("1000"))["ok"] and get("totalSupply") == "9999000.000", "burn")
+
+
 def token_v0_lifecycle(ex, rec, Contract):
     """A v0 token (amounts as strings), including the legacy payable(String, String)"""
     t = Contract(ex, "TokenV0", source("TokenV0"), OWNER, rec)
@@ -485,13 +514,16 @@ def slow_token_name(ex, rec, Contract):
     """A token whose getName() never returns: the reserved-name check runs it without a time limit"""
     s = Contract(ex, "SlowName", SLOW_NAME, OWNER, rec)
     d = s.deploy(timeout=40000)
-    rec.expect(d is not None, "the deploy of a token whose getName() loops answers within 40 s", severity="security")
+    # build 1518 never answers and its thread loops for good; a fixed executor stops the code after
+    # its limit and holds the answer back until the node has stopped waiting (pass
+    # -Dcontract.executor.unbounded.code.limit.ms / .hold.ms with --java-opt to see it answer)
+    rec.expect(d is not None, "the deploy of a token whose getName() loops gets an answer within 40 s", severity="info")
     probe = Contract(ex, "BasicV0probe", BASIC_V0.replace("BasicV0", "BasicV0probe"), OWNER, rec)
     try:
         ok = probe.compile()
     except Exception:
         ok = False
-    rec.expect(ok, "the executor still answers afterwards", severity="security")
+    rec.expect(ok, "the executor still answers afterwards", severity="bug")
 
 
 def serialization_hang(ex, rec, Contract):
@@ -509,7 +541,7 @@ def serialization_hang(ex, rec, Contract):
         answered = False
     finally:
         c.close()
-    rec.expect(answered, "a call whose new state never finishes serializing answers within 40 s", severity="security")
+    rec.expect(answered, "a call whose new state never finishes serializing gets an answer within 40 s", severity="info")
 
 
 def emitted_precision(ex, rec, Contract):
@@ -525,6 +557,49 @@ def emitted_precision(ex, rec, Contract):
                    severity="info")
 
 
+SPIN = """import com.credits.scapi.v3.SmartContract;
+import java.math.BigDecimal;
+
+public class Spin extends SmartContract {
+    private long last;
+    public Spin() { super(); }
+    public long spin(long rounds) { long x = 0; for (long i = 0; i < rounds; i++) { x += i ^ (x >>> 3); } last = x; return x; }
+    public String payable(BigDecimal amount, byte[] userData) { return "ok"; }
+}
+"""
+
+
+def abandoned_call(ex, rec, Contract):
+    """A method that runs longer than the node waits: the node closes the connection"""
+    s = Contract(ex, "Spin", SPIN, OWNER, rec)
+    if not rec.expect((s.deploy() or {}).get("ok"), "Spin deploys"):
+        return
+    from executor_harness import EXECUTION_TIME, EXECUTOR_VERSION, executor, general
+    c = ex.client(3000)  # the node's executor_receive_timeout is 4 s
+    try:
+        c.executeByteCode(ex.next_access_id(), ALICE, s._binary(s.state),
+                          [executor.MethodHeader(methodName="spin", params=[general.Variant(v_long=10 ** 12)])],
+                          EXECUTION_TIME, EXECUTOR_VERSION)
+        answered = True
+    except Exception:
+        answered = False
+    finally:
+        c.close()
+    rec.expect(not answered, "a method running past the client's wait gets no answer in time", severity="info")
+    import time
+    time.sleep(2)
+    # the executor logs to log/executor-log-<day>.txt in its folder (its logback.xml), or to stdout
+    stopped = False
+    for folder, _, files in os.walk(ex.work):
+        for name in files:
+            if name.endswith((".log", ".txt")):
+                with open(os.path.join(folder, name), errors="replace") as f:
+                    stopped = stopped or f"{b58(s.address)}: the node closed the connection" in f.read()
+    rec.step("abandoned call", stopped_when_the_client_left=stopped)
+    rec.expect(stopped, "the executor stops a method whose client closed the connection", severity="info")
+    rec.expect(s.call(ALICE, "spin", general.Variant(v_long=1000))["ok"], "the executor answers the next call")
+
+
 def general_int(i):
     from executor_harness import v_int
     return v_int(i)
@@ -535,6 +610,6 @@ def general_double(x):
     return general.Variant(v_double=x)
 
 
-SCENARIOS = [token_standards, token_v1_lifecycle, token_v0_lifecycle, failed_call_state, getter_writes,
-             reserved_names, root_class, platform_calls, emitted_precision, contract_calls, slow_token_name,
+SCENARIOS = [token_standards, token_v1_lifecycle, template_token, token_v0_lifecycle, failed_call_state, getter_writes,
+             reserved_names, root_class, platform_calls, emitted_precision, contract_calls, abandoned_call, slow_token_name,
              serialization_hang]

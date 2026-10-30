@@ -22,6 +22,8 @@ add_library(csconnector
     include/debuglog.hpp
     include/tokens.hpp
     src/tokens.cpp
+    include/callcheck.hpp
+    src/callcheck.cpp
     include/profiler/profilerprocessor.hpp
     src/profilerprocessor.cpp
     include/profiler/profilereventhandler.hpp

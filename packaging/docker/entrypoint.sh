@@ -4,9 +4,11 @@
 # Everything persistent lives in the data directory (/data, ~/.credits on the host): config.ini,
 # keys/, the block database, caches and checkpoints, logs. config.ini is written from the .env
 # values on the first start only; afterwards it is the operator's file and the source of truth.
-# A pruned node with an empty data directory first downloads the latest published snapshot
+# A node with an empty data directory first downloads the latest published snapshot
 # (CREDITS_SNAPSHOT=github, the default: node --download-snapshot); when that fails, the node itself
-# looks for a snapshot among its p2p neighbours, then syncs from block 0.
+# looks for a snapshot among its p2p neighbours, then syncs from block 0. A full node on lmdb or
+# rocksdb does the same, then fetches the older blocks from its neighbours in the background
+# (backward sync, CREDITS_BACKFILL); a full node on berkeleydb syncs from block 0.
 # See packaging/docker/README.md for the variables.
 set -euo pipefail
 
@@ -28,6 +30,7 @@ P2P_PORT=${CREDITS_P2P_PORT:-9510}
 API=${CREDITS_API:-off}
 EXECUTOR=${CREDITS_EXECUTOR:-on}
 RESET=${CREDITS_RESET:-0}
+BACKFILL=${CREDITS_BACKFILL:-on}
 CONVERT_ARGS=()
 
 log() { echo "[entrypoint] $*"; }
@@ -40,7 +43,7 @@ refuse() {
 }
 case "$BACKEND" in berkeleydb|lmdb|rocksdb) ;; *) log "CREDITS_DB_BACKEND must be berkeleydb, lmdb or rocksdb"; exit 2 ;; esac
 case "$SNAPSHOT" in github|p2p|off) ;; *) log "CREDITS_SNAPSHOT must be github, p2p or off"; exit 2 ;; esac
-for v in "$API" "$EXECUTOR" "$SERVE"; do case "$v" in on|off) ;; *) log "CREDITS_API, CREDITS_EXECUTOR and CREDITS_SERVE_SNAPSHOT must be on or off"; exit 2 ;; esac; done
+for v in "$API" "$EXECUTOR" "$SERVE" "$BACKFILL"; do case "$v" in on|off) ;; *) log "CREDITS_API, CREDITS_EXECUTOR, CREDITS_SERVE_SNAPSHOT and CREDITS_BACKFILL must be on or off"; exit 2 ;; esac; done
 [ -z "$MIN_SOURCES" ] || [[ "$MIN_SOURCES" =~ ^[0-9]+$ ]] || { log "CREDITS_SNAPSHOT_MIN_SOURCES must be a number"; exit 2; }
 [[ "$P2P_PORT" =~ ^[0-9]+$ ]] || { log "CREDITS_P2P_PORT must be a number"; exit 2; }
 
@@ -73,16 +76,18 @@ write_config() {
         { print }
     ' "$OPT/config.ini.template" > config.ini.new
     # snapshots, before [storage] (which stays the last section): served to the neighbours
-    # (CREDITS_SERVE_SNAPSHOT); fetched from them at a first start by a pruned node unless
-    # CREDITS_SNAPSHOT=off (a full node syncs from block 0: a snapshot holds only recent blocks)
+    # (CREDITS_SERVE_SNAPSHOT); fetched from them at a first start unless CREDITS_SNAPSHOT=off, or on
+    # berkeleydb, which cannot hold a database that starts above block 0 (it syncs from block 0)
     local fetch=auto
-    { [ "$SNAPSHOT" = off ] || [ "$STORAGE" = full ]; } && fetch=off
+    { [ "$SNAPSHOT" = off ] || [ "$BACKEND" = berkeleydb ]; } && fetch=off
     printf '\n[snapshot]\nserve=%s\nfetch=%s\n' "$SERVE" "$fetch" >> config.ini.new
     [ -z "$MIN_SOURCES" ] || printf 'min_sources=%s\n' "$MIN_SOURCES" >> config.ini.new
     if [ "$STORAGE" = pruned ]; then
         printf '\n[storage]\n; pruned storage: only recent blocks are kept, from the last checkpoint but one\ncheckpoint_every=100000\ncheckpoint_keep=2\nprune_keep_blocks=1000\ndb_backend=%s\n' "$BACKEND" >> config.ini.new
     else
         printf '\n[storage]\ndb_backend=%s\n' "$BACKEND" >> config.ini.new
+        # a full node from a snapshot fetches the older blocks from its neighbours (backward sync)
+        [ "$BACKFILL" = on ] || printf 'backfill=off\n' >> config.ini.new
     fi
     mv config.ini.new config.ini
     log "config.ini written: $STORAGE storage on $BACKEND, p2p port $P2P_PORT, API $API, executor $EXECUTOR, snapshots: serve $SERVE, fetch $fetch"
@@ -137,17 +142,19 @@ if has_data; then
             fi
         fi
         if [ "$rec_mode" = pruned ] && [ "$cfg_mode" = full ]; then
-            refuse "this node pruned its old blocks, so it cannot become a full node; a full node syncs from block 0"
+            log "switching from pruned to full storage: the node keeps its blocks and fetches the older ones in the background (backfill)"
         fi
         if [ "$rec_mode" = full ] && [ "$cfg_mode" = pruned ]; then
             log "switching from full to pruned storage: old blocks are removed at the next checkpoints"
         fi
     fi
-elif [ "$cfg_mode" = pruned ] && [ "$SNAPSHOT" = github ]; then
+elif [ "$SNAPSHOT" = github ]; then
     if [ "$cfg_backend" = berkeleydb ]; then
         log "a BerkeleyDB node cannot start from a snapshot: syncing from block 0"
     else
         download=1   # below, once the keys exist
+        [ "$cfg_mode" = pruned ] \
+            || log "a full node starts from the snapshot, then fetches the older blocks from its neighbours in the background (about 400 GB with lmdb, 130 GB with rocksdb, days on mainnet; CREDITS_BACKFILL=off keeps the snapshot's blocks only)"
     fi
 fi
 echo "mode=$cfg_mode backend=$cfg_backend" > .storage
