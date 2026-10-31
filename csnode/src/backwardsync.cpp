@@ -597,6 +597,9 @@ void BackwardSync::flushIfDue(bool force) {
     if (!force && storedSinceFlush_ < kFlushBlocks && t < lastFlushAt_ + kFlushMs) {
         return;
     }
+    if (!force && trusted_ && t < lastFlushAt_ + kTrustedFlushDeferMs) {
+        return;   // consensus first: flushed at the first turn outside the trusted set
+    }
     // on the processor thread too, outside the turn budget: timed, so that a slow disk shows
     const auto flushAt = std::chrono::steady_clock::now();
     const bool ok = !hooks_.flush || hooks_.flush();

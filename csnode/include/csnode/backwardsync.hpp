@@ -100,6 +100,9 @@ public:
     static constexpr uint64_t kStoreRetryMs = 60'000;
     static constexpr size_t kFlushBlocks = 10'000;
     static constexpr uint64_t kFlushMs = 60'000;
+    // a flush (up to 2.4 s on mainnet) waits while the node is a confidant, at most this long: blocks
+    // not flushed yet are fetched again after a crash, nothing else is lost
+    static constexpr uint64_t kTrustedFlushDeferMs = 600'000;
     static constexpr size_t kProgressBlocks = 100'000;
     static constexpr uint64_t kSlowTurnMs = 200;              // a longer turn is logged, with where its time went
 
