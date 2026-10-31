@@ -57,6 +57,7 @@ lines under the new release.
 | #134 | api: token API leftovers: a failed transfer no longer takes a place in the pages of `TokenTransfersGet`/`TokenWalletTransfersGet`; `TokenTransferGet` answers only for a transfer of that token (it listed any transaction and added entries to the operations map); token counters above 2^31 report the largest i32 instead of wrapping; the token cache is saved, loaded and hashed under its lock (the background refresh could change it during a checkpoint) |
 | #135 | samples: a token template (`samples/contracts/Token.java`: checked amounts and decimals, balances at the token's scale, ERC-20 `approve()`, sale through `payable()`), run by the executor harness, and a Python client that calls a contract with the argument types it declares (`samples/python/token_client.py`) |
 | #138 | ci: macOS jobs run on `macos-15` (GitHub retires the macOS 14 images on 2026-11-02 and fails them during brownouts until then), with binaries built for macOS 14 and later, and time out after their measured duration plus a margin (build 60, platform sync 40, private network 60 minutes instead of 240, 90, 150) |
+| #139 | ci: the backfill crash steps (kill, power cut...) wait until the node stored a block since its last start, so that every restart resumes lower; in `fund.py` a transfer rejected by consensus right after an earlier transfer of the same sender ended with an unknown outcome (a partition longer than the 60 s wait) counts with the pending answers, not as a fault (net-partition) |
 
 ## community.14 — 2026-10-27
 

@@ -938,6 +938,15 @@ backfill_fetching() {
         | grep -a 'BACKFILL: \(full node with blocks\|paused\|resumed\|full history stored\)' | tail -1 || true)
     [[ "$last" == *"full node with blocks"* || "$last" == *"BACKFILL: resumed"* ]]
 }
+# since its last start the node stored a block below the one it started from: a step that stops it
+# now must make the next start resume lower (a kill before any store would restart from the same block)
+backfill_progressed() {
+    local since from oldest
+    since=$(tail -n +"$((bf_from + 1))" "$WORK/n$1/node.log" 2>/dev/null)
+    from=$(grep -a -m1 'BACKFILL: full node with blocks' <<<"$since" | sed -E 's/.*with blocks ([0-9]+)\.\..*/\1/')
+    oldest=$(grep -a 'oldest stored = ' <<<"$since" | tail -1 | sed -E 's/.*oldest stored = ([0-9]+).*/\1/')
+    [ -n "$from" ] && [ -n "$oldest" ] && [ "$oldest" -lt "$from" ]
+}
 # the node that backfills was (re)started: what it serves is tampered by the nodes of BACKFILL_TAMPER
 # from now on (not before: a node restarted earlier syncs blocks below 1000 forward)
 backfill_node_started() {
@@ -1287,7 +1296,7 @@ PY
             echo "${PIDS[$b]}" > "$WORK/backfill-pid"
             backfill_node_started
         elif [ ! -e "$WORK/backfill-crash" ] && [ "$bf_step" -lt "${#BF_STEPS[@]}" ] && [ "$(date +%s)" -ge "$bf_next_at" ] \
-            && backfill_fetching "$b"; then
+            && backfill_fetching "$b" && backfill_progressed "$b"; then
             step=${BF_STEPS[$bf_step]}
             bf_step=$((bf_step + 1))
             echo "${PIDS[$b]}" > "$WORK/backfill-pid"
