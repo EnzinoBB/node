@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 150
     outputs:
       skip: ${{ steps.fetch.outputs.skip }}
+      monitor: ${{ steps.monitor.outputs.monitor }}
     env:
       RELEASE: pruned-snapshot
     steps:
@@ -82,9 +83,22 @@ jobs:
           cd ..
           python3 ci/snapshot/check_node.py wait-head --api 127.0.0.1:9090 --timeout-min 90
 
+      # the monitor is a third party: when it does not answer (exit 3) the snapshot is published
+      # without this check, and the release notes say so; a mismatch fails
       - name: Check against the monitor
+        id: monitor
         if: env.SKIP != '1'
-        run: python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 50
+        run: |
+          status=0
+          python3 ci/snapshot/check_node.py balances --api 127.0.0.1:9090 --count 50 || status=$?
+          if [ "$status" -eq 3 ]; then
+            echo "::warning::the monitor cannot be reached: the balances were not compared with it"
+            echo "monitor=skipped" >> "$GITHUB_OUTPUT"
+          elif [ "$status" -ne 0 ]; then
+            exit "$status"
+          else
+            echo "monitor=checked" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Stop and check the logs
         if: env.SKIP != '1'
@@ -147,6 +161,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE: pruned-snapshot
+      MONITOR: ${{ needs.snapshot.outputs.monitor }}
     steps:
       # into its own folder: the artifact comes from the job that ran the node and is not trusted
       - name: Download snapshot
@@ -232,4 +247,14 @@ jobs:
                     | grep -E "^s$old-" | while read -r a; do gh release delete-asset "$RELEASE" "$a" --yes --repo "$GITHUB_REPOSITORY"; done
                 done
             echo "published format 2: block $seq"
+          fi
+          if [ "$MONITOR" = skipped ]; then
+            # one line per snapshot published without the monitor, the newest first, at most 10
+            line="- $(date -u +%F): block ${seq:-$(ls out/*.tar.zst | sed -nE 's/.*-([0-9]+)\.tar\.zst/\1/p')} published without the comparison of balances with the public monitor, which did not answer"
+            body=$(gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+            mark='published without the comparison'
+            { grep -v "$mark" <<<"$body" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' || true
+              echo; echo "$line"; grep "$mark" <<<"$body" | head -9 || true; } > notes.md
+            gh release edit "$RELEASE" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
+            echo "$line"
           fi
