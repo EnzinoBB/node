@@ -38,7 +38,7 @@ official node.
 | `backfill` | `on` | Backward sync: a node whose oldest stored block is above its floor fetches the older blocks from its neighbours (see [Backward sync](#backward-sync-backfill)). `off` never does. |
 | `backfill_batch` | `100` | Blocks per request, `1` to `1000`. |
 | `backfill_rate` | `1000` | Blocks requested per second over all peers (`0` = no limit). |
-| `backfill_store_per_turn` | `50` | Blocks checked and stored per turn of the thread that also runs consensus, `1` to `1000`; the rest waits for the next turn, 100 ms later. |
+| `backfill_store_per_turn` | `50` | Blocks checked and stored per turn of the thread that also runs consensus, `1` to `1000`; the rest waits for the next turn, 100 ms later. A turn also ends after 50 ms, however many blocks it stored; a turn over 200 ms is logged (`BACKFILL: slow turn of ...`) with the time spent verifying, storing and checking confirmations. |
 
 ### Choosing a backend
 

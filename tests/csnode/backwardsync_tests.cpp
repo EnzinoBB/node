@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -115,6 +117,7 @@ cs::BackwardSync::Settings settingsOf(size_t batch = 100, size_t rate = 1000, si
     s.batch = batch;
     s.rate = rate;
     s.storePerTurn = perTurn;
+    s.turnBudgetMs = 0;   // no time limit: a slow test machine must not change what one call stores
     return s;
 }
 
@@ -142,6 +145,9 @@ protected:
         hooks.store = [this](const csdb::Pool& pool) {
             if (failStore_) {
                 return false;
+            }
+            if (storeDelayMs_ > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(storeDelayMs_));
             }
             EXPECT_EQ(pool.sequence() + 1, first_) << "not strictly downwards";
             EXPECT_EQ(pool.hash(), chain().blocks[pool.sequence()].hash());
@@ -210,6 +216,7 @@ protected:
     size_t storedCount_ = 0;
     size_t flushes_ = 0;
     bool failStore_ = false;
+    int storeDelayMs_ = 0;   // a slow disk: real time spent in every store
     bool forwardSync_ = false;
     bool bootstrapping_ = false;
 };
@@ -548,6 +555,31 @@ TEST_F(BackfillTest, TheWorkPerTurnIsBounded) {
     EXPECT_EQ(first_, kFirst - 100);
     EXPECT_GT(sync_->stats().busyUs, 0u);
     EXPECT_GT(sync_->stats().longestTurnUs, 0u);
+}
+
+// a slow store ends the turn once it has used its time, however many blocks it may still store;
+// such a turn is logged with where its time went
+TEST_F(BackfillTest, ASlowTurnStopsAtItsTimeBudget) {
+    auto settings = settingsOf(100, 0, 50);
+    settings.turnBudgetMs = 30;
+    make(settings);
+    storeDelayMs_ = 12;
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    // 12 ms a block: the budget of 30 ms is passed after the third block (on a slow machine, sooner)
+    EXPECT_GE(kFirst - first_, 1u);
+    EXPECT_LE(kFirst - first_, 3u);
+    storeDelayMs_ = 0;
+    tick();
+    EXPECT_GT(kFirst - first_, 3u);
+
+    // a turn over kSlowTurnMs is counted and logged
+    storeDelayMs_ = 210;
+    tick();
+    EXPECT_EQ(sync_->stats().slowTurns, 1u);
+    EXPECT_TRUE(std::any_of(logs_.begin(), logs_.end(), [](const std::string& l) {
+        return l.find("BACKFILL: slow turn of") != std::string::npos && l.find("store ") != std::string::npos;
+    }));
 }
 
 // L7: pruning raised the floor above blocks waiting in the buffer: the backfill ends, nothing is
