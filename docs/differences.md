@@ -32,6 +32,7 @@ each key and its default.
 | `db_backend` | Chooses the block database: `berkeleydb` (the default, the official format), `lmdb` or `rocksdb`. RocksDB is about a third of the BerkeleyDB size on mainnet. |
 | `prune_keep_blocks` | Pruned storage: the node keeps only the latest blocks and removes older ones at each periodic checkpoint. Pruned storage runs on LMDB. |
 | `async_write_queue_size`, `write_batch_size`, `rocksdb_block_cache_mb`, `rocksdb_memtable_mb` | Tune the database writer and RocksDB. |
+| `backfill`, `backfill_batch`, `backfill_rate`, `backfill_store_per_turn` | Backward sync: a full node whose oldest block is above block 0 (started from a snapshot on lmdb or rocksdb, or switched from pruned to full) fetches the older blocks from its neighbours in the background, with the existing block requests, checks each against the chain's hashes and its signatures and stores it without applying it; the API serves each block and history as it arrives. On by default; `backfill=off` keeps only the snapshot's blocks. |
 
 ### Converting the block database
 
@@ -73,7 +74,10 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   requests of its p2p neighbours while it is synced with the network, within `serve_rate_kbps`
   (KB/s, all peers together; half for one peer), `serve_max_peers` peers within 30 s, and half of
   that while it is a confidant or the writer. It announces it in its p2p host data at start, with
-  its community version. Official nodes neither see nor answer these messages.
+  its community version; community peers refresh that value from the node's answers to their
+  pings, so a restart with another `serve` value is seen within about a minute (official peers keep the
+  value they first saw until the node leaves their routing table). Official nodes neither see nor
+  answer these messages.
 - **A first start fetches a snapshot from the network.** A node whose `db/` holds no database,
   with no checkpoint in `qs/`, `db_backend` `lmdb` or `rocksdb` and `fetch=auto` (the default),
   starts its p2p transport without opening the chain and looks for neighbours that serve
@@ -93,6 +97,13 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   or `snapshot.mismatch` and stops with exit code 4; it refuses to start while
   `snapshot.mismatch` exists. An import interrupted by a kill leaves `db/.importing`; the next
   start removes what that import wrote before it looks at `db/`.
+
+### Token cache
+
+`[api] tokens_cache=true` turns on the token cache behind the `Token*` API methods in any build.
+The official node has it only in its monitor and wallet builds. The cache follows tokens of every
+standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
+rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
 
 ## Start-up behaviour
 
@@ -172,6 +183,16 @@ What an operator sees and sets is in [snapshots.md](snapshots.md).
   - `[params] sync_contract_execution` (default `true`): `false` skips the re-execution while
     syncing altogether, and every state comes from the confidants.
 
+- **Contract calls that cannot run are refused.** `TransactionFlow` checks the method and the types
+  of the arguments of a contract call against the contract, and refuses a call that no method
+  matches, which would fail on every node with its fee paid (a token amount passed as a string to
+  a method that takes a BigDecimal, or the reverse). See [tokens.md](tokens.md).
+- **Contract results after a quick start.** A node that quick-starts from a checkpoint at its last
+  stored block reads no block. The official node then never marks its stored blocks as read, and
+  every contract call sent through its API ends with "Transaction in progress" and no result,
+  even though the network executed the call. The community node marks the blocks as read when
+  it starts running.
+
 ## Security and correctness fixes
 
 These were found by reviewing the official code. None of them changes the blocks or the
@@ -180,6 +201,18 @@ consensus rules.
 - **Remote crashes and out-of-bounds reads.** Fixed when a peer sends a malformed compressed
   region, an empty packet, or a pool whose lengths point past its data. Also fixed: a data race
   in `LockFreeChanger`.
+- **A size limit on p2p packets.** The node runs its own fork of the p2p library
+  ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the commit the official node uses). The
+  first packet of a connection (the registration) may announce at most 64 bytes of data, any
+  later packet at most 256 MiB, far above any packet the node sends; above that the connection is
+  closed before anything is allocated, with an error line at most once a minute per address
+  (`Packet header from <address> announces <n> bytes, above the limit of <limit>: connection
+  dropped (...)`). Below the limit the data is read in chunks of 1 MiB, so the memory held follows
+  the bytes actually received, not the size announced. Official nodes allocate whatever size is
+  announced. The fork also shows a peer's latest host data (version, snapshot capability),
+  refreshed from its answers to our pings, instead of the first one seen; passes each received
+  datagram with its own length; and stops its routing table (threads, UDP socket) with the p2p
+  host at exit.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;
@@ -256,5 +289,7 @@ rounds for both).
 - **Known hosts.** `known_hosts.txt` is refreshed weekly from a verified list of seed nodes.
 - **Docker image.** The image is `ghcr.io/enzinobb/credits-node`. By default it runs a pruned
   node that starts from a snapshot of the chain, published every 12 hours, instead of syncing
-  from block 0. The snapshot's checksum and its state digest are verified before use. See
-  [packaging/docker/README.md](../packaging/docker/README.md).
+  from block 0. The snapshot's checksum and its state digest are verified before use. A full node
+  on lmdb or rocksdb starts from the snapshot too and fetches the older blocks in the background
+  (`CREDITS_BACKFILL=off` to keep only the snapshot's blocks); switching from pruned to full is
+  allowed. See [packaging/docker/README.md](../packaging/docker/README.md).

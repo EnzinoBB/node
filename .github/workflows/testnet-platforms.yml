@@ -42,9 +42,12 @@ jobs:
   macos:
     name: Private network (macOS, ${{ inputs.nodes || '7' }} nodes)
     if: github.event_name == 'schedule' || inputs.os == 'macos' || inputs.os == 'both'
-    runs-on: macos-14
-    timeout-minutes: 150
+    runs-on: macos-15
+    # measured 16-25 min with the caches (build 3, network 13), about 45 with a cold build
+    timeout-minutes: 60
     env:
+      # built on macOS 15, runs on macOS 14 and later (Boost and the node alike)
+      MACOSX_DEPLOYMENT_TARGET: '14.0'
       BOOST_PREFIX: /Users/runner/boost
       CCACHE_DIR: /Users/runner/.ccache
       HOMEBREW_NO_AUTO_UPDATE: '1'
@@ -86,7 +89,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.BOOST_PREFIX }}
-          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-14-v1
+          key: boost-${{ env.BOOST_VERSION }}-static-cxx17-macos-15-v1
 
       # as in build-platforms.yml
       - name: Build Boost
@@ -115,8 +118,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-testnet-macos-14-${{ github.sha }}
-          restore-keys: ccache-testnet-macos-14-
+          key: ccache-testnet-macos-15-${{ github.sha }}
+          restore-keys: ccache-testnet-macos-15-
 
       # build-platforms.yml's configuration plus CREDITS_TESTNET (csnode, net and client only)
       - name: Build node
@@ -146,10 +149,10 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-testnet-macos-14-${{ github.sha }}
+          key: ccache-testnet-macos-15-${{ github.sha }}
 
       - name: Run private network
-        timeout-minutes: 75
+        timeout-minutes: 40
         env:
           RESTART_AT: '300'
           FUND: '1'
