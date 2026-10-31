@@ -31,6 +31,7 @@
 #include <csnode/roundpackage.hpp>
 #include <csnode/configholder.hpp>
 #include <csnode/eventreport.hpp>
+#include <csnode/utilitymessage.hpp>
 
 #include <lib/system/logger.hpp>
 #include <lib/system/progressbar.hpp>
@@ -438,6 +439,7 @@ void Node::startBackfill() {
     settings.batch = sto.backfillBatch;
     settings.rate = sto.backfillRate;
     settings.storePerTurn = sto.backfillStorePerTurn;
+    settings.turnBudgetMs = sto.backfillTurnBudgetMs;
     // created under the lock that stop() takes to read the pointer (finishBootstrap runs this on the
     // processor thread while a stop may come from another one)
     std::lock_guard<std::mutex> lock(backfillTimerMutex_);
@@ -1004,7 +1006,6 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
     cs::IDataStream stream(data, size);
     cs::Signature sig;
     cs::Bytes msg;
-    cs::RoundNumber rNum;
     stream >> msg >> sig ;
     
     if (!stream.isValid() || !stream.isEmpty()) {
@@ -1012,14 +1013,28 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
         return;
     }
 
-    cs::Byte order;
-    cs::PublicKey pKey;
-    cs::IDataStream bytes(msg.data(), msg.size());
-    bytes >> rNum;
-    bytes >> order;
-    bytes >> pKey;
+    // an order from the project, signed with the blockchain key: see cs::readUtilityMessage
+    const cs::UtilityMessage message = cs::readUtilityMessage(msg, sig, cs::PacketValidator::getBlockChainKey());
+    switch (message.status) {
+        case cs::UtilityMessage::Status::BadFormat:
+            cserror() << "NODE> Bad Utility message format (" << msg.size() << " bytes), drop";
+            return;
+        case cs::UtilityMessage::Status::BadSignature:
+            cswarning() << "NODE> The Utility message is incorrect: signature isn't valid, drop";
+            return;
+        case cs::UtilityMessage::Status::Ok:
+            break;
+    }
 
-    switch (order) {
+    // ignore too aged command to prevent store & re-use by enemies, as a stop request is
+    const cs::RoundNumber currentRound = cs::Conveyer::instance().currentRoundNumber();
+    if (!cs::isUtilityRoundInWindow(message.round, currentRound)) {
+        cswarning() << "NODE> Utility message for round " << message.round << " while round is " << currentRound << ", drop";
+        return;
+    }
+
+    const cs::PublicKey& pKey = message.key;
+    switch (message.order) {
         case Orders::Release:
             if (pKey == cs::Zero::key) {
                 /* @TODO redesign this code 
@@ -1046,6 +1061,9 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
             break;
     }
 }
+
+static_assert(cs::kUtilityRelease == Node::Orders::Release && cs::kUtilitySeal == Node::Orders::Seal,
+              "a utility message carries Node::Orders as one byte");
 
 static_assert(cs::kMaxBootstrapTable == Consensus::MaxTrustedNodes, "a bootstrap table holds at most MaxTrustedNodes keys");
 
@@ -1385,42 +1403,21 @@ void Node::getTransactionsPacket(const uint8_t* data, const std::size_t size, co
 
 }
 
+// Only the node's owner stops the node. The request carries no checked signature (the check was left
+// out in 2019 and the signing key removed since), so any peer could send it: it is counted and
+// dropped. A node that is too old for the network still stops by the special order of the version
+// change (order 5), which comes in a block.
 void Node::getNodeStopRequest(const cs::RoundNumber round, const uint8_t* data, const std::size_t size) {
-    const auto localRound = cs::Conveyer::instance().currentRoundNumber();
-
-    if (round < localRound && localRound - round > cs::MaxRoundDeltaInStopRequest) {
-        // ignore too aged command to prevent store & re-use by enemies
-        return;
+    csunused(data);
+    static std::atomic<uint64_t> ignored{0};
+    static std::atomic<int64_t> lastLogged{0};
+    const auto count = ++ignored;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto last = lastLogged.load();
+    if (now - last >= 60 && lastLogged.compare_exchange_strong(last, now)) {
+        cswarning() << "NODE> stop request from the network ignored (round " << round << ", " << size
+                    << " bytes, " << count << " ignored so far): only the node's owner stops the node";
     }
-
-    cs::IDataStream stream(data, size);
-
-    uint16_t version = 0;
-    cs::Signature sig;
-    stream >> version >> sig;
-
-    if (!stream.isValid() || !stream.isEmpty()) {
-        cswarning() << "NODE> Get stop request parsing failed";
-        return;
-    }
-
-    cs::Bytes message;
-    cs::ODataStream roundStream(message);
-    roundStream << round << version;
-
-    // packet validator have already tested starter signature
-    cswarning() << "NODE> Get stop request, received version " << version << ", received bytes " << size;
-
-    if (NODE_VERSION > version) {
-        cswarning() << "NODE> stop request does not cover my version, continue working";
-        return;
-    }
-
-    cswarning() << "NODE> Get stop request, node will be closed...";
-    stopRequested_ = true;
-
-    // unconditional stop
-    stop();
 }
 
 bool Node::canBeTrusted(bool critical) {
