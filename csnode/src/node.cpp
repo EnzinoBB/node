@@ -31,6 +31,7 @@
 #include <csnode/roundpackage.hpp>
 #include <csnode/configholder.hpp>
 #include <csnode/eventreport.hpp>
+#include <csnode/utilitymessage.hpp>
 
 #include <lib/system/logger.hpp>
 #include <lib/system/progressbar.hpp>
@@ -1005,7 +1006,6 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
     cs::IDataStream stream(data, size);
     cs::Signature sig;
     cs::Bytes msg;
-    cs::RoundNumber rNum;
     stream >> msg >> sig ;
     
     if (!stream.isValid() || !stream.isEmpty()) {
@@ -1013,14 +1013,28 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
         return;
     }
 
-    cs::Byte order;
-    cs::PublicKey pKey;
-    cs::IDataStream bytes(msg.data(), msg.size());
-    bytes >> rNum;
-    bytes >> order;
-    bytes >> pKey;
+    // an order from the project, signed with the blockchain key: see cs::readUtilityMessage
+    const cs::UtilityMessage message = cs::readUtilityMessage(msg, sig, cs::PacketValidator::getBlockChainKey());
+    switch (message.status) {
+        case cs::UtilityMessage::Status::BadFormat:
+            cserror() << "NODE> Bad Utility message format (" << msg.size() << " bytes), drop";
+            return;
+        case cs::UtilityMessage::Status::BadSignature:
+            cswarning() << "NODE> The Utility message is incorrect: signature isn't valid, drop";
+            return;
+        case cs::UtilityMessage::Status::Ok:
+            break;
+    }
 
-    switch (order) {
+    // ignore too aged command to prevent store & re-use by enemies, as a stop request is
+    const cs::RoundNumber currentRound = cs::Conveyer::instance().currentRoundNumber();
+    if (!cs::isUtilityRoundInWindow(message.round, currentRound)) {
+        cswarning() << "NODE> Utility message for round " << message.round << " while round is " << currentRound << ", drop";
+        return;
+    }
+
+    const cs::PublicKey& pKey = message.key;
+    switch (message.order) {
         case Orders::Release:
             if (pKey == cs::Zero::key) {
                 /* @TODO redesign this code 
@@ -1047,6 +1061,9 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
             break;
     }
 }
+
+static_assert(cs::kUtilityRelease == Node::Orders::Release && cs::kUtilitySeal == Node::Orders::Seal,
+              "a utility message carries Node::Orders as one byte");
 
 static_assert(cs::kMaxBootstrapTable == Consensus::MaxTrustedNodes, "a bootstrap table holds at most MaxTrustedNodes keys");
 
