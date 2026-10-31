@@ -28,6 +28,7 @@ import os
 import random
 import sys
 import time
+import urllib.error
 import urllib.request
 from decimal import Decimal
 
@@ -137,6 +138,13 @@ def balances(args):
                     continue  # recently active: the two sides may refer to different blocks
             theirs = Decimal(monitor(f"ExtendedBalance?id={address}")["balance"])
         except Exception as e:
+            # only a monitor that is down or unreachable is skipped: a 4xx or an answer that does not
+            # parse is a fault of this check, or a changed monitor, and fails
+            down = (isinstance(e, urllib.error.HTTPError) and e.code >= 500) or (
+                not isinstance(e, urllib.error.HTTPError) and isinstance(e, (urllib.error.URLError, TimeoutError, ConnectionError)))
+            if not down:
+                print(f"FAIL: unexpected answer from the monitor: {e!r}", flush=True)
+                return 1
             if mismatches:
                 print(f"the monitor stopped answering: {e}", flush=True)
                 break
