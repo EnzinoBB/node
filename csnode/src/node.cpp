@@ -440,6 +440,7 @@ void Node::startBackfill() {
     settings.rate = sto.backfillRate;
     settings.storePerTurn = sto.backfillStorePerTurn;
     settings.turnBudgetMs = sto.backfillTurnBudgetMs;
+    settings.idleTurnBudgetMs = sto.backfillIdleTurnBudgetMs;
     // created under the lock that stop() takes to read the pointer (finishBootstrap runs this on the
     // processor thread while a stop may come from another one)
     std::lock_guard<std::mutex> lock(backfillTimerMutex_);
@@ -482,6 +483,7 @@ void Node::onBackfillTick() {
     ctx.bootstrapping = bootstrapping_;
     ctx.round = cs::Conveyer::instance().currentRoundNumber();
     ctx.lastSeq = blockChain_.getLastSeq();
+    ctx.trusted = myLevel_ != Level::Normal;
     backwardSync_->tick(ctx);
 }
 

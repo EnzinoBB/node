@@ -116,6 +116,7 @@ cs::BackwardSync::Settings settingsOf(size_t batch = 100, size_t rate = 1000, si
     s.rate = rate;
     s.storePerTurn = perTurn;
     s.turnBudgetMs = 0;   // no time limit unless a test sets one
+    s.idleTurnBudgetMs = 0;
     return s;
 }
 
@@ -170,6 +171,7 @@ protected:
         ctx.lastSeq = kHead;
         ctx.forwardSyncRunning = forwardSync_;
         ctx.bootstrapping = bootstrapping_;
+        ctx.trusted = trusted_;
         return ctx;
     }
     void tick(uint64_t advanceMs = 500) {
@@ -215,6 +217,7 @@ protected:
     uint64_t storeDelayMs_ = 0;   // a slow disk: simulated time spent in every store
     bool forwardSync_ = false;
     bool bootstrapping_ = false;
+    bool trusted_ = false;
 };
 
 }  // namespace
@@ -559,7 +562,7 @@ TEST_F(BackfillTest, TheWorkPerTurnIsBounded) {
 // so no block is dropped and no peer that answered is taken for one that did not
 TEST_F(BackfillTest, SlowStoresNeitherDropBlocksNorMarkPeers) {
     auto settings = settingsOf(20, 0, 50);
-    settings.turnBudgetMs = 30;
+    settings.idleTurnBudgetMs = 30;
     make(settings);
     storeDelayMs_ = 12;   // three blocks a turn
     for (int i = 0; i < 400 && !sync_->stats().done; ++i) {
@@ -573,9 +576,24 @@ TEST_F(BackfillTest, SlowStoresNeitherDropBlocksNorMarkPeers) {
     EXPECT_EQ(logged("did not answer"), 0u);
 }
 
+// a confidant keeps the shorter budget, a node outside the round's trusted the longer one
+TEST_F(BackfillTest, AConfidantTakesTheShorterBudget) {
+    auto settings = settingsOf(100, 0, 50);
+    settings.turnBudgetMs = 20;
+    settings.idleTurnBudgetMs = 60;
+    make(settings);
+    storeDelayMs_ = 10;
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    EXPECT_EQ(kFirst - first_, 6u);    // not trusted: 60 ms, six blocks of 10 ms
+    trusted_ = true;
+    tick();
+    EXPECT_EQ(kFirst - first_, 8u);    // trusted: 20 ms, two more
+}
+
 TEST_F(BackfillTest, ASlowTurnStopsAtItsTimeBudget) {
     auto settings = settingsOf(100, 0, 50);
-    settings.turnBudgetMs = 30;
+    settings.idleTurnBudgetMs = 30;
     make(settings);
     storeDelayMs_ = 12;
     tick();

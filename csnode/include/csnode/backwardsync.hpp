@@ -38,6 +38,7 @@ public:
         bool bootstrapping = false;         // the node fetches a snapshot: its chain is not open
         RoundNumber round = 0;
         Sequence lastSeq = 0;
+        bool trusted = false;               // the node is a confidant (or the writer) of this round
     };
 
     // the first stored block and the hash of the block below it (empty: unknown)
@@ -62,9 +63,13 @@ public:
         // blocks verified and stored per call (a tick or a reply), so that the processor thread,
         // which also runs consensus, is never held long; the rest waits for the next call
         size_t storePerTurn = 50;
-        // and for at most this long (ms) per call, 0: no limit, at most 1000. A turn ends after the block that
-        // passes it: a mainnet turn of 50 blocks took up to 1.7 s, more than a round
+        // and for at most this long (ms) per call while the node is a confidant, 0: no limit, at most
+        // 1000. A turn ends after the block that passes it: a mainnet turn of 50 blocks took up to 1.7 s,
+        // more than a round
         uint64_t turnBudgetMs = 50;
+        // the same while the node is not a confidant, with little consensus work: about 450 blocks/s
+        // on mainnet instead of about 250
+        uint64_t idleTurnBudgetMs = 90;
     };
 
     struct Stats {
@@ -188,6 +193,7 @@ private:
     std::atomic<uint64_t> busyUs_{0};
     std::atomic<uint64_t> longestTurnUs_{0};
     std::atomic<size_t> slowTurns_{0};
+    bool trusted_ = false;   // from the last tick: the budget of the turns until the next one
     std::atomic<uint64_t> longestFlushUs_{0};
 };
 

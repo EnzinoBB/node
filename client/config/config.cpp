@@ -1071,6 +1071,7 @@ void Config::readBackfillSettings(const boost::property_tree::ptree& data, Stora
     number("backfill_rate", storage.backfillRate, 0, 1'000'000);
     number("backfill_store_per_turn", storage.backfillStorePerTurn, 1, 1000);
     number("backfill_turn_budget_ms", storage.backfillTurnBudgetMs, 0, 1000);
+    number("backfill_idle_turn_budget_ms", storage.backfillIdleTurnBudgetMs, 0, 1000);
 }
 
 namespace {
