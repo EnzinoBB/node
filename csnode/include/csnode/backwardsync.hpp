@@ -62,7 +62,7 @@ public:
         // blocks verified and stored per call (a tick or a reply), so that the processor thread,
         // which also runs consensus, is never held long; the rest waits for the next call
         size_t storePerTurn = 50;
-        // and for at most this long (ms) per call, 0: no limit. A turn ends after the block that
+        // and for at most this long (ms) per call, 0: no limit, at most 1000. A turn ends after the block that
         // passes it: a mainnet turn of 50 blocks took up to 1.7 s, more than a round
         uint64_t turnBudgetMs = 50;
     };
@@ -78,6 +78,7 @@ public:
         uint64_t busyUs = 0;         // processor-thread time spent verifying and storing
         uint64_t longestTurnUs = 0;  // the longest single call
         size_t slowTurns = 0;        // calls longer than kSlowTurnMs
+        uint64_t longestFlushUs = 0; // the longest storage flush (every kFlushBlocks or kFlushMs)
         bool started = false;
         bool done = false;
     };
@@ -187,6 +188,7 @@ private:
     std::atomic<uint64_t> busyUs_{0};
     std::atomic<uint64_t> longestTurnUs_{0};
     std::atomic<size_t> slowTurns_{0};
+    std::atomic<uint64_t> longestFlushUs_{0};
 };
 
 }  // namespace cs

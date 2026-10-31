@@ -438,6 +438,7 @@ void Node::startBackfill() {
     settings.batch = sto.backfillBatch;
     settings.rate = sto.backfillRate;
     settings.storePerTurn = sto.backfillStorePerTurn;
+    settings.turnBudgetMs = sto.backfillTurnBudgetMs;
     // created under the lock that stop() takes to read the pointer (finishBootstrap runs this on the
     // processor thread while a stop may come from another one)
     std::lock_guard<std::mutex> lock(backfillTimerMutex_);
