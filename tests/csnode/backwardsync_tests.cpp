@@ -591,6 +591,33 @@ TEST_F(BackfillTest, AConfidantTakesTheShorterBudget) {
     EXPECT_EQ(kFirst - first_, 8u);    // trusted: 20 ms, two more
 }
 
+// a confidant does not hold the processor thread with a flush: it waits until the node is out of
+// the trusted set, or kTrustedFlushDeferMs at most
+TEST_F(BackfillTest, AConfidantDefersTheFlush) {
+    make(settingsOf(100, 0, 50));
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    ASSERT_EQ(kFirst - first_, 50u);
+    const size_t before = flushes_;
+    trusted_ = true;
+    tick(cs::BackwardSync::kFlushMs + 1);   // stores 50 more; the flush is due, but deferred
+    ASSERT_EQ(kFirst - first_, 100u);
+    EXPECT_EQ(flushes_, before) << "deferred while trusted";
+    trusted_ = false;
+    tick();
+    EXPECT_EQ(flushes_, before + 1) << "flushed once out of the trusted set";
+
+    // trusted for good: flushed once the deferral runs out
+    answerAll();
+    const cs::Sequence stored = first_;
+    ASSERT_LT(stored, kFirst - 100) << "more blocks stored since the flush";
+    trusted_ = true;
+    tick(cs::BackwardSync::kFlushMs + 1);
+    EXPECT_EQ(flushes_, before + 1);
+    tick(cs::BackwardSync::kTrustedFlushDeferMs);
+    EXPECT_EQ(flushes_, before + 2);
+}
+
 TEST_F(BackfillTest, ASlowTurnStopsAtItsTimeBudget) {
     auto settings = settingsOf(100, 0, 50);
     settings.idleTurnBudgetMs = 30;
