@@ -212,7 +212,7 @@ struct CachesSerializationManager::Impl {
     }
 
     void saveHashes(const std::filesystem::path& dir) {
-        std::ofstream f(dir / kHashesFile);
+        std::ofstream f(dir / kHashesFile, std::ios::binary);
         f << getHashes();
     }
 
@@ -293,7 +293,8 @@ struct CachesSerializationManager::Impl {
         std::ifstream f(
           std::filesystem::path(kQuickStartRoot) /
           std::to_string(version) /
-          kHashesFile
+          kHashesFile,
+          std::ios::binary
         );
 
         std::string writtenHashes;

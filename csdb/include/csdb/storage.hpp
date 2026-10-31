@@ -218,6 +218,18 @@ public:
     bool pool_save(Pool pool);
 
     /**
+     * Backward sync (docs/specs/2026-10-17-backward-sync-design.md): stores the block just below a
+     * stored one, so that a storage that starts after block 0 grows downwards. The chain's
+     * bookkeeping (last hash, count, pool cache, write queue) is about the head and is left alone;
+     * the block goes straight to the database on every backend, also with the asynchronous writer
+     * (RocksDB). The caller verifies the block against the one above it and keeps the order.
+     *
+     * @returns false, with the error set, if the block is invalid, already stored (by hash or by
+     *          sequence), not directly below a stored block, or the database refused it.
+     */
+    bool pool_save_backfill(const Pool& pool);
+
+    /**
      * @brief Loads pool form the storage/ overloaded method
      * @param[in]   hash - hash of pool to be loaded,
      *              sequence - sequence of pool to be loaded.
@@ -363,6 +375,11 @@ public:
      * @returns The sequence, or std::numeric_limits<cs::Sequence>::max() if the storage is empty.
      */
     cs::Sequence first_sequence() const;
+
+    /**
+     * The stored bytes of block sequence, as the database holds them (no parsing, no pool cache).
+     */
+    bool pool_bytes(cs::Sequence sequence, cs::Bytes& out) const;
 
     /**
      * Returns the space of pruned pools to the file system.

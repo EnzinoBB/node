@@ -73,6 +73,8 @@ public:
     void addToNeighbours(const std::set<cs::PublicKey>&);
 
     void getKnownPeers(std::vector<cs::PeerData>&);
+    // the capability byte a peer of the routing table announces (cs::hostdata); false if unknown
+    bool peerCapabilities(const cs::PublicKey& key, uint8_t& capabilities);
 
     // from neigbours
     // @param added - true if new neighbour adder, false if removed

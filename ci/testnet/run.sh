@@ -36,6 +36,11 @@
 #        contract scenario never kills, partitions or slows n1
 #        SYNC_CONTRACT_EXECUTION=0: every node runs with sync_contract_execution=false (no contract
 #        re-execution while reading the blockchain; states fetched from the confidants once live)
+#        TOKENS=1 (with CONTRACTS): tokens.py also deploys a v1 and a v0 token from the wallet of the
+#        last node once fund.py's load is over, runs transfers, approvals, payable and a sale through
+#        n1, and checks the balances on every node, the states, and the token API of n1 (an API
+#        mismatch is reported; TOKENS_STRICT_API=1 fails the run on it); TOKENS_VIA=N sends them
+#        through node N instead (e.g. the node of the restart test, once it restarted)
 #        CONTRACT_DICE=1 (with CONTRACTS): also a Dice contract that reads its own balance, played three
 #        times before the restart test; a node that syncs through the plays re-executes them
 #        CONTRACT_LOAD_SECONDS (default 0, with CONTRACTS): after the calls, a load phase of that many
@@ -46,14 +51,37 @@
 #        same JDK, so any result that differs from the release executor's fails the contract consensus
 #        BIN_ALT (optional): the even nodes run this node binary instead, so a block or contract result
 #        that differs from BIN's shows up as a diverging state
+#        BIN_ALT_OFFICIAL=1: BIN_ALT is the official node (ci/official/testnet-hooks.patch), which logs
+#        no state digest: every node opens its API and the even nodes must hold the same blocks as n1
+#        (hash at every 100th sequence up to the lowest head); the digests are compared among the others.
+#        The official node runs BerkeleyDB whatever DB_BACKEND says, and a scenario that needs on an
+#        even node a feature only this fork has (pruning, snapshots, conversion, damage and failure
+#        injection, NODE_STORAGE other than berkeleydb, SYNC_CONTRACT_EXECUTION=0) is refused at once.
+#        A fork of an official node shows only as a block hash that differs (it logs no fork line), and
+#        an official node restarted after DPOS_AT goes back to StartingDPOS 10000 (it does not keep
+#        order 9 across a quick start): official behaviour, so restarts after DPOS_AT are refused for
+#        even nodes
 #        RESTART_NODES (default: the last initial confidant): the nodes the restart test stops and restarts together
-#        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate or partition, applied with
+#        JOIN_EXTRA (default 0, with JOIN_FETCH=p2p): that many more joining nodes, started with the first
+#        one and configured like it; each must start from a snapshot (or fall back as JOIN_EXPECT says)
+#        and reach the target. STRESS_WINDOW (seconds, default 0 = off): the block rate and the round
+#        times of n1 in that many seconds before the joins and after they started are compared; the
+#        run fails when the rate falls by more than 10 % or the 95th percentile of the round time rises
+#        by more than 20 %
+#        NET_FAULT (default off): loss, corrupt, delay, reorder (with 5% duplicates), duplicate, partition,
+#        or rate (NET_FAULT_RATE, default 2mbit, for the faulty nodes' traffic together), applied with
 #        tc netem to the p2p traffic sent and received by NET_FAULT_NODES (comma separated) from
 #        sequence NET_FAULT_AT (default 150) for NET_FAULT_SECONDS (default 0 = until the end), at
 #        NET_FAULT_PCT percent (default 10; partition drops everything); those nodes must keep up
 #        SLOW_NODES (comma separated, default none): those nodes get SLOW_CPU percent of one CPU (default 20)
 #        GARBAGE_AT (default 0 = off): from that sequence garbage.py sends GARBAGE_RATE (default 200)
 #        random datagrams a second to the nodes' p2p ports for GARBAGE_SECONDS (default 300)
+#        HUGE_FRAME_AT (default 0 = off): from that sequence huge_frame.py opens connections to the p2p
+#        TCP port of every node of this build (the odd ones when the even nodes run BIN_ALT, which may
+#        have no frame limit) and sends packet headers above the limits (2^40 and 65 bytes before a
+#        registration, 2^40 and 256 MiB + 1 after one: closed at once, a limit line logged) and just
+#        below them without data (64 bytes, 256 MiB - 1: held until the 10 s idle timeout); each node
+#        must keep running with its memory flat (Linux: at most +64 MiB per step) and stay in consensus
 #        PRUNE_NODE (default 0 = off): that node runs with pruned storage on LMDB (a checkpoint every
 #        1'000 blocks, prune_keep_blocks=300, block_db=lmdb); it must remove old blocks, survive the restart test if it is
 #        the restarted node, and end with the same state digest
@@ -67,8 +95,55 @@
 #        snapshot with --import-snapshot into its own backend and joins; with SNAPSHOT_CORRUPT=1 the
 #        blocks file is truncated first, so the restore must fail and that node syncs from block 0.
 #        SNAPSHOT_FORMAT=1: packaging/docker/snapshot-make.sh and snapshot-restore.sh instead
+#        SNAPSHOT_SERVE_NODES (optional, comma separated): those nodes run with [snapshot] serve=on
+#        and a checkpoint every 1'000 blocks; each must build the snapshot of a checkpoint and serve
+#        it; at the end one other node of this build is stopped and its known_peers.json must list
+#        each of them with the snapshot capability, and no other node with it. Every node gets
+#        [snapshot] fetch=off (a network that starts from block 0 has no snapshot to fetch), except
+#        the joining node with JOIN_FETCH=p2p
+#        JOIN_FETCH=p2p (needs JOIN_PRUNED_AT): the joining node starts on an empty database with
+#        [snapshot] fetch=auto and gets its snapshot from the serving nodes over p2p: min_sources
+#        JOIN_MIN_SOURCES (default 3), fetch_wait JOIN_WAIT (default 300), fetch_fallback
+#        JOIN_FALLBACK (default sync). Every node then listens on its own loopback /24 (127.0.<i>.1,
+#        NODE_NETS=1), so that the sources count as independent. It must agree, fetch, import, verify
+#        the digest of the snapshot at its quick start and reach the target
+#        JOIN_EXPECT=fallback: too few sources on purpose; the joiner gives up after fetch_wait and
+#        syncs from block 0. JOIN_FETCH_RATE: the joiner's fetch_rate_kbps (KB/s), to slow a fetch down
+#        SNAPSHOT_LATE_SERVE_NODES (comma separated, odd): checkpoints as a serving node but serve=off;
+#        JOIN_LATE_SERVE_AFTER (default 90) s after the joiner started they are stopped for 40 s (so
+#        that the peers' routing tables forget them) and started again with serve=on
+#        JOIN_SOURCES=keys: the joiner trusts the serving nodes by key ([snapshot] sources=) and every
+#        node stays on 127.0.0.1 (one /24: only keys can make up min_sources); JOIN_SOURCES=file: the
+#        serving and late nodes are listed in the joiner's snapshot_sources.txt instead (not trusted)
+#        JOIN_KILL_DURING_FETCH=1: the joiner is killed once when it logs "fetching block" and once
+#        when it logs "importing block", and started again each time; it must clean up and join
+#        FORGE_NODE / CORRUPT_NODE (odd, a CREDITS_TESTNET build): that serving node declares a forged
+#        state digest / flips a byte of every third piece it serves
 #        STORAGE_SWITCH_AT (default 0 = off, needs PRUNE_NODE=6 and DB_BACKEND=lmdb): at that sequence
-#        node 5 is restarted as a pruned node and node 6 as a full one
+#        node 5 is restarted as a pruned node and node 6 as a full one; with STORAGE_SWITCH_NODE=<i>
+#        (another pruned node, e.g. a berkeleydb one of NODE_STORAGE) only that node goes from pruned to
+#        full; the node switched to full then fetches the blocks it
+#        pruned from its peers (backward sync). BACKFILL_RATE / BACKFILL_BATCH / BACKFILL_PER_TURN set
+#        its [storage] backfill_rate / backfill_batch / backfill_store_per_turn. BACKFILL_MEASURE=1:
+#        n1's and n6's block rate and round times from n6's first request (a trusted node: n6 is an
+#        initial confidant) to 60 s later, against the two minutes after the backfill: the block
+#        rate may fall by 20 %, the round time p95 rise by 50 % (at least 10 rounds in each window),
+#        and n6's longest turn of storing must stay under 250 ms; BACKFILL_MEASURE=report only prints
+#        Backward sync of the first node of BACKFILL_NODES (n6 after the storage switch, or the full
+#        joiner of a snapshot, JOIN_FULL=1): the BACKFILL_* keys above apply to it in both cases.
+#        BACKFILL_COMPARE_ALL=1: every block 0..head compared with n1 over the API (not every 100th).
+#        BACKFILL_HISTORY=1: the wallet histories of every node key and the master key, read on n1 and
+#        on that node over the API: while it backfills, its list must be the newest part of n1's (never
+#        another transaction) and the wallet counts equal; at the end, the lists equal.
+#        BACKFILL_CRASH=<steps> (comma separated, in order, each while it fetches): kill (SIGKILL),
+#        flushed (SIGKILL right after a "BACKFILL: flushed" line), unindexed (a CREDITS_TESTNET build
+#        stores one block without its index entries and stops, ./testnet-backfill-crash-unindexed: the
+#        next start must index it again), powercut (every node SIGKILLed and the network restarted);
+#        each restart resumes below its lowest block, and nothing may be missing at the end.
+#        BACKFILL_TAMPER=<node>:<kind>,... (a CREDITS_TESTNET build): once that node joins, those nodes
+#        serve blocks below 1000 altered (./testnet-tamper-replies; kind signature or content): it must
+#        refuse them ("rejected (signatures", "rejected (hash)"), leave those peers out and finish.
+#        JOIN_COMMUNITY=1: the joining node runs this build even if it is even (BIN_ALT, official)
 #        CONVERT_AT (default 0 = off, needs DB_BACKEND=berkeleydb): at that sequence n4 is converted to
 #        lmdb with --convert-only and restarted, and n6 is converted to rocksdb with --convert-db, killed
 #        after its second batch and again with every block converted (testnet-convert-kill), its
@@ -84,7 +159,8 @@
 #        databases yet. It must rebuild them from its blocks and log no database failure afterwards
 #        JOIN_PRUNED_AT (default 0 = off): one more node, outside the initial trusted set and without
 #        funds or checkpoints, starts when the network reaches that sequence; it syncs from block 0
-#        with pruned storage like PRUNE_NODE and must end with the same state digest
+#        with pruned storage like PRUNE_NODE and must end with the same state digest (JOIN_FETCH=p2p:
+#        it starts from a snapshot fetched from its neighbours instead)
 #        DB_BACKEND (default empty = the node's default, berkeleydb): db_backend of every node, or
 #        "mixed" for berkeleydb, lmdb and rocksdb in turn; pruned nodes use lmdb unless it names one
 #        CRASH_NODE (default 0 = off): that node is killed with SIGKILL CRASH_TIMES times (default 6)
@@ -120,10 +196,26 @@
 # from its caches) catches up; all nodes report the same STATE DIGEST at every common sequence.
 set -euo pipefail
 
+# the system this runs on: every scenario on Linux; the default scenario also on macOS and on Windows
+# (Git Bash), see .github/workflows/testnet-platforms.yml. What needs Linux stays behind these checks
+case "$(uname -s)" in
+    Linux) OS_KIND=linux ;;
+    Darwin) OS_KIND=macos ;;
+    MINGW*|MSYS*|CYGWIN*) OS_KIND=windows ;;
+    *) OS_KIND=other ;;
+esac
+if [ "$OS_KIND" != linux ]; then
+    # mapfile, ${var,,}: macOS ships bash 3.2 (the workflow installs a newer one)
+    [ "${BASH_VERSINFO[0]}" -ge 4 ] || { echo "FAIL: run.sh needs bash 4 or later, this is $BASH_VERSION"; exit 1; }
+fi
+
 BIN=$(realpath "$1")
 # mixed nodes: the even nodes run BIN_ALT, built from another ref
 BIN_ALT=${BIN_ALT:+$(realpath "$BIN_ALT")}
 [ -z "$BIN_ALT" ] || echo "mixed nodes: even nodes run $BIN_ALT"
+BIN_ALT_OFFICIAL=${BIN_ALT_OFFICIAL:-0}
+[ -n "$BIN_ALT" ] || BIN_ALT_OFFICIAL=0
+[ "$BIN_ALT_OFFICIAL" != 1 ] || echo "mixed nodes: the even nodes are official nodes"
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/../.." && pwd)
 NODES=${NODES:-7}
@@ -181,6 +273,9 @@ JOIN_FULL=${JOIN_FULL:-0}
 CONTRACTS=${CONTRACTS:-0}
 CONTRACTS_AFTER_AT=${CONTRACTS_AFTER_AT:-0}
 CONTRACT_DICE=${CONTRACT_DICE:-0}
+TOKENS=${TOKENS:-0}
+TOKENS_STRICT_API=${TOKENS_STRICT_API:-0}
+TOKENS_VIA=${TOKENS_VIA:-1}
 SYNC_CONTRACT_EXECUTION=${SYNC_CONTRACT_EXECUTION:-1}
 [ "$CONTRACTS_AFTER_AT" -eq 0 ] || [ "$CONTRACTS_AFTER_AT" -le $(( ${TARGET_SEQ:-1100} - 100 )) ] \
     || { echo "CONTRACTS_AFTER_AT must be at most TARGET_SEQ - 100"; exit 1; }
@@ -199,7 +294,55 @@ JOIN_PRUNED_AT=${JOIN_PRUNED_AT:-0}
 SNAPSHOT_AT=${SNAPSHOT_AT:-0}
 SNAPSHOT_FORMAT=${SNAPSHOT_FORMAT:-2}
 SNAPSHOT_CORRUPT=${SNAPSHOT_CORRUPT:-0}
+# SNAPSHOT_VIA=download (format 2): the joining node runs --download-snapshot against a local web
+# server laid out as the GitHub release (snapshot.json, s<seq>-<name>) instead of --import-snapshot
+SNAPSHOT_VIA=${SNAPSHOT_VIA:-import}
+case "$SNAPSHOT_VIA" in import|download) ;; *) echo "SNAPSHOT_VIA must be import or download, got '$SNAPSHOT_VIA'"; exit 1 ;; esac
+SNAPSHOT_SERVE_NODES=${SNAPSHOT_SERVE_NODES:-}
+if [ -n "$BIN_ALT" ]; then
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        # the even nodes run BIN_ALT, which may not serve snapshots
+        [ $((i % 2)) -eq 1 ] || { echo "FAIL: SNAPSHOT_SERVE_NODES names n$i, an even node, which runs BIN_ALT"; exit 1; }
+    done
+fi
+JOIN_FETCH=${JOIN_FETCH:-}
+JOIN_MIN_SOURCES=${JOIN_MIN_SOURCES:-3}
+JOIN_WAIT=${JOIN_WAIT:-300}
+JOIN_FALLBACK=${JOIN_FALLBACK:-sync}
+# JOIN_EXPECT=fallback: too few sources on purpose; the joiner must give up after fetch_wait and sync from block 0
+JOIN_EXPECT=${JOIN_EXPECT:-snapshot}
+JOIN_FETCH_RATE=${JOIN_FETCH_RATE:-0}
+SNAPSHOT_LATE_SERVE_NODES=${SNAPSHOT_LATE_SERVE_NODES:-}
+JOIN_LATE_SERVE_AFTER=${JOIN_LATE_SERVE_AFTER:-90}
+JOIN_SOURCES=${JOIN_SOURCES:-}
+case "$JOIN_SOURCES" in ""|keys|file) ;; *) echo "JOIN_SOURCES must be keys, file or empty, got '$JOIN_SOURCES'"; exit 1 ;; esac
+JOIN_KILL_DURING_FETCH=${JOIN_KILL_DURING_FETCH:-0}
+# JOIN_SURVEY=1 (with JOIN_FETCH=p2p): at the end the joining node is stopped and `node --survey-snapshots`
+# runs from its folder: the serving nodes must be listed in one group, and snapshot_sources.py must
+# turn the output into a sources file that names them
+JOIN_SURVEY=${JOIN_SURVEY:-0}
+FORGE_NODE=${FORGE_NODE:-0}
+CORRUPT_NODE=${CORRUPT_NODE:-0}
+for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ } $FORGE_NODE $CORRUPT_NODE; do
+    [ "$i" -eq 0 ] || [ $((i % 2)) -eq 1 ] || [ -z "$BIN_ALT" ] || { echo "FAIL: n$i is even and runs BIN_ALT: it cannot serve, forge or corrupt snapshots"; exit 1; }
+done
+case "$JOIN_EXPECT" in snapshot|fallback) ;; *) echo "JOIN_EXPECT must be snapshot or fallback, got '$JOIN_EXPECT'"; exit 1 ;; esac
+case "$JOIN_FETCH" in ""|p2p) ;; *) echo "JOIN_FETCH must be p2p or empty, got '$JOIN_FETCH'"; exit 1 ;; esac
+case "$JOIN_FALLBACK" in sync|wait) ;; *) echo "JOIN_FALLBACK must be sync or wait, got '$JOIN_FALLBACK'"; exit 1 ;; esac
+if [ "$JOIN_FETCH" = p2p ]; then
+    [ "$JOIN_PRUNED_AT" -gt 0 ] && [ "${SNAPSHOT_AT:-0}" -eq 0 ] \
+        || { echo "JOIN_FETCH=p2p needs JOIN_PRUNED_AT and no SNAPSHOT_AT"; exit 1; }
+fi
+# one loopback /24 per node (127.0.<i>.1): the agreement counts sources by /24. The p2p library
+# binds its UDP socket to every interface whatever [host_input] ip says, so a datagram to another
+# node leaves from 127.0.0.1: node_nets_on rewrites its source to the sender's address (SNAT by the
+# sender's p2p port, needs sudo), which is the address the receiver's routing table records
+NODE_NETS=${NODE_NETS:-$([ "$JOIN_FETCH" = p2p ] && [ "$JOIN_SOURCES" != keys ] && echo 1 || echo 0)}
+node_ip() { if [ "$NODE_NETS" = 1 ]; then echo "127.0.$1.1"; else echo 127.0.0.1; fi; }
 STORAGE_SWITCH_AT=${STORAGE_SWITCH_AT:-0}
+STORAGE_SWITCH_NODE=${STORAGE_SWITCH_NODE:-6}
+# the node switched from full to pruned at the same time: n5, with the default n6 only
+SWITCH_TO_PRUNED=$([ "$STORAGE_SWITCH_NODE" = 6 ] && echo 5 || true)
 CONVERT_AT=${CONVERT_AT:-0}
 INDEX_LOSS_AT=${INDEX_LOSS_AT:-0}
 INDEX_LOSS_NODE=${INDEX_LOSS_NODE:-$PRUNE_NODE}
@@ -208,13 +351,34 @@ HASHDB_DAMAGE_NODE=${HASHDB_DAMAGE_NODE:-3}
 HASHDB_DAMAGE=${HASHDB_DAMAGE:-zero}
 MDB_COPY=${MDB_COPY:-$REPO/third-party/lmdb/libraries/liblmdb/mdb_copy}
 JOIN_NODE=$({ [ "$JOIN_PRUNED_AT" -gt 0 ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo $((NODES + 1)) || echo 0)
-ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo "$JOIN_NODE" || echo "$NODES")
+JOIN_EXTRA=${JOIN_EXTRA:-0}
+[ "$JOIN_EXTRA" -eq 0 ] || [ "$JOIN_FETCH" = p2p ] || { echo "JOIN_EXTRA needs JOIN_FETCH=p2p"; exit 1; }
+# the even nodes run BIN_ALT: a second joining node would be one of them
+[ "$JOIN_EXTRA" -eq 0 ] || [ -z "$BIN_ALT" ] || { echo "FAIL: JOIN_EXTRA with BIN_ALT: the even joining nodes would run BIN_ALT"; exit 1; }
+ALL_NODES=$([ "$JOIN_NODE" -gt 0 ] && echo $((JOIN_NODE + JOIN_EXTRA)) || echo "$NODES")
+# the joining nodes: the first one and the JOIN_EXTRA others after it
+is_joiner() { [ "$JOIN_NODE" -gt 0 ] && [ "$1" -ge "$JOIN_NODE" ]; }
+# node i runs BIN_ALT: the even ones, but the joining node with JOIN_COMMUNITY=1
+alt_node() { [ -n "$BIN_ALT" ] && [ $(( $1 % 2 )) -eq 0 ] && ! { [ "${JOIN_COMMUNITY:-0}" = 1 ] && [ "$1" -eq "$JOIN_NODE" ]; }; }
+EXTRA_JOINERS=$( { [ "$JOIN_EXTRA" -gt 0 ] && seq $((JOIN_NODE + 1)) "$ALL_NODES" | tr "\n" " "; } || true)
+STRESS_WINDOW=${STRESS_WINDOW:-0}
+BACKFILL_RATE=${BACKFILL_RATE:-}
+BACKFILL_BATCH=${BACKFILL_BATCH:-}
+BACKFILL_PER_TURN=${BACKFILL_PER_TURN:-}
+BACKFILL_MEASURE=${BACKFILL_MEASURE:-0}
+BACKFILL_COMPARE_ALL=${BACKFILL_COMPARE_ALL:-0}
+BACKFILL_HISTORY=${BACKFILL_HISTORY:-0}
+BACKFILL_CRASH=${BACKFILL_CRASH:-}
+BACKFILL_TAMPER=${BACKFILL_TAMPER:-}
+JOIN_COMMUNITY=${JOIN_COMMUNITY:-0}
 declare -a STORE_BACKEND STORE_PRUNED
 if [ -n "$NODE_STORAGE" ]; then
     IFS=, read -r -a entries <<<"$NODE_STORAGE"
-    [ "${#entries[@]}" -eq "$ALL_NODES" ] || { echo "NODE_STORAGE needs $ALL_NODES entries, has ${#entries[@]}"; exit 1; }
+    # the other joining nodes (JOIN_EXTRA) take the first one's entry
+    listed=$((ALL_NODES - JOIN_EXTRA))
+    [ "${#entries[@]}" -eq "$listed" ] || { echo "NODE_STORAGE needs $listed entries, has ${#entries[@]}"; exit 1; }
     for i in $(seq 1 "$ALL_NODES"); do
-        e=${entries[$((i - 1))]}
+        e=${entries[$(( (i > listed ? listed : i) - 1 ))]}
         [[ "$e" =~ ^(berkeleydb|lmdb|rocksdb)(:pruned)?$ ]] || { echo "bad NODE_STORAGE entry '$e'"; exit 1; }
         STORE_BACKEND[$i]=${e%%:*}
         STORE_PRUNED[$i]=$([ "$e" != "${e%:pruned}" ] && echo 1 || echo 0)
@@ -222,8 +386,25 @@ if [ -n "$NODE_STORAGE" ]; then
 fi
 # every node with pruned storage: the PRUNE_NODE, the joining node, and those of NODE_STORAGE
 PRUNED_NODES=$(for i in $(seq 1 "$ALL_NODES"); do
-    if [ "$i" -eq "$PRUNE_NODE" ] || { [ "$i" -eq "$JOIN_NODE" ] && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
+    if [ "$i" -eq "$PRUNE_NODE" ] || { is_joiner "$i" && [ "$JOIN_FULL" != 1 ]; } || [ "${STORE_PRUNED[$i]:-0}" = 1 ]; then echo "$i"; fi
 done | tr '\n' ' ')
+# the full nodes whose storage starts above block 0 and run this build: they backfill the older
+# blocks from their peers (backward sync) and must hold the whole chain at the end. n6 after the
+# storage switch; the full joiner of a snapshot (imported, or fetched over p2p)
+BACKFILL_NODES=""
+if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then BACKFILL_NODES="$STORAGE_SWITCH_NODE"; fi
+if [ "$JOIN_FULL" = 1 ] && { { [ "$SNAPSHOT_AT" -gt 0 ] && [ "$SNAPSHOT_CORRUPT" != 1 ]; } || { [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" != fallback ]; }; }; then
+    BACKFILL_NODES="$BACKFILL_NODES $JOIN_NODE"
+fi
+for i in $BACKFILL_NODES; do
+    # an even node running BIN_ALT has no backward sync
+    if alt_node "$i"; then BACKFILL_NODES=$(echo " $BACKFILL_NODES " | sed "s/ $i / /"); fi
+done
+is_backfill_node() { [[ " $BACKFILL_NODES " == *" $1 "* ]]; }
+BACKFILL_NODE=$(echo $BACKFILL_NODES | awk '{print $1}')
+if { [ -n "$BACKFILL_CRASH" ] || [ -n "$BACKFILL_TAMPER" ] || [ "$BACKFILL_HISTORY" = 1 ]; } && [ -z "$BACKFILL_NODE" ]; then
+    echo "FAIL: BACKFILL_CRASH, BACKFILL_TAMPER and BACKFILL_HISTORY need a node that backfills (STORAGE_SWITCH_AT, or SNAPSHOT_AT with JOIN_FULL=1)"; exit 1
+fi
 DELEGATION_SECONDS=${DELEGATION_SECONDS:-240}
 DISK_FULL_AT=${DISK_FULL_AT:-400}
 DISK_FULL_SECONDS=${DISK_FULL_SECONDS:-60}
@@ -239,6 +420,7 @@ SLOW_CPU=${SLOW_CPU:-20}
 GARBAGE_AT=${GARBAGE_AT:-0}
 GARBAGE_SECONDS=${GARBAGE_SECONDS:-300}
 GARBAGE_RATE=${GARBAGE_RATE:-200}
+HUGE_FRAME_AT=${HUGE_FRAME_AT:-0}
 for v in "$NET_FAULT_NODES" "$SLOW_NODES"; do
     echo "$v" | grep -qE '^([0-9]+(,[0-9]+)*)?$' || { echo "bad node list '$v'"; exit 1; }
 done
@@ -250,6 +432,7 @@ case "$NET_FAULT" in
     reorder) NETEM="delay 40ms reorder ${NET_FAULT_PCT}% 50% duplicate 5%" ;;
     duplicate) NETEM="duplicate ${NET_FAULT_PCT}%" ;;
     partition) NETEM="loss 100%" ;;
+    rate) NETEM="rate ${NET_FAULT_RATE:-2mbit}" ;;
     *) echo "bad NET_FAULT '$NET_FAULT'"; exit 1 ;;
 esac
 [ -z "$NET_FAULT" ] || [ -n "$NET_FAULT_NODES" ] || { echo "NET_FAULT needs NET_FAULT_NODES"; exit 1; }
@@ -257,6 +440,83 @@ WORK=$(mkdir -p "${WORK:-testnet-run}" && cd "${WORK:-testnet-run}" && pwd)
 BASE_PORT=6000
 
 declare -a PIDS KEYS REPORTED_DOWN
+
+if [ "$OS_KIND" != linux ]; then
+    # sudo, tc netem, iptables, cgroups, tmpfs and /proc are Linux only
+    not_here() { echo "FAIL: $1 needs Linux (this is $OS_KIND)"; exit 1; }
+    [ -z "$NET_FAULT" ] || not_here "NET_FAULT (tc netem, iptables)"
+    [ -z "$SLOW_NODES" ] || not_here "SLOW_NODES (cgroups)"
+    [ "$DISK_FULL_NODE" -eq 0 ] || not_here "DISK_FULL_NODE (tmpfs)"
+    [ "$NODE_NETS" != 1 ] || not_here "NODE_NETS=1 (iptables SNAT, JOIN_FETCH=p2p without JOIN_SOURCES=keys)"
+    if [ "$SAMPLE_SECONDS" -gt 0 ]; then
+        echo "sampler: off on $OS_KIND (sampler.py reads /proc)"
+        SAMPLE_SECONDS=0
+    fi
+fi
+if [ "$OS_KIND" = windows ]; then
+    # the executor is started through executor.sh, and executors are found by name (pkill)
+    [ "$CONTRACTS" != 1 ] || not_here "CONTRACTS"
+    # Python's "\r\n" line ends would stay in what bash reads from it (keys, master key)
+    export PYTHONPATH="$(cygpath -w "$HERE/windows")${PYTHONPATH:+;$PYTHONPATH}"
+    # Git Bash has no pkill: the only processes looked up by name are executors, refused above
+    pkill() { return 1; }
+    # the node of PIDS[i] (the pid of its winproc.py launcher), by its Windows pid
+    node_winpid_of() {
+        local i
+        for i in "${!PIDS[@]}"; do
+            if [ "${PIDS[$i]}" = "$1" ]; then cat "$WORK/n$i/node.winpid" 2>/dev/null || true; return; fi
+        done
+    }
+    # a signal from Git Bash ends a native process at once: SIGTERM to a node becomes Ctrl-Break on
+    # its console (its graceful stop, as SIGTERM on Linux), SIGKILL also ends it with taskkill; other
+    # signals and other processes as before
+    kill() {
+        local sig=$1 rc=0 p w
+        case "$sig" in -TERM|-KILL) ;; *) builtin kill "$@"; return ;; esac
+        shift
+        for p in "$@"; do
+            w=$(node_winpid_of "$p")
+            if [ -z "$w" ] || ! builtin kill -0 "$p" 2>/dev/null; then
+                builtin kill "$sig" "$p" || rc=$?
+            elif [ "$sig" = -TERM ]; then
+                python3 "$HERE/winproc.py" stop "$w" || rc=$?
+            else
+                taskkill //F //PID "$w" > /dev/null 2>&1 || true
+                builtin kill -KILL "$p" 2>/dev/null || true
+            fi
+        done
+        return $rc
+    }
+fi
+
+# official even nodes: refuse what they cannot take part in (see BIN_ALT_OFFICIAL above)
+official_node() { [ "$BIN_ALT_OFFICIAL" = 1 ] && alt_node "$1"; }
+if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+    refuse() { echo "FAIL: $1 needs a feature the official node lacks (BIN_ALT_OFFICIAL=1: the even nodes are official)"; exit 1; }
+    for p in $PRUNED_NODES; do ! official_node "$p" || refuse "pruned storage on n$p"; done
+    [ "$JOIN_NODE" -eq 0 ] || [ "$SNAPSHOT_AT" -eq 0 ] || ! official_node "$JOIN_NODE" || refuse "a snapshot import into n$JOIN_NODE"
+    [ "$JOIN_FETCH" != p2p ] || ! official_node "$JOIN_NODE" || refuse "a p2p snapshot join into n$JOIN_NODE"
+    [ "$SNAPSHOT_AT" -eq 0 ] || [ "$PRUNE_NODE" -eq 0 ] || ! official_node "$PRUNE_NODE" || refuse "a snapshot export from n$PRUNE_NODE"
+    [ "$STORAGE_SWITCH_AT" -eq 0 ] || refuse "STORAGE_SWITCH_AT"
+    [ "$CONVERT_AT" -eq 0 ] || refuse "CONVERT_AT"
+    [ "$INDEX_LOSS_AT" -eq 0 ] || ! official_node "$INDEX_LOSS_NODE" || refuse "INDEX_LOSS on n$INDEX_LOSS_NODE"
+    [ "$HASHDB_DAMAGE_AT" -eq 0 ] || ! official_node "$HASHDB_DAMAGE_NODE" || refuse "HASHDB_DAMAGE on n$HASHDB_DAMAGE_NODE"
+    [ "$CHECKPOINT_AHEAD_AT" -eq 0 ] || ! official_node "$CHECKPOINT_AHEAD_NODE" || refuse "CHECKPOINT_AHEAD on n$CHECKPOINT_AHEAD_NODE"
+    [ "$APPLY_FAIL_AT" -eq 0 ] || ! official_node "$APPLY_FAIL_NODE" || refuse "APPLY_FAIL on n$APPLY_FAIL_NODE"
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do ! official_node "$i" || refuse "snapshot serving on n$i"; done
+    [ "$SYNC_CONTRACT_EXECUTION" != 0 ] || refuse "SYNC_CONTRACT_EXECUTION=0"
+    if [ -n "$NODE_STORAGE" ]; then
+        for i in $(seq 1 "$ALL_NODES"); do
+            ! official_node "$i" || [ "${STORE_BACKEND[$i]}" = berkeleydb ] || refuse "NODE_STORAGE ${STORE_BACKEND[$i]} on n$i"
+        done
+    fi
+    if [ "$DPOS_AT" -gt 0 ]; then
+        restarted="$RESTART_NODES $CRASH_NODE $TERM_KILL_NODE"
+        [ "$CRASH_ALL_AT" -eq 0 ] || refuse "CRASH_ALL_AT with DPOS_AT (order 9 is not kept across a restart)"
+        for i in $restarted; do [ "$i" -eq 0 ] || ! official_node "$i" || refuse "a restart of n$i with DPOS_AT (order 9 is not kept across a restart)"; done
+    fi
+    [ -z "$DB_BACKEND" ] || echo "mixed nodes: the official nodes run BerkeleyDB whatever DB_BACKEND ($DB_BACKEND) says"
+fi
 
 mapfile -t KEYS < <(python3 "$HERE/gen_keys.py" "$ALL_NODES" "$WORK")
 
@@ -289,6 +549,11 @@ fi
 
 # public API on node 1 for fund.py; with CONTRACTS every node gets one (contracts.py compares their
 # contract states) and its own executor, started by the node through executor.sh
+# the public API port of node i when it has one: 9090 for n1 with FUND or CONTRACTS, else 9100 + i
+api_port() {
+    if [ "$1" -eq 1 ] && { [ "$FUND" = "1" ] || [ "$CONTRACTS" = "1" ]; }; then echo 9090; else echo $((9100 + $1)); fi
+}
+
 api_settings() {
     local i=$1
     if [ "$CONTRACTS" != "1" ]; then
@@ -297,7 +562,13 @@ api_settings() {
             echo "apiexec_port=0"
             return
         fi
-        echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
+        if [ "$BIN_ALT_OFFICIAL" = 1 ] || is_backfill_node "$i" || { [ "$i" -eq 1 ] && [ -n "${BACKFILL_NODES// /}" ]; }; then
+            # every node answers block queries: the official ones are compared with n1 by block hash;
+            # so are the nodes that backfill, and n1
+            echo "port=$(api_port "$i")"
+        else
+            echo "port=$([ "$FUND" = "1" ] && [ "$i" -eq 1 ] && echo 9090 || echo 0)"
+        fi
         echo "apiexec_port=0"
         return
     fi
@@ -306,6 +577,8 @@ api_settings() {
     echo "executor_port=$((9300 + i))"
     echo "executor_command=$WORK/n$i/executor.sh"
     echo "executor_multi_instance=true"
+    # the token cache behind the Token* API methods (read by builds that have the key)
+    [ "$TOKENS" != "1" ] || echo "tokens_cache=true"
     # the first contract compile in a fresh JVM takes longer than the 4 s default
     echo "executor_send_timeout=60000"
     echo "executor_receive_timeout=60000"
@@ -339,7 +612,9 @@ storage_section() {
         *) backend=$DB_BACKEND ;;
     esac
     if [ -n "$NODE_STORAGE" ]; then
-        backend=${STORE_BACKEND[$i]}
+        backend=${STORE_BACKEND[$i]:-}
+        # the other joining nodes, past the list: as the first one
+        if [ -z "$backend" ] && is_joiner "$i"; then backend=${STORE_BACKEND[$JOIN_NODE]:-}; fi
     fi
     if [[ " $PRUNED_NODES " == *" $i "* ]]; then
         [ -z "$NODE_STORAGE" ] && { [ -z "$backend" ] || [ "$DB_BACKEND" = mixed ]; } && backend=lmdb
@@ -351,8 +626,45 @@ storage_section() {
         # that the kills hit the moments right after one
         lines="checkpoint_every=1000\ncheckpoint_every_minutes=1\ncheckpoint_keep=3\n"
     fi
+    if [ "$JOIN_FETCH" = p2p ] && [[ ",$SNAPSHOT_SERVE_NODES,$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]]; then
+        # a joiner needs JOIN_MIN_SOURCES sources on one block: a serving node builds its snapshots
+        # from the checkpoints every 1'000 blocks only, not from the minute ones of a pruned node
+        lines=${lines//checkpoint_every_minutes=1\\n/}
+    fi
+    if [[ ",$SNAPSHOT_SERVE_NODES,$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]] && [[ "$lines" != *checkpoint_every=* ]]; then
+        # a serving node builds its snapshots from the periodic checkpoints
+        lines="${lines}checkpoint_every=1000\ncheckpoint_keep=2\n"
+    fi
     [ -n "$backend" ] && lines="${lines}db_backend=$backend\n"
+    # the backfill settings of a joiner that backfills (n6 gets them at the storage switch)
+    if is_backfill_node "$i" && is_joiner "$i"; then
+        [ -z "$BACKFILL_RATE" ] || lines="${lines}backfill_rate=$BACKFILL_RATE\n"
+        [ -z "$BACKFILL_BATCH" ] || lines="${lines}backfill_batch=$BACKFILL_BATCH\n"
+        [ -z "$BACKFILL_PER_TURN" ] || lines="${lines}backfill_store_per_turn=$BACKFILL_PER_TURN\n"
+    fi
     [ -n "$lines" ] && printf "\n[storage]\n$lines"
+    return 0
+}
+
+# the [snapshot] section of node i: no fetch at a start on an empty database (every node of this
+# network starts on one), but the joining node's with JOIN_FETCH=p2p; serve=on on the serving nodes.
+# The official nodes have no such section
+snapshot_section() {
+    local i=$1
+    official_node "$i" && return 0
+    printf "\n[snapshot]\n"
+    if [ "$JOIN_FETCH" = p2p ] && is_joiner "$i"; then
+        printf "fetch=auto\nmin_sources=%s\nfetch_wait=%s\nfetch_fallback=%s\n" "$JOIN_MIN_SOURCES" "$JOIN_WAIT" "$JOIN_FALLBACK"
+        [ "$JOIN_FETCH_RATE" -eq 0 ] || printf "fetch_rate_kbps=%s\n" "$JOIN_FETCH_RATE"
+        if [ "$JOIN_SOURCES" = keys ]; then
+            local keys=""
+            for j in ${SNAPSHOT_SERVE_NODES//,/ } ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do keys="$keys${keys:+,}${KEYS[$((j - 1))]}"; done
+            printf "sources=%s\n" "$keys"
+        fi
+    else
+        printf "fetch=off\n"
+    fi
+    if [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]]; then printf "serve=on\n"; fi
     return 0
 }
 
@@ -362,7 +674,7 @@ for i in $(seq 1 "$ALL_NODES"); do
     : > "$dir/trusted.txt"
     for j in $(seq 1 "$NODES"); do
         [ "$j" -gt "$TRUSTED_NODES" ] || echo "${KEYS[$((j - 1))]}" >> "$dir/trusted.txt"
-        [ "$j" -ne "$i" ] && echo "127.0.0.1:$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
+        [ "$j" -ne "$i" ] && echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$dir/hosts.txt"
     done
     cat > "$dir/config.ini" <<CFG
 [params]
@@ -376,7 +688,7 @@ sync_contract_execution=$([ "$SYNC_CONTRACT_EXECUTION" = 0 ] && echo false || ec
 round_elapse_time=$ROUND_ELAPSE_MS
 
 [host_input]
-ip=127.0.0.1
+ip=$(node_ip "$i")
 port=$((BASE_PORT + i))
 
 [api]
@@ -384,6 +696,7 @@ $(api_settings "$i")
 ajax_port=0
 diag_port=0
 $(storage_section "$i")
+$(snapshot_section "$i")
 
 [Core]
 Filter="%Severity% >= info"
@@ -397,12 +710,34 @@ Format="[%TimeStamp%] %Severity% %Message%"
 CFG
 done
 
+# test-build hooks of a forged or corrupt snapshot source, and the joiner's list of serving nodes
+[ "$FORGE_NODE" -eq 0 ] || : > "$WORK/n$FORGE_NODE/testnet-forge-snapshot"
+[ "$CORRUPT_NODE" -eq 0 ] || : > "$WORK/n$CORRUPT_NODE/testnet-corrupt-pieces"
+if [ "$JOIN_SOURCES" = file ]; then
+    for j in ${SNAPSHOT_SERVE_NODES//,/ } ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+        echo "$(node_ip "$j"):$((BASE_PORT + j)) ${KEYS[$((j - 1))]}" >> "$WORK/n$JOIN_NODE/snapshot_sources.txt"
+    done
+fi
+
+# the binary node i runs
+bin_of() {
+    if alt_node "$1"; then echo "$BIN_ALT"; else echo "$BIN"; fi
+}
+
 start_node() {
     local i=$1
     # core dumps (see core_pattern in the workflow) let a crash be traced afterwards
     local bin=$BIN
-    if [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ]; then bin=$BIN_ALT; fi
+    if alt_node "$i"; then bin=$BIN_ALT; fi
     local extra_var="EXTRA_ARGS_$i"
+    if [ "$OS_KIND" = windows ]; then
+        # a console of its own, so that it can be stopped gracefully (see kill above); PIDS[i] is the
+        # launcher's pid, which ends with the node's exit code
+        rm -f "$WORK/n$i/node.winpid"
+        (cd "$WORK/n$i" && exec python3 "$HERE/winproc.py" run node.winpid "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
+        PIDS[$i]=$!
+        return 0
+    fi
     (cd "$WORK/n$i" && ulimit -c unlimited && exec "$bin" --db-path db --config-file config.ini ${!extra_var:-} </dev/null >> stdout.log 2>&1) &
     PIDS[$i]=$!
     # a slow or faulty node runs in its own cgroup: a CPU quota for a slow one, and its packets are
@@ -435,6 +770,16 @@ net_fault_off() {
     sudo tc qdisc del dev lo root 2>/dev/null || true
     sudo iptables -t mangle -F OUTPUT 2>/dev/null || true
 }
+node_nets_on() {
+    for i in $(seq 1 "$ALL_NODES"); do
+        sudo iptables -t nat -A POSTROUTING -o lo -p udp --sport $((BASE_PORT + i)) -j SNAT --to-source "$(node_ip "$i")" \
+            || { echo "FAIL: cannot give n$i the source address $(node_ip "$i")"; exit 1; }
+    done
+    echo "node nets: n1..n$ALL_NODES send their p2p datagrams from 127.0.<i>.1"
+}
+node_nets_off() {
+    sudo iptables -t nat -F POSTROUTING 2>/dev/null || true
+}
 net_fault_stats() {
     sudo tc -s qdisc show dev lo 2>/dev/null | grep -A1 netem | tail -1 | sed 's/^ *//'
 }
@@ -448,6 +793,7 @@ stop_all() {
         wait "$SAMPLER_PID" 2>/dev/null || true
     fi
     [ -z "${API_LOAD_PID:-}" ] || kill -TERM "$API_LOAD_PID" 2>/dev/null || true
+    [ -z "${JOIN_KILL_PID:-}" ] || kill "$JOIN_KILL_PID" 2>/dev/null || true
     for i in $(seq 1 "$ALL_NODES"); do
         [ -n "${PIDS[$i]:-}" ] && kill -TERM "${PIDS[$i]}" 2>/dev/null || true
     done
@@ -466,6 +812,7 @@ stop_all() {
         echo "net fault: until the end ($(net_fault_stats))"
     fi
     [ -z "$NET_FAULT" ] || net_fault_off
+    [ "$NODE_NETS" != 1 ] || node_nets_off
     [ -z "${GARBAGE_PID:-}" ] || kill "$GARBAGE_PID" 2>/dev/null || true
     [ ! -f "$WORK/resources-summary.txt" ] || cat "$WORK/resources-summary.txt"
 }
@@ -540,6 +887,9 @@ if [ "$DISK_FULL_NODE" -gt 0 ]; then
     echo "disk-full test: n$DISK_FULL_NODE block DB on a ${DISK_TMPFS_MB} MB tmpfs"
 fi
 
+if [ "$NODE_NETS" = 1 ]; then
+    node_nets_on
+fi
 for i in $(seq 1 "$NODES"); do start_node "$i"; done
 echo "started $NODES nodes in $WORK"
 SAMPLER_PID=
@@ -561,6 +911,7 @@ crash_next=0
 crashed_all=0
 FUND_PID=
 CONTRACTS_PID=
+TOKENS_PID=
 disk_filled_at=0
 disk_freed=0
 net_fault_at=0
@@ -568,9 +919,48 @@ net_fault_done=0
 snapshot_done=0
 storage_switched=0
 GARBAGE_PID=
+huge_frame_done=0
 if [ -n "$SLOW_NODES" ]; then
     echo "+cpu" | sudo tee /sys/fs/cgroup/cgroup.subtree_control > /dev/null 2>&1 || true
 fi
+# backward sync scenarios (BACKFILL_CRASH, BACKFILL_TAMPER, BACKFILL_HISTORY) on BACKFILL_NODE
+bf_from=0                 # node.log lines before its latest start
+bf_started=0              # it was started as a node that backfills
+bf_step=0                 # BACKFILL_CRASH steps done
+bf_next_at=0              # no step before then
+bf_mid_checked=0
+IFS=, read -r -a BF_STEPS <<< "$BACKFILL_CRASH"
+# the node is fetching (since its latest start): it logged the start of the backfill, and the
+# latest of its pause/resume lines is not a pause, and it has not finished
+backfill_fetching() {
+    local last
+    last=$(tail -n +"$((bf_from + 1))" "$WORK/n$1/node.log" 2>/dev/null \
+        | grep -a 'BACKFILL: \(full node with blocks\|paused\|resumed\|full history stored\)' | tail -1 || true)
+    [[ "$last" == *"full node with blocks"* || "$last" == *"BACKFILL: resumed"* ]]
+}
+# since its last start the node stored a block below the one it started from: a step that stops it
+# now must make the next start resume lower (a kill before any store would restart from the same block)
+backfill_progressed() {
+    local since from oldest
+    since=$(tail -n +"$((bf_from + 1))" "$WORK/n$1/node.log" 2>/dev/null)
+    from=$(grep -a -m1 'BACKFILL: full node with blocks' <<<"$since" | sed -E 's/.*with blocks ([0-9]+)\.\..*/\1/')
+    oldest=$(grep -a 'oldest stored = ' <<<"$since" | tail -1 | sed -E 's/.*oldest stored = ([0-9]+).*/\1/')
+    [ -n "$from" ] && [ -n "$oldest" ] && [ "$oldest" -lt "$from" ]
+}
+# the node that backfills was (re)started: what it serves is tampered by the nodes of BACKFILL_TAMPER
+# from now on (not before: a node restarted earlier syncs blocks below 1000 forward)
+backfill_node_started() {
+    bf_started=1
+    bf_from=$(wc -l < "$WORK/n$BACKFILL_NODE/node.log" 2>/dev/null || echo 0)
+    bf_next_at=$(( $(date +%s) + 15 ))
+    local entry
+    for entry in ${BACKFILL_TAMPER//,/ }; do
+        [ -e "$WORK/n${entry%%:*}/testnet-tamper-replies" ] && continue
+        echo "${entry#*:} 1000" > "$WORK/n${entry%%:*}/testnet-tamper-replies"
+        echo "backfill test: n${entry%%:*} serves blocks below 1000 with an altered ${entry#*:}"
+    done
+}
+
 while :; do
     sleep 20
     line="t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) ))s"
@@ -589,7 +979,7 @@ while :; do
                 for core in "$WORK"/core.*."${PIDS[$i]}"; do
                     [ -f "$core" ] || continue
                     echo "n$i core dump $core:"
-                    gdb -q -batch -ex "bt 60" -ex "thread apply all bt 6" "$BIN" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 200
+                    gdb -q -batch -ex "bt 60" -ex "thread apply all bt 6" "$(bin_of "$i")" "$core" 2>/dev/null | grep -E '^(#|Thread)' | head -n 200
                     mv "$core" "$core.traced"
                 done
             fi
@@ -601,14 +991,90 @@ while :; do
     if [ "$JOIN_NODE" -gt 0 ] && [ -n "${PIDS[$JOIN_NODE]:-}" ]; then
         join_seq=$(seq_of "$JOIN_NODE"); join_seq=${join_seq:-0}
         line+=" n$JOIN_NODE=$join_seq(joined)"
+        # the lowest of all joining nodes counts for the target
+        for i in $EXTRA_JOINERS; do
+            s=$(seq_of "$i"); s=${s:-0}
+            line+=" n$i=$s(joined)"
+            [ "$s" -ge "$join_seq" ] || join_seq=$s
+        done
     fi
     echo "$line"
     echo "t=$(( TIMEOUT_MIN * 60 - (deadline - $(date +%s)) )) min=$min max=$max" > "$WORK/progress"
 
     if [ "$JOIN_PRUNED_AT" -gt 0 ] && [ -z "${PIDS[$JOIN_NODE]:-}" ] && [ "$min" -ge "$JOIN_PRUNED_AT" ]; then
-        echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
+        if [ "$JOIN_FETCH" = p2p ]; then
+            echo "join test: n$JOIN_NODE starts on an empty database at sequence $min and fetches a snapshot from its neighbours"
+        else
+            echo "join test: n$JOIN_NODE starts from block 0 with pruned storage at sequence $min"
+        fi
         start_node "$JOIN_NODE"
+        for i in $EXTRA_JOINERS; do
+            echo "join test: n$i starts on an empty database at the same time"
+            start_node "$i"
+        done
+        join_started=$(date +%s)
+        if [ "$JOIN_KILL_DURING_FETCH" = 1 ]; then
+            # the joiner's fetch and import take seconds: a watcher kills it at those lines (node.log
+            # is appended across starts: the first "importing block" comes after the restart)
+            (
+                jl="$WORK/n$JOIN_NODE/node.log"
+                for phase in "fetching block" "importing block"; do
+                    until grep -aq "SNAPSHOT: $phase" "$jl" 2>/dev/null; do
+                        grep -aq 'SNAPSHOT: started from block' "$jl" 2>/dev/null && exit 0
+                        sleep 0.1
+                    done
+                    echo "$phase" > "$WORK/join-killed"
+                    kill -KILL "$(cat "$WORK/join-pid" 2>/dev/null)" 2>/dev/null || true
+                    # the main loop starts it again and removes the marker
+                    while [ -e "$WORK/join-killed" ]; do sleep 0.2; done
+                done
+            ) &
+            JOIN_KILL_PID=$!
+            echo "${PIDS[$JOIN_NODE]}" > "$WORK/join-pid"
+        fi
     fi
+    # the harness killed the joiner on purpose: start it again
+    if [ "$JOIN_KILL_DURING_FETCH" = 1 ] && [ -e "$WORK/join-killed" ] && [ -n "${PIDS[$JOIN_NODE]:-}" ] && ! kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null; then
+        wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || true
+        echo "join test: n$JOIN_NODE killed when it logged '$(cat "$WORK/join-killed")', started again"
+        join_kills=$(( ${join_kills:-0} + 1 ))
+        start_node "$JOIN_NODE"
+        echo "${PIDS[$JOIN_NODE]}" > "$WORK/join-pid"
+        rm -f "$WORK/join-killed"
+    fi
+    # late serving nodes: stopped long enough to leave the peers' routing tables, then serve=on
+    if [ -n "$SNAPSHOT_LATE_SERVE_NODES" ] && [ -n "${join_started:-}" ] && [ -z "${late_done:-}" ] \
+        && [ "$(date +%s)" -ge $(( join_started + JOIN_LATE_SERVE_AFTER )) ]; then
+        late_done=1
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do kill -TERM "${PIDS[$i]}" 2>/dev/null || true; done
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+            for _ in $(seq 1 60); do kill -0 "${PIDS[$i]}" 2>/dev/null || break; sleep 1; done
+            wait "${PIDS[$i]}" 2>/dev/null || true
+            sed -i 's/^fetch=off$/fetch=off\nserve=on/' "$WORK/n$i/config.ini"
+        done
+        sleep 40
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+            echo "join test: n$i starts again with serve=on"
+            start_node "$i"
+            SNAPSHOT_SERVE_NODES="$SNAPSHOT_SERVE_NODES${SNAPSHOT_SERVE_NODES:+,}$i"
+        done
+    fi
+    # a p2p join that stops (a refused snapshot: exit code 4, a failed bootstrap: 1) fails at once
+    if [ "$JOIN_FETCH" = p2p ] && [ -n "${PIDS[$JOIN_NODE]:-}" ] && ! kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null \
+        && ! { [ "$JOIN_KILL_DURING_FETCH" = 1 ] && [ -e "$WORK/join-killed" ]; }; then
+        status=0; wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || status=$?
+        echo "FAIL: n$JOIN_NODE exited with status $status while joining"
+        { grep -a 'SNAPSHOT' "$WORK/n$JOIN_NODE/node.log" || true; } | tail -40
+        exit 1
+    fi
+    for i in $EXTRA_JOINERS; do
+        if [ -n "${PIDS[$i]:-}" ] && ! kill -0 "${PIDS[$i]}" 2>/dev/null; then
+            status=0; wait "${PIDS[$i]}" 2>/dev/null || status=$?
+            echo "FAIL: n$i exited with status $status while joining"
+            { grep -a 'SNAPSHOT' "$WORK/n$i/node.log" || true; } | tail -40
+            exit 1
+        fi
+    done
 
     # repeated SIGKILL of one node: odd kills right after it saves a checkpoint, even ones at any moment
     if [ "$CRASH_NODE" -gt 0 ] && [ "$crashes" -lt "$CRASH_TIMES" ] && [ "$min" -ge "$CRASH_FROM" ] \
@@ -680,6 +1146,37 @@ while :; do
         python3 "$HERE/garbage.py" "$BASE_PORT" "$ALL_NODES" "$GARBAGE_SECONDS" "$GARBAGE_RATE" > "$WORK/garbage.log" 2>&1 &
         GARBAGE_PID=$!
     fi
+    if [ "$HUGE_FRAME_AT" -gt 0 ] && [ "$huge_frame_done" -eq 0 ] && [ "$min" -ge "$HUGE_FRAME_AT" ]; then
+        huge_frame_done=1
+        echo "huge frame: oversized and just-below-limit packet headers to the p2p port of every node of this build, from sequence $min"
+        for i in $(seq 1 "$NODES"); do
+            # the even nodes of BIN_ALT (the official node, another ref) may have no frame limit
+            [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
+            pid_arg=""
+            [ "$OS_KIND" != linux ] || pid_arg="--pid ${PIDS[$i]}"
+            hf="python3 $HERE/huge_frame.py $(node_ip "$i") $((BASE_PORT + i)) --connections 4 $pid_arg"
+            hf_status=0
+            {
+                # before registration: at most 64 bytes, closed at once
+                $hf --size $((1 << 40)) --size 65 || hf_status=$?
+                # after a registration: at most 256 MiB, closed at once
+                $hf --registered --size $((1 << 40)) --size $(( (256 << 20) + 1 )) || hf_status=$?
+                # just below the limits, no data sent: the node waits for the data (reading it in 1 MiB
+                # chunks, so it holds almost nothing) and closes on its 10 s idle timeout
+                $hf --expect hold --size 64 || hf_status=$?
+                $hf --registered --expect hold --size $(( (256 << 20) - 1 )) || hf_status=$?
+            } > "$WORK/huge-frame-n$i.log" 2>&1
+            sed "s/^/huge frame: n$i: /" "$WORK/huge-frame-n$i.log"
+            [ "$hf_status" -eq 0 ] || { echo "FAIL: n$i did not treat the oversized or just-below-limit headers as expected, or its memory grew"; exit 1; }
+            sleep 1
+            kill -0 "${PIDS[$i]}" 2>/dev/null || { echo "FAIL: n$i stopped after the huge frame headers"; exit 1; }
+            for lim in 64 268435456; do
+                grep -aq "announces .* bytes, above the limit of $lim:" "$WORK/n$i"/*.log \
+                    || { echo "FAIL: n$i logged no limit line for $lim bytes"; exit 1; }
+            done
+            grep -ah 'announces .* bytes, above the limit' "$WORK/n$i"/*.log | awk 'NR <= 2' | sed "s/.*ERROR [^]]*\] /huge frame: n$i: /"
+        done
+    fi
 
     if [ "$SNAPSHOT_AT" -gt 0 ] && [ "$snapshot_done" -eq 0 ] && [ "$min" -ge "$SNAPSHOT_AT" ]; then
         snapshot_done=1
@@ -724,6 +1221,31 @@ PY
                 > "$WORK/restore.log" 2>&1 || rc=$?
         else
             manifest=$(ls "$WORK"/snapshot2/*/snapshot.json)
+            if [ "$SNAPSHOT_VIA" = download ]; then
+                # the release layout: the manifest, and each file as s<seq>-<name>
+                seq=$(basename "$(dirname "$manifest")")
+                mkdir -p "$WORK/release"
+                cp "$manifest" "$WORK/release/snapshot.json"
+                for f in "$(dirname "$manifest")"/*; do
+                    [ "$(basename "$f")" = snapshot.json ] || cp "$f" "$WORK/release/s$seq-$(basename "$f")"
+                done
+                if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
+                    f="$WORK/release/s$seq-blocks.bin.lz4"
+                    head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
+                    echo "snapshot test: s$seq-blocks.bin.lz4 truncated on the web server"
+                fi
+                python3 -m http.server 18080 --bind 127.0.0.1 --directory "$WORK/release" > "$WORK/http.log" 2>&1 &
+                http_pid=$!
+                for _ in $(seq 1 20); do curl -fs -o /dev/null http://127.0.0.1:18080/snapshot.json && break; sleep 0.5; done
+                (cd "$WORK/n$JOIN_NODE" && exec "$BIN" --db-path db --config-file config.ini --download-snapshot http://127.0.0.1:18080/snapshot.json) \
+                    > "$WORK/restore.log" 2>&1 || rc=$?
+                kill "$http_pid" 2>/dev/null || true
+                grep -a 'download-snapshot:\|import-snapshot:' "$WORK/restore.log" > "$WORK/restore.short" || true
+                mv "$WORK/restore.short" "$WORK/restore.log"
+                if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ -n "$(ls -A "$WORK/n$JOIN_NODE/db" 2>/dev/null | grep -v '^\.lock$')" ]; then
+                    echo "FAIL: a refused download left files in db/: $(ls -A "$WORK/n$JOIN_NODE/db")"; exit 1
+                fi
+            else
             if [ "$SNAPSHOT_CORRUPT" = 1 ]; then
                 f="$(dirname "$manifest")/blocks.bin.lz4"
                 head -c $(( $(stat -c %s "$f") / 2 )) "$f" > "$f.cut" && mv "$f.cut" "$f"
@@ -734,25 +1256,86 @@ PY
                 > "$WORK/restore.log" 2>&1 || rc=$?
             grep -a 'import-snapshot:' "$WORK/restore.log" > "$WORK/restore.short" || true
             mv "$WORK/restore.short" "$WORK/restore.log"
+            fi
         fi
         sed 's/^/snapshot test: /' "$WORK/restore.log"
         echo "snapshot test: restore exit $rc; n$JOIN_NODE joins at sequence $min"
         if [ "$SNAPSHOT_CORRUPT" = 1 ] && [ "$rc" != 2 ]; then echo "FAIL: a truncated snapshot was restored"; exit 1; fi
         if [ "$SNAPSHOT_CORRUPT" != 1 ] && [ "$rc" != 0 ]; then echo "FAIL: the snapshot was not restored"; exit 1; fi
         start_node "$JOIN_NODE"
+        [ "$BACKFILL_NODE" != "$JOIN_NODE" ] || backfill_node_started
     fi
 
     if [ "$STORAGE_SWITCH_AT" -gt 0 ] && [ "$storage_switched" -eq 0 ] && [ "$min" -ge "$STORAGE_SWITCH_AT" ]; then
         storage_switched=1
-        pruned_before=$(grep -a 'pruned storage: blocks before .* removed' "$WORK/n6"/node.log | tail -1 | sed -E "s/.*blocks before ([0-9']+) removed.*/\1/" | tr -d "'")
-        for i in 5 6; do kill -TERM "${PIDS[$i]}"; done
-        for i in 5 6; do wait "${PIDS[$i]}" 2>/dev/null || true; done
-        sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n5/config.ini"
-        sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n6/config.ini"
-        switch_lines5=$(wc -l < "$WORK/n5/node.log")
-        switch_lines6=$(wc -l < "$WORK/n6/node.log")
-        for i in 5 6; do start_node "$i"; done
-        echo "storage switch: n5 full -> pruned, n6 pruned -> full at sequence $min (n6 had pruned up to ${pruned_before:-none})"
+        sw=$STORAGE_SWITCH_NODE
+        pruned_before=$(grep -a 'pruned storage: blocks before .* removed' "$WORK/n$sw"/node.log | tail -1 | sed -E "s/.*blocks before ([0-9']+) removed.*/\1/" | tr -d "'")
+        for i in $SWITCH_TO_PRUNED $sw; do kill -TERM "${PIDS[$i]}"; done
+        for i in $SWITCH_TO_PRUNED $sw; do wait "${PIDS[$i]}" 2>/dev/null || true; done
+        [ -z "$SWITCH_TO_PRUNED" ] || sed -i '/^db_backend=/a checkpoint_every=1000\ncheckpoint_keep=2\nprune_keep_blocks=300' "$WORK/n$SWITCH_TO_PRUNED/config.ini"
+        sed -i 's/^prune_keep_blocks=.*/prune_keep_blocks=0/' "$WORK/n$sw/config.ini"
+        [ -z "$BACKFILL_RATE" ] || sed -i "/^prune_keep_blocks=0/a backfill_rate=$BACKFILL_RATE" "$WORK/n$sw/config.ini"
+        [ -z "$BACKFILL_BATCH" ] || sed -i "/^prune_keep_blocks=0/a backfill_batch=$BACKFILL_BATCH" "$WORK/n$sw/config.ini"
+        [ -z "$BACKFILL_PER_TURN" ] || sed -i "/^prune_keep_blocks=0/a backfill_store_per_turn=$BACKFILL_PER_TURN" "$WORK/n$sw/config.ini"
+        [ -z "$SWITCH_TO_PRUNED" ] || switch_lines5=$(wc -l < "$WORK/n$SWITCH_TO_PRUNED/node.log")
+        switch_lines6=$(wc -l < "$WORK/n$sw/node.log")
+        for i in $SWITCH_TO_PRUNED $sw; do start_node "$i"; done
+        [ "$BACKFILL_NODE" != "$sw" ] || backfill_node_started
+        echo "storage switch: ${SWITCH_TO_PRUNED:+n$SWITCH_TO_PRUNED full -> pruned, }n$sw pruned -> full at sequence $min (n$sw had pruned up to ${pruned_before:-none})"
+    fi
+
+    # backward sync under faults: the steps of BACKFILL_CRASH, each while the node fetches
+    if [ "$bf_started" = 1 ] && [ -n "$BACKFILL_CRASH" ]; then
+        b=$BACKFILL_NODE
+        if [ -e "$WORK/backfill-crash" ] && ! kill -0 "${PIDS[$b]}" 2>/dev/null; then
+            wait "${PIDS[$b]}" 2>/dev/null || true
+            echo "backfill test: n$b stopped ($(cat "$WORK/backfill-crash")) at its oldest block $(grep -a 'oldest stored = ' "$WORK/n$b/node.log" | tail -1 | sed -E 's/.*oldest stored = ([0-9]+).*/\1/'), started again"
+            rm -f "$WORK/backfill-crash"
+            sleep 5
+            start_node "$b"
+            echo "${PIDS[$b]}" > "$WORK/backfill-pid"
+            backfill_node_started
+        elif [ ! -e "$WORK/backfill-crash" ] && [ "$bf_step" -lt "${#BF_STEPS[@]}" ] && [ "$(date +%s)" -ge "$bf_next_at" ] \
+            && backfill_fetching "$b" && backfill_progressed "$b"; then
+            step=${BF_STEPS[$bf_step]}
+            bf_step=$((bf_step + 1))
+            echo "${PIDS[$b]}" > "$WORK/backfill-pid"
+            case "$step" in
+                kill)
+                    echo kill > "$WORK/backfill-crash"
+                    kill -KILL "${PIDS[$b]}" 2>/dev/null || true ;;
+                flushed)
+                    echo "flushed" > "$WORK/backfill-crash"
+                    n0=$(grep -ac 'BACKFILL: flushed' "$WORK/n$b/node.log" || true)
+                    (
+                        bl="$WORK/n$b/node.log"; bp=$(cat "$WORK/backfill-pid")
+                        while [ "$(grep -ac 'BACKFILL: flushed' "$bl" || true)" -le "$n0" ] && kill -0 "$bp" 2>/dev/null; do sleep 0.1; done
+                        kill -KILL "$bp" 2>/dev/null || true
+                    ) & ;;
+                unindexed)
+                    # the node stores one block without its index entries and stops by itself
+                    echo "unindexed" > "$WORK/backfill-crash"
+                    : > "$WORK/n$b/testnet-backfill-crash-unindexed" ;;
+                powercut)
+                    echo "backfill test: SIGKILL every node while n$b backfills"
+                    for i in $(seq 1 "$ALL_NODES"); do [ -n "${PIDS[$i]:-}" ] && kill -KILL "${PIDS[$i]}" 2>/dev/null || true; done
+                    for i in $(seq 1 "$ALL_NODES"); do [ -n "${PIDS[$i]:-}" ] && wait "${PIDS[$i]}" 2>/dev/null || true; done
+                    sleep 10
+                    for i in $(seq 1 "$ALL_NODES"); do [ -n "${PIDS[$i]:-}" ] && start_node "$i"; done
+                    backfill_node_started
+                    echo "backfill test: network restarted" ;;
+                *) echo "FAIL: unknown BACKFILL_CRASH step '$step'"; exit 1 ;;
+            esac
+            echo "backfill test: step $bf_step of ${#BF_STEPS[@]}: $step at sequence $min"
+        fi
+    fi
+    # the histories while it backfills: the newest part of n1's, never another transaction
+    if [ "$bf_started" = 1 ] && [ "$BACKFILL_HISTORY" = 1 ] && [ "$bf_mid_checked" = 0 ] && [ "$(date +%s)" -ge "$bf_next_at" ] \
+        && [ ! -e "$WORK/backfill-crash" ] && backfill_fetching "$BACKFILL_NODE"; then
+        bf_mid_checked=1
+        (cd "$HERE" && python3 compare_histories.py "$WORK" "$NODES" "$MASTER_PUB" "$(api_port 1)" "$(api_port "$BACKFILL_NODE")" --partial) \
+            | sed 's/^/backfill test: while fetching: /' || { echo "FAIL: n$BACKFILL_NODE's histories while it backfills"; exit 1; }
+        echo "backfill test: n$BACKFILL_NODE's oldest block then: $(grep -a 'oldest stored = ' "$WORK/n$BACKFILL_NODE/node.log" | tail -1 | sed -E 's/.*oldest stored = ([0-9]+).*/\1/')"
     fi
 
     if [ "$CONVERT_AT" -gt 0 ] && [ "${converted:-0}" -eq 0 ] && [ "$min" -ge "$CONVERT_AT" ]; then
@@ -1007,6 +1590,13 @@ PY
             --stats-file "$WORK/contracts-stats.json" $([ "$CONTRACT_DICE" = 1 ] && echo --dice)) > "$WORK/contracts.log" 2>&1 &
         CONTRACTS_PID=$!
     fi
+    if [ "$TOKENS" = "1" ] && [ "$CONTRACTS" = "1" ] && [ -z "$TOKENS_PID" ] && grep -q "load transfers sent" "$WORK/fund.log" 2>/dev/null \
+        && { [ "$TOKENS_VIA" -eq 1 ] || [ "$RESTART_AT" -eq 0 ] || [ -e "$WORK/restart-done" ]; }; then
+        echo "tokens: deploying and using tokens through node $TOKENS_VIA"
+        (cd "$HERE" && python3 tokens.py "$WORK" "$NODES" --via "$TOKENS_VIA" --json "$WORK/tokens.json" \
+            $([ "$TOKENS_STRICT_API" = 1 ] && echo --strict-api)) > "$WORK/tokens.log" 2>&1 &
+        TOKENS_PID=$!
+    fi
     # contracts.py ended before its first calls were done: nothing would release the restart test
     if [ -n "$CONTRACTS_PID" ] && [ ! -e "$WORK/contracts-ready" ] && ! kill -0 "$CONTRACTS_PID" 2>/dev/null; then
         cat "$WORK/contracts.log"
@@ -1062,6 +1652,24 @@ elif [ "$CONTRACTS" = "1" ]; then
     exit 1
 fi
 
+if [ -n "$TOKENS_PID" ]; then
+    tokens_deadline=$(( $(date +%s) + 900 ))
+    while kill -0 "$TOKENS_PID" 2>/dev/null && [ "$(date +%s)" -lt "$tokens_deadline" ]; do sleep 5; done
+    if kill -0 "$TOKENS_PID" 2>/dev/null; then
+        kill "$TOKENS_PID" 2>/dev/null || true
+        cat "$WORK/tokens.log"
+        echo "FAIL: tokens.py did not finish within 15 min of the target"
+        exit 1
+    fi
+    tokens_status=0
+    wait "$TOKENS_PID" || tokens_status=$?
+    cat "$WORK/tokens.log"
+    [ "$tokens_status" -eq 0 ] || { echo "FAIL: token checks failed"; exit 1; }
+elif [ "$TOKENS" = "1" ]; then
+    echo "FAIL: tokens.py never started (TOKENS=1 needs CONTRACTS=1 and FUND=1)"
+    exit 1
+fi
+
 if [ "$CHECKPOINT_AHEAD_AT" -gt 0 ]; then
     [ "${ca_done:-0}" = 1 ] || { echo "FAIL: the checkpoint-ahead test did not run (fewer than 2 checkpoints)"; exit 1; }
     after=$(tail -n +"$((ca_lines + 1))" "$WORK/n$CHECKPOINT_AHEAD_NODE/node.log")
@@ -1107,6 +1715,7 @@ fi
 if [ -n "$DB_BACKEND" ] || [ -n "$NODE_STORAGE" ]; then
     for i in $(seq 1 "$ALL_NODES"); do
         used=$(grep -ah 'block database: ' "$WORK/n$i"/*.log | tail -1 | sed 's/.*block database: //' || true)
+        if official_node "$i"; then used="berkeleydb (official node)"; fi
         echo "n$i block database: $used"
         if [ -n "$NODE_STORAGE" ] && [ "${used%% *}" != "${STORE_BACKEND[$i]}" ]; then
             echo "FAIL: n$i was to run on ${STORE_BACKEND[$i]}"; exit 1
@@ -1132,7 +1741,10 @@ fi
 for core in "$WORK"/core.* "$WORK"/n*/core*; do
     [ -f "$core" ] || continue
     echo "core dump $core:"
-    gdb -q -batch -ex "bt 40" "$BIN" "$core" 2>/dev/null | grep -E '^#' | head -n 40
+    # the binary of the node whose process left it (core.<name>.<pid>)
+    core_bin=$BIN
+    for i in $(seq 1 "$ALL_NODES"); do [ "${PIDS[$i]:-}" != "${core##*.}" ] || core_bin=$(bin_of "$i"); done
+    gdb -q -batch -ex "bt 40" "$core_bin" "$core" 2>/dev/null | grep -E '^#' | head -n 40
 done
 
 for p in $PRUNED_NODES; do
@@ -1170,19 +1782,260 @@ if [ "$SNAPSHOT_AT" -gt 0 ]; then
         echo "snapshot test: n$JOIN_NODE started from the snapshot at block $snap_seq with its digest $got"
     fi
 fi
+if [ "$JOIN_FETCH" = p2p ] && [ "$JOIN_EXPECT" = fallback ]; then
+    jdir="$WORK/n$JOIN_NODE"
+    jlog="$jdir/node.log"
+    fail_join() {
+        echo "FAIL: n$JOIN_NODE $1"
+        { grep -a 'SNAPSHOT' "$jlog" || true; } | tail -40
+        exit 1
+    }
+    # the fallback: no agreement in fetch_wait, the line naming the manual ways out, then block 0
+    grep -aq 'SNAPSHOT: started with an empty database after' "$jlog" || fail_join "did not fall back to syncing from block 0"
+    grep -aq -- '--download-snapshot' "$jlog" || fail_join "never logged the manual way out (--download-snapshot)"
+    ! grep -aq 'SNAPSHOT: started from block ' "$jlog" || fail_join "started from a snapshot although too few sources served one"
+    for f in snapshot.json snapshot.verified snapshot.mismatch snapshot-tmp db/.importing; do
+        [ ! -e "$jdir/$f" ] || fail_join "has $f after the fallback"
+    done
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: started with an empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+elif [ "$JOIN_FETCH" = p2p ]; then
+    jdir="$WORK/n$JOIN_NODE"
+    jlog="$jdir/node.log"
+    fail_join() {
+        echo "FAIL: n$JOIN_NODE $1"
+        { grep -a 'SNAPSHOT' "$jlog" || true; } | tail -40
+        exit 1
+    }
+    S=$({ grep -a -m1 'SNAPSHOT: started from block ' "$jlog" || true; } | sed -E 's/.*started from block ([0-9]+).*/\1/')
+    [ -n "$S" ] || fail_join "did not start from a snapshot fetched from its neighbours"
+    # the agreed group: "SNAPSHOT: block S hash … digest … : N sources (keys …)", without a reason
+    agreed=$({ grep -a -E "SNAPSHOT: block $S hash [0-9a-f.]+ digest [0-9a-f.]+ : [0-9]+ sources \(keys[^)]*\)$" "$jlog" || true; } | tail -1)
+    agreed_n=$(sed -E 's/.* : ([0-9]+) sources.*/\1/' <<<"$agreed")
+    [ "${agreed_n:-0}" -ge "$JOIN_MIN_SOURCES" ] || fail_join "agreed on block $S with ${agreed_n:-no} sources, $JOIN_MIN_SOURCES needed"
+    for line in "SNAPSHOT: fetched block $S" "SNAPSHOT: importing block $S" "SNAPSHOT: imported block $S" \
+                "Caches for QUICK START loaded successfully" "SNAPSHOT: snapshot.json verified at block $S"; do
+        grep -aqF "$line" "$jlog" || fail_join "never logged '$line'"
+    done
+    grep -aqE "STATE DIGEST #$S [0-9A-Fa-f]+ wallets [0-9]+ checkpoint loaded" "$jlog" || fail_join "did not quick-start from qs/$S"
+    for f in snapshot.verified snapshot.sources.json snapshot.json; do [ -f "$jdir/$f" ] || fail_join "has no $f"; done
+    for f in snapshot-tmp db/.importing snapshot.mismatch; do [ ! -e "$jdir/$f" ] || fail_join "still has $f"; done
+    # the digest of the agreed snapshot is the joiner's at its quick start
+    read -r snap_seq snap_digest < <(python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(m["seq"], m["state_digest"])' "$jdir/snapshot.json")
+    [ "$snap_seq" = "$S" ] || fail_join "snapshot.json is for block $snap_seq, not $S"
+    got=$(grep -a -m1 -E "STATE DIGEST #$S " "$jlog" | sed -E 's/.*STATE DIGEST #[0-9]+ ([0-9A-Fa-f]+).*/\1/' || true)
+    [ "${got,,}" = "${snap_digest,,}" ] || fail_join "start-up digest ${got:-none} differs from the snapshot's $snap_digest"
+    # only nodes that announce snapshots are asked, and every source had a known address
+    serving_keys=""
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do serving_keys="$serving_keys ${KEYS[$((i - 1))]}"; done
+    for k in $({ grep -a -oE 'SNAPSHOT: asking [1-9A-HJ-NP-Za-km-z]+ for its manifest' "$jlog" || true; } | awk '{print $3}' | sort -u); do
+        [[ " $serving_keys " == *" $k "* ]] || fail_join "asked $k, which does not serve, for a manifest"
+    done
+    unknown=$({ grep -a -oE '[0-9]+ not counted: address unknown' "$jlog" || true; } | awk '$1 > 0' | wc -l)
+    [ "$unknown" -eq 0 ] || fail_join "counted no address for some sources ($unknown lines)"
+    sources=$(python3 -c 'import json,sys; print(" ".join(s["key"] + "@" + s["address"] for s in json.load(open(sys.argv[1]))))' "$jdir/snapshot.sources.json")
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: empty database' "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE agreed: $(sed 's/.*SNAPSHOT: //' <<<"$agreed")"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 "SNAPSHOT: fetched block $S" "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 "SNAPSHOT: imported block $S" "$jlog" | sed 's/.*SNAPSHOT: //')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 -E "STATE DIGEST #$S .* checkpoint loaded" "$jlog" | sed 's/.*STATE DIGEST/STATE DIGEST/')"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: snapshot.json verified' "$jlog" | sed 's/.*SNAPSHOT: //'); $(cat "$jdir/snapshot.verified")"
+    echo "p2p join: n$JOIN_NODE $(grep -a -m1 'SNAPSHOT: started from block' "$jlog" | sed 's/.*SNAPSHOT: //'); sources: $sources"
+    key8() { echo "${KEYS[$(($1 - 1))]:0:8}"; }
+    if [ "$JOIN_KILL_DURING_FETCH" = 1 ]; then
+        [ "${join_kills:-0}" -ge 2 ] || fail_join "was killed ${join_kills:-0} times, 2 expected (during the fetch and the import)"
+        grep -aq 'SNAPSHOT: removed the files of an interrupted import' "$jdir/stdout.log" || fail_join "never removed the files of the killed import"
+        grep -aq 'left by an interrupted fetch' "$jlog" || fail_join "never removed snapshot-tmp/ of the killed fetch"
+        echo "p2p join: n$JOIN_NODE killed during the fetch and the import, cleaned up and joined"
+    fi
+    if [ "$FORGE_NODE" -gt 0 ]; then
+        grep -aqE "SNAPSHOT: minority: .*$(key8 "$FORGE_NODE")" "$jlog" || fail_join "never logged n$FORGE_NODE's forged snapshot as a minority"
+        ! grep -q "$(key8 "$FORGE_NODE")" <<<"$agreed" || fail_join "agreed on a group with n$FORGE_NODE's forged snapshot"
+        echo "p2p join: n$FORGE_NODE's forged digest: $(grep -a -m1 "SNAPSHOT: minority: .*$(key8 "$FORGE_NODE")" "$jlog" | sed 's/.*SNAPSHOT: //')"
+    fi
+    if [ "$CORRUPT_NODE" -gt 0 ]; then
+        ck=${KEYS[$((CORRUPT_NODE - 1))]}
+        grep -aq "SNAPSHOT: rejected piece .* from $ck" "$jlog" || fail_join "never rejected a corrupt piece of n$CORRUPT_NODE"
+        grep -aq "SNAPSHOT: source $ck .*not asked again" "$jlog" || fail_join "kept asking n$CORRUPT_NODE after its corrupt pieces"
+        echo "p2p join: n$CORRUPT_NODE: $(grep -ac "SNAPSHOT: rejected piece .* from $ck" "$jlog") corrupt piece(s) rejected, then not asked again"
+    fi
+    if [ -n "$SNAPSHOT_LATE_SERVE_NODES" ]; then
+        if [ "$JOIN_FALLBACK" = wait ]; then
+            grep -aq 'Waiting for more sources (fetch_fallback=wait)' "$jlog" || fail_join "never logged that it waits for more sources"
+        fi
+        for i in ${SNAPSHOT_LATE_SERVE_NODES//,/ }; do
+            grep -aq 'SNAPSHOT: serving block' "$WORK/n$i/node.log" || fail_join "n$i never served after its restart with serve=on"
+            if [ "$JOIN_SOURCES" = file ]; then
+                grep -aq "SNAPSHOT: asking ${KEYS[$((i - 1))]} for its manifest" "$jlog" || fail_join "never asked n$i, listed in snapshot_sources.txt"
+            fi
+        done
+        echo "p2p join: n$JOIN_NODE waited for the late serving node(s) $SNAPSHOT_LATE_SERVE_NODES"
+    fi
+    joiner_key=${KEYS[$((JOIN_NODE - 1))]}
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        served=$({ grep -a "SNAPSHOT: served block $S to $joiner_key" "$WORK/n$i/node.log" || true; } | tail -1 | sed 's/.*SNAPSHOT: //')
+        echo "p2p join: n$i ${served:-served part of the snapshot or nothing (a source logs only a complete download)}"
+    done
+    if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+        # the official nodes never see the snapshot messages: the joiner asks only nodes that announce them
+        for i in $(seq 2 2 "$NODES"); do
+            ! grep -aqiE 'unknown message type|unknown.*type (40|41|42|43)\b' "$WORK/n$i"/*.log \
+                || fail_join "sent n$i (official) a message it does not know"
+        done
+    fi
+fi
 if [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
     # no "tail | grep -q" under pipefail: grep -q stops at the first match and tail fails on SIGPIPE
-    after5=$(tail -n +"$((switch_lines5 + 1))" "$WORK/n5/node.log")
-    grep -aq 'pruned storage: blocks before .* removed' <<<"$after5" \
-        || { echo "FAIL: n5 did not prune after switching to pruned storage"; exit 1; }
-    # n6, now full, must still start from the block its last pruning left, and prune no more
-    after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n6/node.log")
+    sw=$STORAGE_SWITCH_NODE
+    if [ -n "$SWITCH_TO_PRUNED" ]; then
+        after5=$(tail -n +"$((switch_lines5 + 1))" "$WORK/n$SWITCH_TO_PRUNED/node.log")
+        grep -aq 'pruned storage: blocks before .* removed' <<<"$after5" \
+            || { echo "FAIL: n$SWITCH_TO_PRUNED did not prune after switching to pruned storage"; exit 1; }
+    fi
+    # the node now full must still start from the block its last pruning left, and prune no more
+    after6=$(tail -n +"$((switch_lines6 + 1))" "$WORK/n$sw/node.log")
     oldest_after=$(grep -a -m1 'oldest block stored is' <<<"$after6" | sed -E 's/.*stored is //' | tr -d "'" || true)
     [ -n "$pruned_before" ] && [ "$oldest_after" = "$pruned_before" ] \
-        || { echo "FAIL: n6 had pruned up to ${pruned_before:-none}, its oldest block after the switch is ${oldest_after:-none}"; exit 1; }
+        || { echo "FAIL: n$sw had pruned up to ${pruned_before:-none}, its oldest block after the switch is ${oldest_after:-none}"; exit 1; }
     ! grep -aq 'pruned storage: blocks before .* removed' <<<"$after6" \
-        || { echo "FAIL: n6 kept pruning as a full node"; exit 1; }
-    echo "storage switch: n5 pruned after the switch; n6, now full, keeps its oldest block $oldest_after and prunes no more"
+        || { echo "FAIL: n$sw kept pruning as a full node"; exit 1; }
+    echo "storage switch: ${SWITCH_TO_PRUNED:+n$SWITCH_TO_PRUNED pruned after the switch; }n$sw, now full, keeps its oldest block $oldest_after and prunes no more"
+fi
+# backward sync under load: the consensus while the trusted n6 backfills, against the two minutes
+# after it (both after the restart of the storage switch); BACKFILL_MEASURE=report only prints
+if [ "$BACKFILL_MEASURE" != 0 ] && [ "$STORAGE_SWITCH_AT" -gt 0 ]; then
+    python3 - "$WORK/n1/node.log" "$WORK/n6/node.log" "$BACKFILL_MEASURE" <<'PY' || { echo "FAIL: the consensus slowed down while n6 backfilled"; exit 1; }
+import re, sys, datetime
+stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
+def t(line):
+    m = stamp.match(line)
+    return datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() if m else None
+def read(path):
+    rounds, seqs, lines = [], [], []
+    for line in open(path, errors="replace"):
+        x = t(line)
+        if x is None:
+            continue
+        if " R-" in line and "=====" in line:
+            rounds.append(x)
+        elif "Last written sequence = " in line:
+            m = re.search(r"Last written sequence = ([0-9']+)", line)
+            if m:
+                seqs.append((x, int(m.group(1).replace("'", ""))))
+        if "BACKFILL: " in line:
+            lines.append((x, line.strip()))
+    return rounds, seqs, lines
+def stats(rounds, seqs, a, b):
+    r = sorted(y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b)
+    s = [q for x, q in seqs if a <= x < b]
+    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
+    return rate, p95, (max(r) if r else 0.0), len(r)
+judge = sys.argv[3] == "1"
+n1 = read(sys.argv[1])
+n6 = read(sys.argv[2])
+first = next((x for x, l in n6[2] if "full node with blocks" in l), None)
+end = next((x for x, l in n6[2] if "full history stored" in l), None)
+if first is None or end is None:
+    print("FAIL: n6 did not backfill")
+    sys.exit(1)
+# the requests start once n6 is in sync after its restart: the first "resumed", if it paused
+start = next((x for x, l in n6[2] if x >= first and "BACKFILL: resumed" in l), first)
+done_line = next(l for x, l in n6[2] if "full history stored" in l)
+m = re.search(r"longest turn (\d+) ms", done_line)
+longest = int(m.group(1)) if m else -1
+print(f"backfill under load: n6 fetched for {end - start:.1f} s: {done_line.split('BACKFILL: ')[1]}")
+ok = True
+for name, (rounds, seqs, _) in (("n1", n1), ("n6", n6)):
+    # every round that starts from the first request to 60 s later, against the two minutes after
+    during = stats(rounds, seqs, start, max(end, start + 60))
+    after = stats(rounds, seqs, end + 30, end + 150)
+    print(f"backfill under load: {name}: while backfilling {during[0]:.2f} blocks/s, round p95 {during[1]:.2f} s, longest {during[2]:.2f} s "
+          f"({during[3]} rounds); after {after[0]:.2f} blocks/s, round p95 {after[1]:.2f} s, longest {after[2]:.2f} s ({after[3]} rounds)")
+    if not judge or during[3] < 10 or after[3] < 10:
+        continue
+    if during[0] < 0.8 * after[0]:
+        print(f"FAIL: {name}: block rate {100 * (1 - during[0] / after[0]):.0f} % lower while backfilling (20 % allowed)")
+        ok = False
+    if during[1] > 1.5 * after[1]:
+        print(f"FAIL: {name}: round time p95 {100 * (during[1] / after[1] - 1):.0f} % higher while backfilling (50 % allowed)")
+        ok = False
+if judge and longest > 250:
+    print(f"FAIL: n6 held the processor thread {longest} ms in one turn (250 ms allowed)")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+# backward sync: each full node that started above block 0 fetched the older blocks from its peers,
+# refused none, ends with block 0 stored, and holds the same blocks as n1 (every 100th, over the API)
+for i in $BACKFILL_NODES; do
+    blog="$WORK/n$i/node.log"
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        grep -aq 'BACKFILL: full history stored' "$blog" \
+            || { echo "FAIL: n$i did not finish backward sync"; { grep -a 'BACKFILL' "$blog" || true; } | tail -20; exit 1; }
+        if [ -z "$BACKFILL_TAMPER" ]; then
+            ! grep -aq 'BACKFILL: block .* rejected' "$blog" || { echo "FAIL: n$i refused blocks of honest peers"; grep -a 'rejected' "$blog" | head -5; exit 1; }
+        fi
+        last_status=$(grep -a 'Last written sequence = ' "$blog" | tail -1)
+        [[ "$last_status" == *"oldest stored = 0"* ]] || { echo "FAIL: n$i last status line: $last_status"; exit 1; }
+    elif grep -aq 'pruned storage: oldest block stored is' "$blog"; then
+        echo "FAIL: n$i started above block 0 and did not start backward sync"; exit 1
+    else
+        # a snapshot from full sources holds every block from 0 (snapshot_blocks covers the chain)
+        echo "backward sync: n$i holds the chain from block 0, nothing to fetch"
+    fi
+    s1=$(seq_of 1); si=$(seq_of "$i")
+    bhead=$(( ${s1:-0} < ${si:-0} ? ${s1:-0} : ${si:-0} ))
+    (cd "$HERE" && python3 blockhashes.py --head "$bhead" --step "$([ "$BACKFILL_COMPARE_ALL" = 1 ] && echo 1 || echo 100)" \
+        "1:$(api_port 1)" "$i:$(api_port "$i")") \
+        || { echo "FAIL: n$i holds other blocks than n1 after backward sync"; exit 1; }
+    if grep -aq 'BACKFILL: full node with blocks' "$blog"; then
+        echo "backward sync: n$i $(grep -a -m1 'BACKFILL: full node with blocks' "$blog" | sed 's/.*BACKFILL: //'); $(grep -a -m1 'BACKFILL: full history stored' "$blog" | sed 's/.*BACKFILL: //')"
+    fi
+done
+if [ -n "$BACKFILL_NODE" ]; then
+    b=$BACKFILL_NODE
+    blog="$WORK/n$b/node.log"
+    fail_bf() { echo "FAIL: n$b $1"; { grep -a 'BACKFILL\|trxIndex: re-indexed' "$blog" || true; } | tail -30; exit 1; }
+    if [ "$BACKFILL_HISTORY" = 1 ]; then
+        [ "$bf_mid_checked" = 1 ] || fail_bf "was never caught fetching to compare its histories midway"
+        (cd "$HERE" && python3 compare_histories.py "$WORK" "$NODES" "$MASTER_PUB" "$(api_port 1)" "$(api_port "$b")") \
+            | sed 's/^/backward sync: at the end: /' || fail_bf "holds other histories than n1"
+        # the index is rebuilt once at the first start from a snapshot (the stored blocks only); after
+        # the backfill started it is the online index, never the rebuild
+        ! grep -aq 'Inconsistent transaction index' "$blog" || fail_bf "found an inconsistent transaction index"
+        since=$(sed -n '/BACKFILL: full node with blocks/,$p' "$blog")
+        ! grep -aq 'trxIndex: rebuilding' <<<"$since" || fail_bf "rebuilt its transaction index after the backfill started"
+    fi
+    if [ -n "$BACKFILL_CRASH" ]; then
+        [ "$bf_step" -eq "${#BF_STEPS[@]}" ] || fail_bf "went through $bf_step of the ${#BF_STEPS[@]} steps of BACKFILL_CRASH before it finished"
+        # every start resumed below the block the one before started from
+        starts=$({ grep -a 'BACKFILL: full node with blocks' "$blog" || true; } | sed -E 's/.*with blocks ([0-9]+)\.\..*/\1/' | tr '\n' ' ')
+        prev=""
+        for f in $starts; do
+            [ -z "$prev" ] || [ "$f" -lt "$prev" ] || fail_bf "started again from block $f after a start from $prev"
+            prev=$f
+        done
+        if [[ ",$BACKFILL_CRASH," == *",unindexed,"* ]]; then
+            grep -aq 'trxIndex: re-indexed 1 backfilled blocks' "$blog" || fail_bf "did not index again the block a crash left unindexed"
+        fi
+        echo "backward sync: n$b went through $BACKFILL_CRASH, started from blocks $starts$(grep -a -m1 'trxIndex: re-indexed' "$blog" | sed 's/.*trxIndex:/;/')"
+    fi
+    if [ -n "$BACKFILL_TAMPER" ]; then
+        for entry in ${BACKFILL_TAMPER//,/ }; do
+            want=$([ "${entry#*:}" = signature ] && echo 'rejected (signatures' || echo 'rejected (hash)')
+            grep -aqF "$want" "$blog" || fail_bf "never logged '$want' for n${entry%%:*}'s altered blocks"
+            grep -aqF "peer ${KEYS[$((${entry%%:*} - 1))]} sent a block that does not verify" "$blog" \
+                || fail_bf "did not leave n${entry%%:*} out"
+        done
+        echo "backward sync: n$b refused $(grep -ac 'BACKFILL: block .* rejected' "$blog") altered blocks and left their peers out"
+    fi
+    if [ "$SYNCRO_ROUND" -gt 0 ]; then
+        grep -aq 'answers with AwaitAnswer' "$blog" || fail_bf "never saw AwaitAnswer, with special order 35 active"
+        dups=$({ grep -a 'refused a request as a duplicate' "$blog" || true; } | sed -E 's/.*peer ([1-9A-HJ-NP-Za-km-z]+) .*/\1/' | sort | uniq -c | awk '$1 > 1' | wc -l)
+        [ "$dups" -eq 0 ] || fail_bf "got DuplicatedRequest more than once from $dups peers"
+        echo "backward sync: order 35: $(grep -ac 'answers with AwaitAnswer' "$blog") peers paced, $(grep -ac 'refused a request as a duplicate' "$blog") duplicates"
+    fi
 fi
 if [ "$CONVERT_AT" -gt 0 ]; then
     for i in 4 6; do
@@ -1244,13 +2097,19 @@ done
 
 # every node logs "STATE DIGEST #<seq> <hex> wallets <n>"; at a sequence logged by several nodes the
 # digests must be identical
-python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$SNAPSHOT_AT" <<'PY'
+python3 - "$WORK" "$ALL_NODES" "$FUND" "$NODES" "$({ [ "$SNAPSHOT_AT" -gt 0 ] || [ "$JOIN_FETCH" = p2p ]; } && echo 1 || echo 0)" "$BIN_ALT_OFFICIAL" <<'PY'
 import collections, glob, re, sys
 work, nodes, funded = sys.argv[1], int(sys.argv[2]), sys.argv[3] == "1"
-# a node that joins from a snapshot starts past block 1000: only the initial nodes log it
+# official nodes (the even ones with BIN_ALT_OFFICIAL) log no digest: their blocks are compared below
+official = {i for i in range(2, nodes + 1, 2)} if sys.argv[6] == "1" else set()
+# a node that joins from a snapshot (imported or fetched over p2p) starts past block 1000: only the
+# initial nodes log it
 initial = int(sys.argv[4]) if int(sys.argv[5]) > 0 else nodes
+initial -= len([i for i in official if i <= initial])
 seen = collections.defaultdict(dict)
 for i in range(1, nodes + 1):
+    if i in official:
+        continue
     for path in glob.glob(f"{work}/n{i}/*.log"):
         for m in re.finditer(r"STATE DIGEST #(\d+) ([0-9a-fA-F]+) wallets (\d+)", open(path, errors="replace").read()):
             seen[int(m.group(1))][i] = (m.group(2).lower(), int(m.group(3)))
@@ -1269,6 +2128,78 @@ if funded and 1000 in seen and max(w for _, w in seen[1000].values()) <= 2:
     ok = False
 sys.exit(0 if ok else 1)
 PY
+# the other joining nodes: each started from a snapshot (or fell back, as JOIN_EXPECT says)
+for i in $EXTRA_JOINERS; do
+    log_i="$WORK/n$i/node.log"
+    if [ "$JOIN_EXPECT" = fallback ]; then
+        grep -aq 'SNAPSHOT: started with an empty database after' "$log_i" || { echo "FAIL: n$i did not fall back to block 0"; exit 1; }
+    else
+        grep -aq 'SNAPSHOT: started from block ' "$log_i" || { echo "FAIL: n$i did not start from a snapshot"; { grep -a 'SNAPSHOT' "$log_i" || true; } | tail -20; exit 1; }
+        grep -aq 'SNAPSHOT: snapshot.json verified' "$log_i" || { echo "FAIL: n$i did not verify its snapshot"; exit 1; }
+    fi
+    [ ! -e "$WORK/n$i/snapshot.mismatch" ] || { echo "FAIL: n$i has snapshot.mismatch"; exit 1; }
+    echo "p2p join: n$i $({ grep -a -m1 'SNAPSHOT: started' "$log_i" || true; } | sed 's/.*SNAPSHOT: //' | cut -c1-120)"
+done
+
+# the consensus while the snapshots are served: n1's block rate and round times in the same number of
+# seconds before the joins and after they started
+if [ "$STRESS_WINDOW" -gt 0 ] && [ -n "${join_started:-}" ]; then
+    python3 - "$WORK/n1/node.log" "$join_started" "$STRESS_WINDOW" <<'PY' || { echo "FAIL: the consensus slowed down while snapshots were served"; exit 1; }
+import re, sys, datetime
+log, start, window = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+stamp = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\]")
+def t(line):
+    m = stamp.match(line)
+    return datetime.datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S.%f").replace(tzinfo=datetime.timezone.utc).timestamp() if m else None
+rounds, seqs = [], []
+for line in open(log, errors="replace"):
+    if " R-" in line and "=====" in line:
+        x = t(line)
+        if x is not None:
+            rounds.append(x)
+    elif "Last written sequence = " in line:
+        x = t(line)
+        m = re.search(r"Last written sequence = ([0-9']+)", line)
+        if x is not None and m:
+            seqs.append((x, int(m.group(1).replace("'", ""))))
+def window_stats(a, b):
+    r = [y - x for x, y in zip(rounds, rounds[1:]) if a <= x < b]
+    s = [q for x, q in seqs if a <= x < b]
+    rate = (s[-1] - s[0]) / (b - a) if len(s) > 1 else 0.0
+    r.sort()
+    p95 = r[int(0.95 * (len(r) - 1))] if r else 0.0
+    return rate, p95, len(r)
+base = window_stats(start - window, start)
+load = window_stats(start, start + window)
+print(f"consensus: before the joins {base[0]:.2f} blocks/s, round p95 {base[1]:.2f} s ({base[2]} rounds); "
+      f"while serving {load[0]:.2f} blocks/s, round p95 {load[1]:.2f} s ({load[2]} rounds)")
+ok = base[2] > 10 and load[2] > 10
+if not ok:
+    print("FAIL: too few rounds in a window to compare")
+elif load[0] < 0.9 * base[0]:
+    print(f"FAIL: block rate fell by {100 * (1 - load[0] / base[0]):.0f} % (10 % allowed)")
+    ok = False
+elif load[1] > 1.2 * base[1]:
+    print(f"FAIL: round time p95 rose by {100 * (load[1] / base[1] - 1):.0f} % (20 % allowed)")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+fi
+
+# official nodes: the same block hashes as n1 (every 100th sequence up to the lowest head)
+if [ "$BIN_ALT_OFFICIAL" = 1 ]; then
+    ports=""
+    head=""
+    for i in $(seq 1 "$ALL_NODES"); do
+        ports="$ports $i:$(api_port "$i")"
+        s=$(seq_of "$i"); s=${s:-0}
+        if [ -z "$head" ] || [ "$s" -lt "$head" ]; then head=$s; fi
+    done
+    # pruned nodes, and a node that joined from a snapshot, lack the oldest blocks
+    partial=$(for i in $PRUNED_NODES $({ [ "$JOIN_FETCH" = p2p ] || [ "$SNAPSHOT_AT" -gt 0 ]; } && echo "$JOIN_NODE" $EXTRA_JOINERS); do echo "$i"; done | sort -u | paste -sd, -)
+    (cd "$HERE" && python3 blockhashes.py --head "$head" --partial "$partial" $ports) || { echo "FAIL: official and community nodes hold different blocks"; exit 1; }
+fi
+
 # two blocks of one sequence: a node kept its own block while the round went on on the writer's
 # (csnode/src/blockchain.cpp updateLastBlock logs it), a fork that nothing reconciles
 forks=$(grep -al 'this node keeps its own (fork)' "$WORK"/n*/node.log 2>/dev/null | sed -E 's#.*/(n[0-9]+)/node.log#\1#' | tr '\n' ' ' || true)
@@ -1309,5 +2240,80 @@ if [ "$LOW_STAKE_NODES" -gt 0 ]; then
     done
     [ "$low_trusted" -eq 0 ] || { echo "FAIL: nodes below the minimum stake were elected trusted"; exit 1; }
     echo "stake: none of the $LOW_STAKE_NODES nodes below the minimum stake was trusted after round $from"
+fi
+if [ -n "$SNAPSHOT_SERVE_NODES" ]; then
+    # every serving node built the snapshot of a checkpoint and serves it (the build follows the
+    # checkpoint at 1'000 on a thread of low priority: a minute at most)
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        for _ in $(seq 1 60); do grep -aq 'SNAPSHOT: serving block' "$WORK/n$i/node.log" && break; sleep 1; done
+        built=$({ grep -a 'SNAPSHOT: built block' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E 's/.*(built block [0-9]+[^,]*, [^,]*, [^,]*).*/\1/')
+        serving=$({ grep -a 'SNAPSHOT: serving block' "$WORK/n$i/node.log" || true; } | tail -1 | sed -E 's/.*SNAPSHOT: //')
+        [ -n "$built" ] && [ -n "$serving" ] || { echo "FAIL: n$i did not build and serve a snapshot"; { grep -a 'SNAPSHOT' "$WORK/n$i/node.log" || true; } | tail -5; exit 1; }
+        echo "snapshot: n$i $built; $serving"
+    done
+    # known_peers.json is written at a clean stop: stop one node of this build that does not serve
+    observer=0
+    # the joining node too: with every odd node serving and official even nodes it is the only one left
+    for i in $(seq 1 "$ALL_NODES"); do
+        [[ ",$SNAPSHOT_SERVE_NODES," == *",$i,"* ]] && continue
+        [ -n "$BIN_ALT" ] && [ $((i % 2)) -eq 0 ] && continue
+        observer=$i; break
+    done
+    [ "$observer" -gt 0 ] || { echo "FAIL: no node left to read the capabilities from"; exit 1; }
+    kill -TERM "${PIDS[$observer]}" 2>/dev/null || true
+    for _ in $(seq 1 60); do kill -0 "${PIDS[$observer]}" 2>/dev/null || break; sleep 1; done
+    kill -0 "${PIDS[$observer]}" 2>/dev/null && { echo "FAIL: n$observer did not stop in 60 s"; exit 1; }
+    wait "${PIDS[$observer]}" 2>/dev/null || true
+    [ -f "$WORK/n$observer/known_peers.json" ] || { echo "FAIL: n$observer wrote no known_peers.json"; exit 1; }
+    serving=""
+    late=""
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        # a late serving node announced the capability only at its restart: peers refresh the value from
+        # its own datagrams (p2p fork, plan P9), so it must be seen too (listed apart in the output)
+        if [[ ",$SNAPSHOT_LATE_SERVE_NODES," == *",$i,"* ]]; then late="$late,${KEYS[$((i - 1))]}"; else serving="$serving ${KEYS[$((i - 1))]}"; fi
+    done
+    python3 - "$WORK/n$observer/known_peers.json" "$late" $serving <<'PY' || { echo "FAIL: snapshot capability not announced as expected"; exit 1; }
+import json, sys
+peers = {p["id"]: p for p in json.load(open(sys.argv[1]))}
+late = set(k for k in sys.argv[2].split(",") if k)
+serving = set(sys.argv[3:])
+bad = [k for k in serving if peers.get(k, {}).get("capabilities") != 1]
+late_bad = [k for k in late if peers.get(k, {}).get("capabilities") != 1]
+extra = [k for k, p in peers.items() if k not in serving and k not in late and p["capabilities"] != 0]
+community = sum(1 for p in peers.values() if p["minor"] > 0)
+print(f"capabilities: {len(peers)} known peers, {len(serving) - len(bad)} of {len(serving)} serving nodes announce snapshots, "
+      f"{len(late) - len(late_bad)} of {len(late)} late serving nodes do since their restart, "
+      f"{len(extra)} others do, {community} announce a community version")
+sys.exit(1 if bad or late_bad or extra else 0)
+PY
+    PIDS[$observer]=""
+fi
+if [ "$JOIN_SURVEY" = 1 ]; then
+    [ "$JOIN_FETCH" = p2p ] || { echo "JOIN_SURVEY needs JOIN_FETCH=p2p"; exit 1; }
+    sdir="$WORK/n$JOIN_NODE"
+    fail_survey() { echo "FAIL: survey from n$JOIN_NODE: $1"; tail -n 20 "$sdir/survey.txt" "$sdir/survey.err" 2>/dev/null || true; exit 1; }
+    # the folder's node must be stopped: it holds db/.lock and the p2p port
+    kill -TERM "${PIDS[$JOIN_NODE]}" 2>/dev/null || true
+    for _ in $(seq 1 120); do kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null || break; sleep 1; done
+    kill -0 "${PIDS[$JOIN_NODE]}" 2>/dev/null && fail_survey "the node did not stop"
+    wait "${PIDS[$JOIN_NODE]}" 2>/dev/null || true
+    rm -f "$sdir/known_peers.json"
+    (cd "$sdir" && timeout 240 "$BIN" --db-path db --config-file config.ini --survey-snapshots 60 </dev/null > survey.txt 2> survey.err) \
+        || fail_survey "the survey run failed or took more than 240 s"
+    grep -aq '^SURVEY end groups=' "$sdir/survey.txt" || fail_survey "no summary line"
+    ngroups=$(sed -nE 's/^SURVEY end groups=([0-9]+) .*/\1/p' "$sdir/survey.txt")
+    [ "${ngroups:-0}" -ge 1 ] || fail_survey "no snapshot declared"
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        grep -aq "^SURVEY group .*sources=.*${KEYS[$((i - 1))]}@" "$sdir/survey.txt" || fail_survey "n$i, which serves, is in no group"
+    done
+    # the file is a node's own: the log, the pidfile and the chain are untouched; known_peers.json is fresh
+    [ -s "$sdir/known_peers.json" ] || fail_survey "known_peers.json was not written at the stop"
+    python3 "$HERE/../known-hosts/snapshot_sources.py" "$sdir/survey.txt" "$sdir/known_peers.json" "$sdir/survey-out" || fail_survey "snapshot_sources.py failed"
+    for i in ${SNAPSHOT_SERVE_NODES//,/ }; do
+        grep -q " ${KEYS[$((i - 1))]}\$" "$sdir/survey-out/snapshot_sources.txt" || fail_survey "snapshot_sources.txt does not list n$i"
+    done
+    ! grep -aq 'SNAPSHOT: importing\|SNAPSHOT: fetched block' "$sdir/survey.err" "$sdir/survey.txt" || fail_survey "the survey fetched or imported a snapshot"
+    echo "survey: $(grep -a '^SURVEY end' "$sdir/survey.txt"); $(grep -vc '^#' "$sdir/survey-out/snapshot_sources.txt") source(s) listed"
+    PIDS[$JOIN_NODE]=""
 fi
 echo "PASS: $ALL_NODES nodes reached sequence $TARGET_SEQ with matching state digests"

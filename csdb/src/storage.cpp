@@ -790,6 +790,56 @@ bool Storage::pool_save(Pool pool) {
     return true;
 }
 
+bool Storage::pool_save_backfill(const Pool& pool) {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+
+    if (!pool.is_valid()) {
+        d->set_last_error(InvalidParameter, "%s: Invalid pool passed", funcName());
+        return false;
+    }
+
+    const PoolHash hash = pool.hash();
+    const cs::Sequence seq = pool.sequence();
+    if (seq >= std::numeric_limits<uint32_t>::max()) {
+        d->set_last_error(InvalidParameter, "%s: block %llu is out of range", funcName(), static_cast<unsigned long long>(seq));
+        return false;
+    }
+
+    if (d->db->get(hash.to_binary())) {
+        d->set_last_error(InvalidParameter, "%s: Pool already present [hash: %s]", funcName(), hash.to_string().c_str());
+        return false;
+    }
+
+    // by sequence with a buffer: LMDB answers false to a lookup by sequence without one
+    cs::Bytes stored;
+    if (d->db->get(static_cast<uint32_t>(seq), &stored)) {
+        d->set_last_error(InvalidParameter, "%s: block %llu is already stored", funcName(), static_cast<unsigned long long>(seq));
+        return false;
+    }
+
+    // only directly below a stored block: one lookup by sequence on every backend, where finding the
+    // first stored block would walk the deleted records of a pruned BerkeleyDB table
+    if (!d->db->get(static_cast<uint32_t>(seq + 1), &stored)) {
+        d->set_last_error(InvalidParameter, "%s: block %llu is not stored, block %llu cannot be stored below it", funcName(),
+                          static_cast<unsigned long long>(seq + 1), static_cast<unsigned long long>(seq));
+        return false;
+    }
+
+    // not through write_queue: the writer's queue and in_flight hold the blocks after the last one
+    // stored, and a removal of the last block relies on that
+    if (!d->db->put(hash.to_binary(), static_cast<uint32_t>(seq), pool.to_binary())) {
+        d->set_last_error(DatabaseError, "%s: cannot write pool %llu: %s", funcName(),
+                          static_cast<unsigned long long>(seq), d->db->last_error_message().c_str());
+        return false;
+    }
+
+    d->set_last_error();
+    return true;
+}
+
 Pool Storage::pool_load_internal(const PoolHash& hash, const bool metaOnly, size_t& trxCnt) const {
     if (!isOpen()) {
         d->set_last_error(NotOpen);
@@ -1348,6 +1398,14 @@ bool Storage::pool_prune_batch(const std::vector<PoolHash>& hashes) {
         return false;
     }
     return true;
+}
+
+bool Storage::pool_bytes(cs::Sequence sequence, cs::Bytes& out) const {
+    if (!isOpen()) {
+        d->set_last_error(NotOpen);
+        return false;
+    }
+    return d->db->get(static_cast<uint32_t>(sequence), &out);
 }
 
 cs::Sequence Storage::first_sequence() const {

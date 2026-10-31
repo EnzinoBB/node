@@ -1,6 +1,7 @@
 #ifndef TOKENS_SERIALIZER_HPP
 #define TOKENS_SERIALIZER_HPP
 #include <filesystem>
+#include <mutex>
 
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/unordered_map.hpp>
@@ -74,6 +75,8 @@ private:
 
     TokensMap *tokens_;
     HoldersMap *holders_;
+    // TokensMaster::dataMut_: the API updates the cache from other threads (block store, refresh)
+    std::mutex* mutex_ = nullptr;
 };
 }  // namespace cs
 #endif // TOKENS_SERIALIZER_HPP

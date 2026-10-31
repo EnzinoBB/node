@@ -5,13 +5,21 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <cerrno>
+#include <cstdlib>
 #include <iostream>
+#include <sstream>
+#include <vector>
+
+#include <sodium.h>
 
 #include <config.hpp>
 #include <version.hpp>
 
 #include <csdb/database.hpp>
 #include <csdb/storage_backend.hpp>
+#include <lib/system/platform.hpp>
+#include <csnode/snapshot_bootstrap.hpp>
 #include <csnode/snapshot_builder.hpp>
 #include <csnode/snapshot_importer.hpp>
 #include <csnode/snapshot_manifest.hpp>
@@ -123,9 +131,8 @@ int run(const Config& config, const std::string& outDir) {
     in.blockBytes = [&db](cs::Sequence seq, cs::Bytes& out) {
         return db->get(static_cast<uint32_t>(seq), &out);
     };
-    in.contracts = [&db](const std::function<bool(const cs::Bytes&, const cs::Bytes&)>& visit) {
-        return db->forEachContractData(visit);
-    };
+    // no contract records: the contracts database holds each contract's latest state, later than the
+    // checkpoint; the checkpoint carries the states at its block
 
     say() << "checkpoint " << S << ", blocks from " << std::max<cs::Sequence>(first, S > in.snapshotBlocks ? S - in.snapshotBlocks : 0)
           << ", into " << outDir << std::endl;
@@ -173,7 +180,21 @@ int runImport(const Config& config, const std::string& manifestFile) {
     const auto backend = config.getStorageSettings().dbBackend;
     sayImport() << "block " << manifest->seq << " (blocks " << manifest->firstBlock << ".." << manifest->seq << "), state digest "
                 << manifest->stateDigest << ", signed by " << manifest->nodeKey << ", into a new " << backend << " database" << std::endl;
+    // a kill during the import leaves db/.importing: the next start removes what it wrote (main.cpp).
+    // Only into an empty folder: the marker must never name a database or a checkpoint of the node's own
+    {
+        std::error_code ec;
+        if (!csdb::backend::detect(dbPath, true).empty() || fs::exists(fs::path("qs") / std::to_string(manifest->seq), ec)) {
+            sayImport() << "not restored: " << dbPath << " already holds a database, or qs/" << manifest->seq << " exists" << std::endl;
+            return 2;
+        }
+    }
+    if (!cs::snapshot_bootstrap::writeImportMarker(dbPath, backend, manifest->seq)) {
+        sayImport() << "not restored: cannot write " << dbPath << "/" << cs::snapshot_bootstrap::kImportingFile << std::endl;
+        return 2;
+    }
     const auto r = cs::importSnapshot(fs::path(manifestFile).parent_path(), *manifest, fs::current_path(), dbPath, backend);
+    cs::snapshot_bootstrap::removeImportMarker(dbPath);
     if (!r.ok) {
         sayImport() << "not restored: " << r.error << (r.fileAtFault.empty() ? "" : " (" + r.fileAtFault + ")") << std::endl;
         return 2;
@@ -182,4 +203,151 @@ int runImport(const Config& config, const std::string& manifestFile) {
     return 0;
 }
 
+namespace {
+// curl on the PATH, as an executable file; empty when there is none
+std::string findCurl() {
+    return cs::platform::findExecutable("curl");
+}
+
+// runs curl with these arguments, no shell in between; its exit code, or -1 when it did not run
+int runCurl(const std::string& curl, const std::vector<std::string>& args) {
+    std::vector<std::string> all;
+    // -q first: no ~/.curlrc; https only, also through redirects (http only to this machine, for tests)
+    all.push_back(curl);
+    all.push_back("-q");
+    all.insert(all.end(), {"--proto", "=https,http", "--proto-redir", "=https"});
+    all.insert(all.end(), args.begin(), args.end());
+    return cs::platform::runProcess(all);
+}
+
+// SHA-256 of a whole file in hex, empty when it cannot be read
+std::string fileSha256(const fs::path& file) {
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        return {};
+    }
+    crypto_hash_sha256_state state;
+    crypto_hash_sha256_init(&state);
+    std::vector<char> buffer(1 << 20);
+    while (in) {
+        in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto n = in.gcount();
+        if (n > 0) {
+            crypto_hash_sha256_update(&state, reinterpret_cast<const unsigned char*>(buffer.data()), static_cast<unsigned long long>(n));
+        }
+    }
+    if (in.bad()) {
+        return {};
+    }
+    unsigned char out[crypto_hash_sha256_BYTES];
+    crypto_hash_sha256_final(&state, out);
+    static const char* digits = "0123456789abcdef";
+    std::string hex;
+    for (unsigned char c : out) {
+        hex.push_back(digits[c >> 4]);
+        hex.push_back(digits[c & 15]);
+    }
+    return hex;
+}
+}  // namespace
+
+int runDownload(const Config& config, const std::string& urlArg) {
+    auto say = []() -> std::ostream& { return std::cout << "download-snapshot: "; };
+    const std::string url = urlArg.empty() ? kDefaultSnapshotUrl : urlArg;
+    // the manifest is signed by the key of the node that built it, which proves its consistency, not
+    // who published it: the trust is the https address (by default the project's release page), so
+    // plain http only to this machine (tests)
+    const bool local = url.rfind("http://127.0.0.1", 0) == 0 || url.rfind("http://localhost", 0) == 0;
+    if ((url.rfind("https://", 0) != 0 && !local) || url.find_first_of(" \t\r\n") != std::string::npos) {
+        say() << "not an https address: " << url << std::endl;
+        return 2;
+    }
+    const std::string dbPath = config.getPathToDB();
+    {
+        std::error_code ec;
+        fs::create_directories(dbPath, ec);
+    }
+    if (dbcheck::lockedByAnotherProcess(dbPath)) {
+        say() << "a node is running on " << dbPath << ": stop it first" << std::endl;
+        return 2;
+    }
+    if (!csdb::backend::detect(dbPath, true).empty()) {
+        say() << dbPath << " already holds a database: nothing downloaded" << std::endl;
+        return 2;
+    }
+    const std::string curl = findCurl();
+    if (curl.empty()) {
+        say() << "curl not found: install curl, or download the files by hand and run --import-snapshot" << std::endl;
+        return 2;
+    }
+    const fs::path dir = "snapshot-download";
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    const fs::path manifestFile = dir / "snapshot.json";
+    say() << "manifest " << url << std::endl;
+    // always fetched again: a newer snapshot replaces the files of an older one below
+    fs::remove(manifestFile, ec);
+    if (const int rc = runCurl(curl, {"-fsSL", "--max-time", "60", "--retry", "3", "--max-filesize", "1048576", "-o", manifestFile.string(), url}); rc != 0) {
+        say() << "cannot download the manifest (curl exit " << rc << ")" << std::endl;
+        return 2;
+    }
+    std::ifstream in(manifestFile, std::ios::binary);
+    const std::string json((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    std::string error;
+    const auto manifest = cs::SnapshotManifest::fromJson(json, &error);
+    if (!manifest) {
+        say() << "the manifest is refused: " << error << std::endl;
+        return 2;
+    }
+    if (!manifest->verify()) {
+        say() << "the manifest's signature does not verify" << std::endl;
+        return 2;
+    }
+    const std::string base = url.substr(0, url.rfind('/') + 1);
+    // files of another snapshot left by an earlier run: not this one's
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        const auto name = entry.path().filename().string();
+        if (name != "snapshot.json" && !manifest->file(name)) {
+            fs::remove_all(entry.path(), ec);
+        }
+    }
+    uint64_t total = 0;
+    for (const auto& f : manifest->files) {
+        total += f.size;
+    }
+    say() << "block " << manifest->seq << ": " << manifest->files.size() << " files, " << total / (1u << 20) << " MB" << std::endl;
+    for (const auto& f : manifest->files) {
+        const fs::path target = dir / f.name;   // a name from the manifest's fixed table, never a path
+        const auto have = fs::exists(target, ec) ? fs::file_size(target, ec) : 0;
+        if (have == f.size && fileSha256(target) == f.sha256) {
+            say() << f.name << ": already here" << std::endl;
+            continue;
+        }
+        if (have > f.size) {
+            fs::remove(target, ec);
+        }
+        const std::string fileUrl = base + "s" + std::to_string(manifest->seq) + "-" + f.name;
+        say() << f.name << ": " << f.size / 1024 << " KB from " << fileUrl << std::endl;
+        // never more than the manifest declares
+        if (const int rc = runCurl(curl, {"-fL", "-sS", "-C", "-", "--max-time", "3600", "--retry", "3", "--max-filesize",
+                                          std::to_string(f.size), "-o", target.string(), fileUrl}); rc != 0) {
+            say() << f.name << ": download failed (curl exit " << rc << "); run it again to resume" << std::endl;
+            return 2;
+        }
+        const auto got = fs::file_size(target, ec);
+        if (ec || got != f.size || fileSha256(target) != f.sha256) {
+            fs::remove(target, ec);
+            say() << f.name << ": the file does not match the manifest (" << got << " bytes); removed, run it again" << std::endl;
+            return 2;
+        }
+    }
+    const int rc = runImport(config, manifestFile.string());
+    if (rc == 0) {
+        fs::remove_all(dir, ec);
+        say() << "done: the node starts from block " << manifest->seq << std::endl;
+    }
+    return rc;
+}
+
 }  // namespace snapshot_export
+

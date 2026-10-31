@@ -1,9 +1,17 @@
 #ifndef NODE_HPP
 #define NODE_HPP
 
+#include <atomic>
+#include <chrono>
 #include <iostream>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <set>
 #include <string>
+#include <thread>
+#include <utility>
+#include <vector>
 
 #include <csstats.hpp>
 
@@ -11,6 +19,7 @@
 
 #include <csnode/bootstrapgate.hpp>
 #include <csnode/bootstrapweight.hpp>
+#include <csnode/backwardsync.hpp>
 #include <csnode/blocktakeover.hpp>
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
@@ -25,6 +34,17 @@
 #include "roundstat.hpp"
 
 class Transport;
+
+struct SnapshotData;   // client/config/config.hpp
+
+namespace cs {
+class SnapshotFetcher;
+class SnapshotProvider;
+class SnapshotService;
+struct SnapshotNodeState;
+struct SnapshotManifest;
+struct SourceManifest;
+}
 
 namespace cs {
 class SolverCore;
@@ -83,6 +103,16 @@ public:
     // stops the node from inside, as a signal does: requestStop() alone does nothing unless a
     // signal handler has set gSignalStatus first
     static void stopOnError();
+    // the process exit code the node asks for (0: none): 4 when the state restored from a snapshot
+    // does not match its digest, 1 when a bootstrap from the network fails (main.cpp returns it)
+    static int exitCode() {
+        return exitCode_.load();
+    }
+    // node --survey-snapshots [seconds]: the node does no chain work; it asks its neighbours for
+    // snapshot manifests for that long, prints what they declared and stops (0: a normal start)
+    static void setSurvey(uint32_t seconds) {
+        surveySeconds_ = seconds;
+    }
 
     bool isStopRequested() const {
         return stopRequested_;
@@ -208,6 +238,13 @@ public:
     void getBlockReply(const uint8_t*, const size_t, const cs::PublicKey& sender);
 
     void sendSyncroMessage(cs::Byte msg, const cs::PublicKey& target);
+
+    // snapshots shared between community nodes (MsgTypes 40-43, csnode/snapshot_messages.hpp)
+    void getSnapshotManifestRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void getSnapshotManifestReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void getSnapshotPieceRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void getSnapshotPieceReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
+    void sendSnapshotMessage(const cs::PublicKey& target, MsgTypes type, const cs::Bytes& payload);
     void getSyncroMessage(const uint8_t* data, const size_t size, const cs::PublicKey& sender);
 
     // syncro log functions
@@ -416,7 +453,54 @@ public slots:
     void storeSmartStageOne(const cs::StageOneSmarts& stage);
 
 private:
+    // snapshot messages dropped: malformed, or not expected by this node
+    uint64_t snapshotMessagesDropped_ = 0;
+    // the provider's view of this node: last block, round, synced, trusted
+    void snapshotNodeState(cs::SnapshotNodeState& state) const;
+    void logSnapshotSummary();
+
     bool init();
+    // init() in parts: the objects that need no chain (initial confidants, API object, solver);
+    // the chain (BlockChain::init and what follows it); the start of the running node (API, snapshot
+    // service, transport checks, the first round package). A node that starts on an empty database
+    // fetches a snapshot between the first and the second (bootstrap mode, startBootstrap())
+    enum class ChainInit {
+        Failed,
+        Ready,
+        StopAfterInit   // --set-bc-top: the chain is cut, the node stops
+    };
+    bool initCommon();
+    ChainInit initChain();
+    // snapshot.json of a restored folder against the digest of the loaded caches (design 6.8);
+    // false with exit code 4 on a mismatch
+    bool verifyAtStart();
+    bool initRunning();
+
+    // bootstrap mode (docs/specs/2026-10-25-snapshot-p2p-design.md, 6.1-6.9): the transport runs, the
+    // chain is not open, every message but the two snapshot replies is dropped. Processor thread,
+    // except bootstrapWork()
+    bool startBootstrap();
+    // the survey: the bootstrap's discovery and manifest phases, no agreement, fetch or import
+    bool startSurvey(uint32_t seconds);
+    void finishSurvey();
+    std::unique_ptr<cs::SnapshotFetcher> makeFetcher(const SnapshotData& cfg, bool dryRun);
+    void onSnapshotTick();
+    void startBootstrapWorker(bool import);
+    // backward sync: created once the chain is open (initRunning), ticked every 500 ms on the
+    // processor thread
+    void startBackfill();
+    void onBackfillTick();
+    // the lowest block the backfill stores: 0 for a full node; for a pruned node the bottom of its
+    // pruned window, max(pruning target, the head at start - (checkpoint_every + prune_keep_blocks))
+    cs::Sequence backfillFloor() const;
+    // a BlockRequest packet, without the forward sync's status change
+    void sendBlockRequestPacket(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences);
+    // the worker thread: the import (snapshot set) or nothing (the fallback), then initChain() and
+    // verifyAtStart(); it hands over through CallsQueue and never stops the node itself
+    void bootstrapWork(const std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>* snapshot);
+    void joinWorker();
+    void finishBootstrap();
+    void failBootstrap(int code, const std::string& why);
     void initPoolSynchronizer();
 
     void setupNextMessageBehaviour();
@@ -486,6 +570,44 @@ private:
 #ifdef NODE_API
     std::unique_ptr<csconnector::connector> api_;
 #endif
+
+    // snapshots served to p2p neighbours ([snapshot] serve)
+    std::unique_ptr<cs::SnapshotProvider> snapshotProvider_;
+    std::unique_ptr<cs::SnapshotService> snapshotService_;
+    // snapshot fetched from p2p neighbours at a start on an empty database (constructed in bootstrap mode only)
+    std::unique_ptr<cs::SnapshotFetcher> snapshotFetcher_;
+    // backward sync (docs/specs/2026-10-17-backward-sync-design.md): the blocks below the lowest stored one
+    std::unique_ptr<cs::BackwardSync> backwardSync_;
+    cs::Timer backfillTimer_;
+    std::mutex backfillTimerMutex_;               // started on the processor thread, stopped from stop() too
+    void stopBackfillTimer();
+    cs::Sequence backfillStartSeq_ = 0;           // the head when the chain opened
+    std::chrono::steady_clock::time_point snapshotSummaryAt_{};
+
+    // bootstrap mode: see startBootstrap()
+    std::atomic<bool> bootstrapping_{false};
+    std::atomic<bool> bootstrapStop_{false};      // Node::stop(): the worker and the importer stop
+    std::atomic<bool> bootstrapWorking_{false};   // the worker thread runs (set and cleared on the processor thread)
+    cs::Timer snapshotTickTimer_;                 // the fetcher's tick, every 500 ms on the processor thread
+    std::mutex bootstrapThreadMutex_;             // joins from the processor thread and from stop()
+    std::mutex snapshotTimerMutex_;               // the tick timer is stopped from the processor thread and from stop()
+    void stopSnapshotTimer();
+    std::thread bootstrapThread_;
+    std::set<cs::PublicKey> permanentAtStart_;    // the permanent neighbours initCommon() set
+    std::set<cs::PublicKey> bootstrapPermanent_;  // those and the fetcher's sources
+    // the address of each key seen in the routing table during the bootstrap: a source evicted from a
+    // k-bucket keeps its address (processor thread only)
+    std::map<cs::PublicKey, std::string> peerAddresses_;
+    std::vector<std::pair<cs::PublicKey, uint8_t>> lastKnown_;
+    std::chrono::steady_clock::time_point bootstrapStartedAt_{};
+    size_t bootstrapTicks_ = 0;
+    cs::Sequence bootstrapSeq_ = 0;               // the imported block, 0 after the fallback
+    size_t bootstrapSources_ = 0;
+    std::string bootstrapDbPath_;                 // read once at the start: the worker reads no config
+    std::string bootstrapBackend_;
+    inline static std::atomic<int> exitCode_{0};
+    inline static std::atomic<uint32_t> surveySeconds_{0};
+    bool surveying_ = false;
 
     uint32_t startPacketRequestPoint_ = 0;
 

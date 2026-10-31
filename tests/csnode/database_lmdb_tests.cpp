@@ -76,6 +76,7 @@ TEST(DatabaseLmdb, StoresFindsRemovesAndIterates) {
     cs::Bytes value;
     ASSERT_TRUE(db->get(uint32_t(9), &value));
     ASSERT_EQ(value, blockOf(9));
+    db.reset();   // closed first: Windows does not remove open files
     std::filesystem::remove_all(dir);
 }
 
@@ -99,6 +100,7 @@ TEST(DatabaseLmdb, ReusesTheSpaceOfRemovedBlocks) {
         ASSERT_TRUE(db->remove(hashOf(seq - kWindow)));
     }
     EXPECT_LT(fileSize(), 2 * windowSize) << "window " << windowSize << " bytes";
+    db.reset();
     std::filesystem::remove_all(dir);
 }
 
@@ -125,6 +127,8 @@ TEST(DatabaseLmdb, RemovesABatchSkippingMissingBlocks) {
     auto it = db->new_iterator();
     it->seek_to_first();
     ASSERT_EQ(it->key(), 64u);
+    it.reset();
+    db.reset();
     std::filesystem::remove_all(dir);
 }
 

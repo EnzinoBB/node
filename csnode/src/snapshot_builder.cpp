@@ -169,19 +169,14 @@ private:
 std::string utcNow() {
     const std::time_t t = std::time(nullptr);
     std::tm tm{};
+#ifdef _WIN32
+    gmtime_s(&tm, &t);
+#else
     gmtime_r(&t, &tm);
+#endif
     char buf[32];
     std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
     return buf;
-}
-
-bool readFile(const std::filesystem::path& path, std::vector<uint8_t>& out) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) {
-        return false;
-    }
-    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
-    return !in.bad();
 }
 
 bool stopped(const SnapshotBuildInput& in) {
@@ -259,7 +254,11 @@ bool forEachSnapshotBlock(const std::filesystem::path& blocksFile, const std::fu
     return ok && pending.empty();
 }
 
-SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::filesystem::path& outRoot, const cs::PrivateKey& key) {
+namespace {
+// a failed build asks for <S>.tmp to be removed, which buildSnapshot does once the files written
+// here are closed (Windows does not remove open files)
+SnapshotBuildResult buildInto(const SnapshotBuildInput& input, const std::filesystem::path& outRoot, const cs::PrivateKey& key,
+                              bool& removeTmp) {
     SnapshotBuildResult result;
     const cs::Sequence S = input.seq;
     const auto tmp = outRoot / (std::to_string(S) + ".tmp");
@@ -267,7 +266,7 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     std::error_code ec;
 
     auto failWith = [&](const std::string& reason) {
-        std::filesystem::remove_all(tmp, ec);
+        removeTmp = true;
         result.ok = false;
         result.error = reason;
         return result;
@@ -332,14 +331,28 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
         if (!std::filesystem::exists(src, ec)) {
             continue;   // tokens.dat and apihandler.dat exist only in builds with the API
         }
-        std::vector<uint8_t> data;
-        if (!readFile(src, data)) {
+        // in pieces: walletscache.dat is about 180 MB on mainnet, and the builder runs inside the node
+        std::ifstream in(src, std::ios::binary);
+        if (!in) {
             return failWith("cannot read " + src.string());
         }
         SnapshotFile f;
         f.name = "qs-" + name + ".lz4";
         Lz4Writer w(tmp / f.name, m.chunkSize);
-        w.write(data);
+        std::vector<uint8_t> piece(snapshot_lz4::kBlockSize);
+        while (in) {
+            if (stopped(input)) {
+                return failWith("stopped");
+            }
+            in.read(reinterpret_cast<char*>(piece.data()), static_cast<std::streamsize>(piece.size()));
+            const auto n = in.gcount();
+            if (n > 0) {
+                w.write(piece.data(), static_cast<size_t>(n));
+            }
+        }
+        if (in.bad()) {
+            return failWith("cannot read " + src.string());
+        }
         if (!w.finish(f)) {
             return failWith("cannot write " + f.name);
         }
@@ -417,6 +430,16 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     }
 
     // 4. manifest, signed; publish
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-forge-snapshot makes this node declare another state digest
+    // than its checkpoint holds (ci/testnet/run.sh FORGE_NODE): a forged source, consistent with itself
+    // except for the digest the agreement compares
+    if (std::ifstream("testnet-forge-snapshot") && !m.stateDigest.empty()) {
+        char& last = m.stateDigest.back();
+        last = last == '0' ? '1' : '0';
+        cswarning() << "SNAPSHOT: TESTNET build: the manifest of block " << m.seq << " declares a forged state digest";
+    }
+#endif
     m.sign(key);
     {
         std::ofstream out(tmp / "snapshot.json", std::ios::binary | std::ios::trunc);
@@ -440,6 +463,17 @@ SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::fi
     }
     result.ok = true;
     result.dir = final;
+    return result;
+}
+}  // namespace
+
+SnapshotBuildResult buildSnapshot(const SnapshotBuildInput& input, const std::filesystem::path& outRoot, const cs::PrivateKey& key) {
+    bool removeTmp = false;
+    auto result = buildInto(input, outRoot, key, removeTmp);
+    if (removeTmp) {
+        std::error_code ec;
+        std::filesystem::remove_all(outRoot / (std::to_string(input.seq) + ".tmp"), ec);
+    }
     return result;
 }
 

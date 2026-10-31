@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <csdb/address.hpp>
@@ -59,6 +60,28 @@ public:
     // then ends at the oldest block still stored (getPrevTransBlock answers kWrongSequence)
     void onPruneBlock(const csdb::Pool&);
 
+    // Backward sync (docs/specs/2026-10-17-backward-sync-design.md, section 6): indexes a block below
+    // every block indexed so far, before it is stored, so that a wallet's history grows downwards
+    // while the node runs. The block is linked under each of its wallets' lowest indexed block (the
+    // tail, kept per wallet in a record 't' + public key); a pointer the forward index wrote above
+    // the tail is never changed and no entry ever points to itself. Idempotent: a block may be
+    // indexed again after a crash. Then the floor (key __backfill_floor__) is the block.
+    void indexBackfilledBlock(const csdb::Pool&);
+    // the lowest block the backfill indexed, kWrongSequence if this index never took one
+    Sequence backfillFloor() const;
+    // at start: indexes again the stored blocks floor - 1 down to first, which a crash left stored
+    // but not indexed (first < floor); returns how many
+    size_t repairBackfillFloor(Sequence first, const std::function<csdb::Pool(Sequence)>& load);
+
+    // what the backward indexing reads from the chain: a wallet's last transaction block (the
+    // wallet cache's, kWrongSequence if none) and the first stored block. BlockChain's by default;
+    // tests set their own
+    struct ChainView {
+        std::function<Sequence(const csdb::Address&)> lastTransactionBlock;
+        std::function<Sequence()> firstStored;
+    };
+    void setChainView(ChainView view);
+
 public slots:
     void onStartReadFromDb(Sequence _lastWrittenPoolSeq);
     void onReadFromDb(const csdb::Pool&);
@@ -87,6 +110,14 @@ private:
     void setPrevTransBlock(const PublicKey&, cs::Sequence _curr, cs::Sequence _prev);
     void removeLastTransBlock(const PublicKey&, cs::Sequence _curr);
 
+    // the value of the entry (key, seq), nullopt if there is none
+    std::optional<Sequence> prevTransBlockOf(const PublicKey&, Sequence) const;
+    // backward sync: the lowest indexed block of a wallet, kWrongSequence if it has none
+    Sequence tailOf(const csdb::Address& key);
+    Sequence walkToTail(const csdb::Address& key);
+    Sequence lastTransactionBlock(const csdb::Address& key) const;
+    Sequence firstStored() const;
+
     void loadIncompleteFromDb();
     void updateIncompleteFlag();
     void loadCompleteFlagFromDb();
@@ -102,6 +133,7 @@ private:
     bool rebuildDeferred_ = false;
 
     std::map<csdb::Address, cs::Sequence> lapoos_;
+    ChainView chainView_;
 };
 } // namespace cs
 #endif // TRANSACTIONSINDEX_HPP

@@ -54,6 +54,7 @@ add_library(csnode
   include/csnode/walletsids_serializer.hpp
   include/csnode/blockhashes.hpp
   include/csnode/poolsynchronizer.hpp
+  include/csnode/syncropacing.hpp
   include/csnode/fee.hpp
   include/csnode/transactionsvalidator.hpp
   include/csnode/walletsstate.hpp
@@ -72,7 +73,14 @@ add_library(csnode
   include/csnode/snapshot_manifest.hpp
   include/csnode/snapshot_builder.hpp
   include/csnode/snapshot_importer.hpp
+  include/csnode/snapshot_messages.hpp
+  include/csnode/snapshot_provider.hpp
+  include/csnode/snapshot_service.hpp
+  include/csnode/snapshot_agreement.hpp
+  include/csnode/snapshot_bootstrap.hpp
+  include/csnode/snapshot_fetcher.hpp
   include/csnode/blockverifier.hpp
+  include/csnode/backwardsync.hpp
   include/csnode/sendcachedata.hpp
   include/csnode/eventreport.hpp
   include/csnode/idatastream.hpp
@@ -97,6 +105,7 @@ add_library(csnode
   src/walletsids_serializer.cpp
   src/blockhashes.cpp
   src/poolsynchronizer.cpp
+  src/syncropacing.cpp
   src/fee.cpp
   src/transactionsvalidator.cpp
   src/transactionsindex.cpp
@@ -116,7 +125,14 @@ add_library(csnode
   src/snapshot_manifest.cpp
   src/snapshot_builder.cpp
   src/snapshot_importer.cpp
+  src/snapshot_messages.cpp
+  src/snapshot_provider.cpp
+  src/snapshot_service.cpp
+  src/snapshot_agreement.cpp
+  src/snapshot_bootstrap.cpp
+  src/snapshot_fetcher.cpp
   src/blockverifier.cpp
+  src/backwardsync.cpp
   src/sendcachedata.cpp
   src/eventreport.cpp
   src/poolcache.cpp

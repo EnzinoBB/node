@@ -32,6 +32,7 @@ each key and its default.
 | `db_backend` | Chooses the block database: `berkeleydb` (the default, the official format), `lmdb` or `rocksdb`. RocksDB is about a third of the BerkeleyDB size on mainnet. |
 | `prune_keep_blocks` | Pruned storage: the node keeps only the latest blocks and removes older ones at each periodic checkpoint. Pruned storage runs on LMDB. |
 | `async_write_queue_size`, `write_batch_size`, `rocksdb_block_cache_mb`, `rocksdb_memtable_mb` | Tune the database writer and RocksDB. |
+| `backfill`, `backfill_batch`, `backfill_rate`, `backfill_store_per_turn` | Backward sync: a full node whose oldest block is above block 0 (started from a snapshot on lmdb or rocksdb, or switched from pruned to full) fetches the older blocks from its neighbours in the background, with the existing block requests, checks each against the chain's hashes and its signatures and stores it without applying it; the API serves each block and history as it arrives. On by default; `backfill=off` keeps only the snapshot's blocks. |
 
 ### Converting the block database
 
@@ -47,18 +48,62 @@ quick-starts after a conversion.
 
 ### Snapshots built and restored by the node
 
+What an operator sees and sets is in [snapshots.md](snapshots.md).
+
 - `--export-snapshot <dir>`, on a stopped node of any backend, pruned or full, builds a snapshot
   of its latest periodic checkpoint: the checkpoint files, the blocks before it as a hash chain
-  ending at the checkpoint's block, and the contract data, compressed, with a SHA-256 for every
-  file and every 4 MB piece, in a `snapshot.json` signed with the node's key.
+  ending at the checkpoint's block, compressed, with a SHA-256 for every file and every 512 KiB
+  piece, in a `snapshot.json` signed with the node's key (the checkpoint carries the contract
+  states at its block).
+- `--download-snapshot [url]` downloads the snapshot published on GitHub (or the one at `url`) with
+  `curl`, checks it and restores it as `--import-snapshot` does; run by hand or by the Docker
+  entrypoint, never by a normal start.
 - `--import-snapshot <snapshot.json>` restores such a snapshot into an empty database of the
   configured backend (LMDB or RocksDB). Every file is checked against the manifest and every
   block before it is written: its signatures against its confidants, the confirmations of the
   round before, and the hash chain to the declared block; the checkpoint must declare the
   manifest's state digest. Anything wrong leaves nothing behind. The node then quick-starts from
   that checkpoint.
-- The `[snapshot]` section of `config.ini` holds the settings of the coming snapshot service
-  (served by community nodes, fetched at a first start); it does nothing yet.
+- The `[snapshot]` section of `config.ini` holds the settings of p2p snapshot sharing
+  (snapshots served by community nodes to their neighbours and fetched from them at a first
+  start: `serve`, `serve_rate_kbps`, `serve_max_peers`, `snapshot_blocks`, `fetch`,
+  `fetch_wait`, `fetch_fallback`, `min_sources`, `sources`, `sources_file`, `fetch_rate_kbps`).
+  A key that is not one of these is logged and ignored.
+- **Serving snapshots to the neighbours.** With `[snapshot] serve=on` the node builds the snapshot
+  of each periodic checkpoint into `snapshot/<block>/` at low priority and answers the snapshot
+  requests of its p2p neighbours while it is synced with the network, within `serve_rate_kbps`
+  (KB/s, all peers together; half for one peer), `serve_max_peers` peers within 30 s, and half of
+  that while it is a confidant or the writer. It announces it in its p2p host data at start, with
+  its community version; community peers refresh that value from the node's answers to their
+  pings, so a restart with another `serve` value is seen within about a minute (official peers keep the
+  value they first saw until the node leaves their routing table). Official nodes neither see nor
+  answer these messages.
+- **A first start fetches a snapshot from the network.** A node whose `db/` holds no database,
+  with no checkpoint in `qs/`, `db_backend` `lmdb` or `rocksdb` and `fetch=auto` (the default),
+  starts its p2p transport without opening the chain and looks for neighbours that serve
+  snapshots (`SNAPSHOT: empty database: looking for snapshots on the network`). Once
+  `min_sources` sources in different /24 (or /48) networks, or keys listed in `sources`, agree
+  on a snapshot, it downloads it, imports it and quick-starts from it; meanwhile it processes no
+  other message. Without agreement within `fetch_wait` seconds it syncs from block 0
+  (`fetch_fallback=sync`) or keeps waiting (`wait`); the log line names `--download-snapshot` as
+  the faster way. A BerkeleyDB node never fetches. The sources used are listed in
+  `snapshot.sources.json`.
+- **Private and genesis networks set `fetch=off`.** Every node of a network that starts from
+  block 0 starts on an empty database: with `fetch=auto`, LMDB and RocksDB nodes would wait
+  `fetch_wait` for snapshots nobody has.
+- **The restored state is checked at start.** When `snapshot.json` is present (written by
+  `--import-snapshot` or by the fetch) and `snapshot.verified` is not, the node compares the
+  digest of the state its quick start loaded with the manifest's. It writes `snapshot.verified`,
+  or `snapshot.mismatch` and stops with exit code 4; it refuses to start while
+  `snapshot.mismatch` exists. An import interrupted by a kill leaves `db/.importing`; the next
+  start removes what that import wrote before it looks at `db/`.
+
+### Token cache
+
+`[api] tokens_cache=true` turns on the token cache behind the `Token*` API methods in any build.
+The official node has it only in its monitor and wallet builds. The cache follows tokens of every
+standard, including v1/v2 tokens whose amounts are BigDecimals, and it skips failed calls. It is
+rebuilt from the chain when the checkpoint holds none. See [tokens.md](tokens.md).
 
 ## Start-up behaviour
 
@@ -138,6 +183,16 @@ quick-starts after a conversion.
   - `[params] sync_contract_execution` (default `true`): `false` skips the re-execution while
     syncing altogether, and every state comes from the confidants.
 
+- **Contract calls that cannot run are refused.** `TransactionFlow` checks the method and the types
+  of the arguments of a contract call against the contract, and refuses a call that no method
+  matches, which would fail on every node with its fee paid (a token amount passed as a string to
+  a method that takes a BigDecimal, or the reverse). See [tokens.md](tokens.md).
+- **Contract results after a quick start.** A node that quick-starts from a checkpoint at its last
+  stored block reads no block. The official node then never marks its stored blocks as read, and
+  every contract call sent through its API ends with "Transaction in progress" and no result,
+  even though the network executed the call. The community node marks the blocks as read when
+  it starts running.
+
 ## Security and correctness fixes
 
 These were found by reviewing the official code. None of them changes the blocks or the
@@ -146,6 +201,18 @@ consensus rules.
 - **Remote crashes and out-of-bounds reads.** Fixed when a peer sends a malformed compressed
   region, an empty packet, or a pool whose lengths point past its data. Also fixed: a data race
   in `LockFreeChanger`.
+- **A size limit on p2p packets.** The node runs its own fork of the p2p library
+  ([EnzinoBB/p2p](https://github.com/EnzinoBB/p2p), from the commit the official node uses). The
+  first packet of a connection (the registration) may announce at most 64 bytes of data, any
+  later packet at most 256 MiB, far above any packet the node sends; above that the connection is
+  closed before anything is allocated, with an error line at most once a minute per address
+  (`Packet header from <address> announces <n> bytes, above the limit of <limit>: connection
+  dropped (...)`). Below the limit the data is read in chunks of 1 MiB, so the memory held follows
+  the bytes actually received, not the size announced. Official nodes allocate whatever size is
+  announced. The fork also shows a peer's latest host data (version, snapshot capability),
+  refreshed from its answers to our pings, instead of the first one seen; passes each received
+  datagram with its own length; and stops its routing table (threads, UDP socket) with the p2p
+  host at exit.
 - **Smart-contract solver.** Fixed:
   - stale contract locks;
   - executor connections lost between calls;
@@ -191,12 +258,22 @@ rounds for both).
 
 ## Packages and Docker
 
-- **Release packages.** Each release has full and pruned packages, in two builds:
+- **Release packages.** Each release has one package for full and pruned storage (until
+  community.13, a full and a pruned package), in these builds:
   - `linux-x64` needs glibc 2.38 (Ubuntu 24.04, Debian 13 and later);
-  - `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later.
+  - `linux-x64-glibc2.31` runs on Ubuntu 20.04, Debian 11 and later;
+  - `windows-x64` (a `.zip`, Windows 10 and later; start `node.exe` from a terminal in the `csnode`
+    folder) and `macos-arm64` (Apple Silicon; clear the download quarantine once with
+    `xattr -dr com.apple.quarantine csnode`; the node is not signed).
 
-  Each package includes the JDK of the official release and the community build of the contract
+  The Linux packages include the JDK of the official release; the Windows and macOS ones include
+  Eclipse Temurin 11 (the official release has no JDK for them), in `jdk/`, and their
+  `executor_command` points at it. Each package includes the community build of the contract
   executor.
+- **Checkpoints and snapshots are the same on every system.** A Windows or macOS node loads what a
+  Linux node wrote and the other way round: the binary checkpoint files record `long` as 8 bytes
+  whatever the system, and the checkpoint's text files are read and written in binary mode. On
+  Linux the files are byte for byte what they were.
 - **`config.ini` in the packages.** It is the official one, with five changes:
   - `[event_report]` is commented out (it reports node events to a fixed address);
   - `executor_commit_max` accepts the community executor;
@@ -205,11 +282,14 @@ rounds for both).
     (`skip block validation`) and stored, instead of stopping the node at it for good. See
     "Contract states while syncing";
   - `sync_contract_execution=true` (the default), with a comment;
-  - the pruned package adds a `[storage]` section.
+  - next to it, `config.pruned.ini` is the same file with a `[storage]` section for pruned storage
+    on LMDB: `./node --config-file config.pruned.ini`.
 
   The executor listens on 127.0.0.1 only.
 - **Known hosts.** `known_hosts.txt` is refreshed weekly from a verified list of seed nodes.
 - **Docker image.** The image is `ghcr.io/enzinobb/credits-node`. By default it runs a pruned
   node that starts from a snapshot of the chain, published every 12 hours, instead of syncing
-  from block 0. The snapshot's checksum and its state digest are verified before use. See
-  [packaging/docker/README.md](../packaging/docker/README.md).
+  from block 0. The snapshot's checksum and its state digest are verified before use. A full node
+  on lmdb or rocksdb starts from the snapshot too and fetches the older blocks in the background
+  (`CREDITS_BACKFILL=off` to keep only the snapshot's blocks); switching from pruned to full is
+  allowed. See [packaging/docker/README.md](../packaging/docker/README.md).

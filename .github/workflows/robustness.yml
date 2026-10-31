@@ -11,7 +11,7 @@ name: Robustness
 # - a pruned node killed while it prunes;
 # - every block database, full and pruned, in one network, also with crashes and a power cut;
 # - packet loss, corruption, delay, reordering and a partition on some nodes, slow nodes, random
-#   datagrams, and all of them at once;
+#   datagrams, packet headers announcing huge sizes, and all of them at once;
 # - smart contracts across crashes, a power cut, packet loss, a pruned node killed and a node joining,
 #   and a database conversion.
 # All scenarios run funded transfers and the usual restart test.
@@ -31,7 +31,7 @@ on:
         description: 'Minutes each scenario has to reach its target sequence'
         default: '75'
       node_alt_ref:
-        description: 'Branch or commit of this repository built and run by the even nodes (empty = all the same)'
+        description: 'Branch or commit of this repository built and run by the even nodes; "official" = the official 4.2.532 node with the CI test-network hooks (empty = all the same)'
         default: ''
 
 permissions:
@@ -130,16 +130,37 @@ jobs:
           CCACHE_BASEDIR: ${{ github.workspace }}
           NODE_ALT_REF: ${{ inputs.node_alt_ref }}
         run: |
-          git fetch -q --no-recurse-submodules origin -- "$NODE_ALT_REF"
+          # "official": the official 4.2.532 node (CREDITSCOM 4a95aaaf) with only the two hooks a CI
+          # test network needs (its starter key and genesis recipient, ci/official/testnet-hooks.patch)
+          ref=$NODE_ALT_REF
+          [ "$ref" != official ] || ref=4a95aaaf602daead3ad70ecba113da92374b14f4
+          git fetch -q --no-recurse-submodules origin -- "$ref"
           git worktree add -q node-alt FETCH_HEAD
-          # the submodules are copied from this run's checkout, which must point to the same commits
+          if [ "$NODE_ALT_REF" = official ]; then
+            git -C node-alt apply --whitespace=nowarn "$PWD/ci/official/testnet-hooks.patch"
+            git -C node-alt diff --stat
+          fi
+          # the submodules are copied from this run's checkout, which must point to the same commits,
+          # except p2p: this repository runs its fork (EnzinoBB/p2p, which holds the upstream history),
+          # and the node under comparison gets the files of the p2p commit it points to (same submodules)
           for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
                    third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
-            if [ "$(git ls-tree HEAD -- "$m")" != "$(git -C node-alt ls-tree HEAD -- "$m")" ]; then
+            alt=$(git -C node-alt ls-tree HEAD -- "$m" | awk '{print $3}')
+            if [ "$(git ls-tree HEAD -- "$m" | awk '{print $3}')" != "$alt" ] && [ "$m" != p2p ]; then
               echo "$NODE_ALT_REF points $m to another commit than this run"; exit 1
             fi
             rm -rf "node-alt/$m"
             cp -a "$m" "node-alt/$m"
+            if [ "$m" = p2p ] && [ "$(git -C p2p rev-parse HEAD)" != "$alt" ]; then
+              git -C p2p cat-file -e "$alt^{commit}" 2>/dev/null || git -C p2p fetch -q origin "$alt"
+              for s in $(git -C p2p ls-tree -r HEAD | awk '$2 == "commit" {print $4}'); do
+                [ "$(git -C p2p ls-tree HEAD -- "$s")" = "$(git -C p2p ls-tree "$alt" -- "$s")" ] \
+                  || { echo "p2p $alt points $s to another commit than this run"; exit 1; }
+              done
+              git -C p2p ls-files -s | awk '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' | (cd node-alt/p2p && xargs rm -f)
+              git -C p2p archive "$alt" | tar -x -C node-alt/p2p
+              echo "$NODE_ALT_REF: p2p at $alt (this run: $(git -C p2p rev-parse --short HEAD))"
+            fi
           done
           cmake -S node-alt -B build-alt -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -150,7 +171,7 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
             -DWITH_HASKELL=OFF \
-            -DCREDITS_TESTNET=ON
+            -DCREDITS_TESTNET=$([ "$NODE_ALT_REF" = official ] && echo OFF || echo ON)
           cmake --build build-alt -j"$(nproc)" --target node
           echo "node under comparison: $(git -C node-alt log -1 --format='%h %s')"
 
@@ -194,22 +215,33 @@ jobs:
             env: DB_BACKEND=lmdb DISK_FULL_NODE=6 DISK_FULL_AT=700
           # pruning starts at the periodic checkpoint #2000 (checkpoint_every + prune_keep_blocks <= 2000)
           - name: rocksdb-pruned-join
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 TARGET_SEQ=2300
           # a full node syncs from block 0 among mostly pruned peers, with special order 35 active: the pruned
           # peers must answer NoSuchBlocks, not AwaitAnswer and then nothing
           - name: pruned-peers-join
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=lmdb,lmdb,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb:pruned,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
+            fixed: true
+          # the same with node_alt_ref=official: the even nodes, which answer the joiner (n9, this build)
+          # with the low blocks, are official responders with their anti-duplicate log (special order 35)
+          - name: pruned-peers-join-official
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,lmdb:pruned,berkeleydb,lmdb:pruned,berkeleydb,lmdb JOIN_PRUNED_AT=2300 JOIN_FULL=1 SYNCRO_ROUND=100 TARGET_SEQ=3000
             fixed: true
           # kills that land while the node prunes, or right after a checkpoint it prunes from
           - name: rocksdb-pruned-crash
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=rocksdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           - name: lmdb-pruned-crash
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 CRASH_NODE=6 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=2800
           # API threads read blocks while the node prunes (the pool cache is shared)
           - name: lmdb-pruned-api
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 API_LOAD_NODE=6 TARGET_SEQ=3000
           # docker stop with a short timeout: SIGTERM, then SIGKILL while the node shuts down
           - name: lmdb-pruned-term-kill
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 TARGET_SEQ=3000
           - name: berkeleydb-term-kill
             env: DB_BACKEND=berkeleydb TERM_KILL_NODE=3
@@ -223,6 +255,7 @@ jobs:
             env: DB_BACKEND=rocksdb APPLY_FAIL_AT=400
           # a node that lost its transaction index rebuilds it from its blocks after a quick start
           - name: lmdb-pruned-index-loss
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 INDEX_LOSS_AT=2300 TARGET_SEQ=3000
           # a full node without its transaction index: quick start, then the index from its blocks
           - name: berkeleydb-index-loss
@@ -231,6 +264,7 @@ jobs:
           - name: hashdb-damage
             env: DB_BACKEND=lmdb HASHDB_DAMAGE_AT=500 TARGET_SEQ=1100
           - name: hashdb-loss-pruned
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 HASHDB_DAMAGE_NODE=6 HASHDB_DAMAGE=remove HASHDB_DAMAGE_AT=2300 TARGET_SEQ=3000
           # network faults on two nodes (tc netem on everything they send and on what is sent to them)
           - name: net-loss
@@ -246,9 +280,23 @@ jobs:
           # slow nodes: 5% of one CPU for two trusted nodes
           - name: slow-nodes
             env: SLOW_NODES=3,6 SLOW_CPU=5
+          # snapshot sharing: n3 (full) and n5 serve, build their snapshots and announce them in
+          # host_data; a stopped node lists them
+          - name: snapshot-capability
+            env: SNAPSHOT_SERVE_NODES=3,5
+          # a pruned LMDB node and a full RocksDB one serve, the pruned one while it prunes (odd nodes:
+          # the even ones run node_alt_ref in a mixed run)
+          - name: snapshot-p2p-serve
+            env: NODE_STORAGE=berkeleydb,berkeleydb,berkeleydb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=5,7 TARGET_SEQ=2600
           # random datagrams to every node's p2p port
           - name: garbage-datagrams
             env: GARBAGE_AT=150 GARBAGE_RATE=300
+          # p2p packet headers above the limits of the p2p fork (64 bytes before registration, 256 MiB
+          # after) and just below them, to every node of this build (the odd ones with node_alt_ref):
+          # each closes the oversized ones at once, holds almost no memory for the others, keeps running
+          # and stays in consensus
+          - name: net-huge-frame
+            env: HUGE_FRAME_AT=150
           # all at once, on a mixed-backend network
           - name: chaos-mixed
             env: DB_BACKEND=mixed NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=4,5 SLOW_NODES=6 GARBAGE_AT=200
@@ -256,33 +304,161 @@ jobs:
           # snapshot of n5); then the same network with crashes of the pruned BerkeleyDB node, and
           # with a power cut and packet corruption
           - name: all-storage
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=5 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
           - name: all-storage-crash
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_NODE=4 CRASH_FROM=2000 CRASH_TIMES=3 TARGET_SEQ=3300
             fixed: true
           - name: all-storage-power-cut
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb CRASH_ALL_AT=2500 NET_FAULT=corrupt NET_FAULT_PCT=3 NET_FAULT_NODES=2,6 TARGET_SEQ=3300
             fixed: true
           # a node joining from a snapshot taken after the first pruning, and from a truncated one
+          # the joining node downloads the snapshot with --download-snapshot from a web server laid out
+          # as the GitHub release; then with a truncated file: refused (exit 2), nothing in db/
+          - name: snapshot-download
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_VIA=download TARGET_SEQ=3100
+          - name: snapshot-download-corrupt
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_VIA=download SNAPSHOT_CORRUPT=1 TARGET_SEQ=3100
           - name: snapshot-join
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3100
           - name: snapshot-corrupt
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_CORRUPT=1 TARGET_SEQ=3100
           # format 2 across block databases: exported by a pruned BerkeleyDB node into a pruned LMDB one,
           # and by a pruned RocksDB node into a full RocksDB one; format 1 kept for the previous image
           - name: snapshot-join-from-berkeleydb
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,lmdb:pruned PRUNE_NODE=4 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
           - name: snapshot-join-rocksdb-full
+            official: 'no'   # needs a feature of this fork on an even node
             env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb:pruned,rocksdb:pruned,berkeleydb,rocksdb PRUNE_NODE=6 JOIN_FULL=1 SNAPSHOT_AT=2300 TARGET_SEQ=3300
             fixed: true
           - name: snapshot-join-format1
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 SNAPSHOT_FORMAT=1 TARGET_SEQ=3100
+          # a node joining from a snapshot fetched from its p2p neighbours: n3 (pruned LMDB), n5 (full
+          # RocksDB) and n7 (full LMDB) serve, n9 starts on an empty database (pruned LMDB, then full
+          # RocksDB), agrees on the snapshot of 3 sources in 3 loopback /24s, fetches it, imports it and
+          # quick-starts from it. The even nodes run BerkeleyDB and never serve nor are asked, so the rows
+          # also run with node_alt_ref=official
+          - name: snapshot-p2p-join
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # `node --survey-snapshots` from the joined node's folder, at the end of the same run: the three
+          # serving nodes in one group, and the sources file the weekly job makes from it
+          - name: snapshot-p2p-survey
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 JOIN_SURVEY=1 TARGET_SEQ=3300
+            fixed: true
+          - name: snapshot-p2p-join-full
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,rocksdb SNAPSHOT_SERVE_NODES=3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # one serving node for a joiner that needs two: it waits fetch_wait (60 s), then syncs from block 0
+          - name: snapshot-p2p-fallback
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb SNAPSHOT_SERVE_NODES=3 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_FULL=1 JOIN_MIN_SOURCES=2 JOIN_WAIT=60 JOIN_FALLBACK=sync JOIN_EXPECT=fallback TARGET_SEQ=3300
+            fixed: true
+          # two serving nodes, a third one (n7) starts serving later: the joiner waits (fetch_fallback=wait)
+          # and finds n7 by the capability bit its peers refresh from n7's datagrams (p2p fork, plan P9)
+          - name: snapshot-p2p-wait
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5 SNAPSHOT_LATE_SERVE_NODES=7 JOIN_MIN_SOURCES=3 JOIN_WAIT=60 JOIN_FALLBACK=wait TARGET_SEQ=3300
+            fixed: true
+          # the same with the serving nodes listed in the joiner's snapshot_sources.txt
+          - name: snapshot-p2p-wait-file
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5 SNAPSHOT_LATE_SERVE_NODES=7 JOIN_SOURCES=file JOIN_MIN_SOURCES=3 JOIN_WAIT=60 JOIN_FALLBACK=wait TARGET_SEQ=3300
+            fixed: true
+          # the joiner killed during its fetch and during its import: it cleans up and joins
+          - name: snapshot-p2p-dropped
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5,7 JOIN_MIN_SOURCES=3 JOIN_FETCH_RATE=100 JOIN_KILL_DURING_FETCH=1 TARGET_SEQ=3300
+            fixed: true
+          # n7 declares a forged digest, n5 serves corrupt pieces: the honest majority wins, n5 is dropped
+          - name: snapshot-p2p-forged
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=1,3,5,7 FORGE_NODE=7 CORRUPT_NODE=5 JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # every node on 127.0.0.1 (one /24): only the serving nodes trusted by key make up min_sources
+          - name: snapshot-p2p-sources
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5,7 JOIN_SOURCES=keys JOIN_MIN_SOURCES=3 TARGET_SEQ=3300
+            fixed: true
+          # a join while contracts run
+          - name: snapshot-p2p-contracts
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 SNAPSHOT_SERVE_NODES=3,5,7 JOIN_MIN_SOURCES=3 CONTRACTS=1 CONTRACTS_AFTER_AT=2400 TARGET_SEQ=3300
+            fixed: true
+            contracts: true
+          # stress on the confidants that serve (n1, n3, n5, n7): four nodes join at once, the first killed
+          # during its fetch and its import; n3 and n9 on a 2 Mbit/s link. The block rate and the round
+          # times while serving must stay within 10 % / 20 % of the same window before the joins
+          - name: snapshot-p2p-stress
+            official: 'no'   # four joining nodes: the even ones would be official
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 JOIN_FETCH_RATE=200 JOIN_KILL_DURING_FETCH=1 NET_FAULT=rate NET_FAULT_RATE=2mbit NET_FAULT_NODES=3,9
+            fixed: true
+          - name: snapshot-p2p-stress-loss
+            official: 'no'   # four joining nodes: the even ones would be official
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 NET_FAULT=loss NET_FAULT_PCT=5 NET_FAULT_NODES=3,9
+            fixed: true
+          # with contracts running before and during the joins
+          - name: snapshot-p2p-stress-contracts
+            official: 'no'   # four joining nodes: the even ones would be official
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 JOIN_EXTRA=3 CONTRACTS=1 CONTRACTS_AFTER_AT=1500
+            fixed: true
+            contracts: true
+          # one joining node, a serving confidant on a 2 Mbit/s link: valid with official even nodes too
+          - name: snapshot-p2p-stress-single
+            env: NODES=8 TRUSTED_NODES=7 NODE_STORAGE=lmdb,berkeleydb,lmdb:pruned,berkeleydb,rocksdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned SNAPSHOT_SERVE_NODES=1,3,5,7 JOIN_FETCH=p2p JOIN_PRUNED_AT=2300 JOIN_MIN_SOURCES=3 STRESS_WINDOW=300 TARGET_SEQ=3300 NET_FAULT=rate NET_FAULT_RATE=2mbit NET_FAULT_NODES=3,9
+            fixed: true
           # node 5 from full to pruned, node 6 from pruned to full, after node 6 pruned once
           - name: storage-switch
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=2300 TARGET_SEQ=3300
+          # the same with transfers all along: the consensus while the trusted n6 backfills ~1,700
+          # blocks, against as long a window after it (backward sync, BACKFILL_MEASURE in run.sh);
+          # -unbounded (reported, not judged): no rate limit, batches of 1000, every buffered block in one turn
+          - name: backfill-trusted-load
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=3300 TARGET_SEQ=4300 LOAD_SECONDS=3000 BACKFILL_MEASURE=1
+          - name: backfill-trusted-load-unbounded
+            official: 'no'   # needs a feature of this fork on an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 STORAGE_SWITCH_AT=3300 TARGET_SEQ=4300 LOAD_SECONDS=3000 BACKFILL_MEASURE=report BACKFILL_RATE=0 BACKFILL_BATCH=1000 BACKFILL_PER_TURN=1000
+          # backward sync of a full node joining from the snapshot of a pruned node (blocks 0..699
+          # to fetch), slowed down (backfill_rate) so that the faults land while it fetches; every block
+          # compared with n1 over the API, and the wallet histories midway (the newest part of n1's)
+          # and at the end (equal)
+          - name: backfill-join
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=5 BACKFILL_BATCH=5 BACKFILL_HISTORY=1 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # killed while it fetches, right after a flush, and once with a block stored but not indexed
+          - name: backfill-crash
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=3 BACKFILL_BATCH=3 BACKFILL_CRASH=kill,flushed,unindexed BACKFILL_HISTORY=1 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3600
+          # the whole network killed while it fetches
+          - name: backfill-power-cut
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=5 BACKFILL_BATCH=5 BACKFILL_CRASH=powercut BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # two peers serve altered blocks (a signature, a timestamp inside the hash)
+          - name: backfill-tamper
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 BACKFILL_TAMPER=3:signature,5:content BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # special order 35: the responders' anti-duplicate log, detected and respected per peer
+          - name: backfill-order35
+            official: 'no'   # n6 exports the snapshot: an even node
+            env: DB_BACKEND=lmdb PRUNE_NODE=6 SNAPSHOT_AT=2300 JOIN_FULL=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 SYNCRO_ROUND=100 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+          # step 6: n4, a pruned BerkeleyDB node from block 0, switched to full: every block it pruned is
+          # written again into its deleted Recno record, fetched from the peers; all blocks compared
+          - name: backfill-berkeleydb
+            official: 'no'   # needs a feature of this fork on an even node
+            env: NODE_STORAGE=berkeleydb,lmdb,rocksdb,berkeleydb:pruned,lmdb,rocksdb,berkeleydb STORAGE_SWITCH_AT=2300 STORAGE_SWITCH_NODE=4 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+            fixed: true
+          # with node_alt_ref=official: the history comes from official nodes too (the even ones); the
+          # joiner, even, runs this build (JOIN_COMMUNITY)
+          - name: backfill-join-official
+            env: NODE_STORAGE=lmdb,berkeleydb,lmdb,berkeleydb,lmdb:pruned,berkeleydb,lmdb,lmdb PRUNE_NODE=5 SNAPSHOT_AT=2300 JOIN_FULL=1 JOIN_COMMUNITY=1 BACKFILL_RATE=20 BACKFILL_BATCH=20 BACKFILL_HISTORY=1 BACKFILL_COMPARE_ALL=1 TARGET_SEQ=3300
+            fixed: true
           - name: db-convert
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 TARGET_SEQ=2500
           # smart contracts (each node with its executor, contracts.py through n1) across the faults:
           # six SIGKILLs of n6 and its executor while contracts are deployed and called
@@ -290,13 +466,16 @@ jobs:
           # (docs/specs/2026-10-24-contract-state-sync-design.md): its balances and the contract's
           # state must end as the live nodes', the state fetched from the confidants once it is live
           - name: contracts-dice-join
+            official: 'no'   # an official joiner (n8) re-executes Dice while syncing and ends on another state: the official behaviour #93-#96 fixed (reproduced 2026-10-25)
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300
             contracts: true
           # the same with sync_contract_execution=false: no re-execution while syncing, every state fetched
           - name: contracts-dice-join-nosync-exec
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb CONTRACTS=1 CONTRACT_DICE=1 JOIN_PRUNED_AT=500 JOIN_FULL=1 CONTRACTS_AFTER_AT=700 TARGET_SEQ=1300 SYNC_CONTRACT_EXECUTION=0
             contracts: true
           - name: contracts-crash
+            official: 'no'   # n6 is official: killed while saving a checkpoint it never restarts (checkpoint ahead of its blocks, official behaviour this fork handles; reproduced 2026-10-25)
             env: DB_BACKEND=lmdb CRASH_NODE=6 CONTRACTS=1 TARGET_SEQ=1600
             contracts: true
           # every node and executor killed after the first calls, calls again after the restart
@@ -319,14 +498,17 @@ jobs:
             manual: true
           # a pruned node quick-starting from checkpoints that hold the contract states
           - name: contracts-pruned-term-kill
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 TERM_KILL_NODE=6 TERM_KILL_FROM=2000 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=3000
             contracts: true
           # a node joining from block 0 past the deploys, then following live calls
           - name: contracts-pruned-join
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=lmdb PRUNE_NODE=6 JOIN_PRUNED_AT=500 CONTRACTS=1 CONTRACTS_AFTER_AT=2100 TARGET_SEQ=2300
             contracts: true
           # block databases converted with contract records in them
           - name: contracts-db-convert
+            official: 'no'   # needs a feature of this fork on an even node
             env: DB_BACKEND=berkeleydb CONVERT_AT=1500 CONTRACTS=1 CONTRACTS_AFTER_AT=1700 TARGET_SEQ=2500
             contracts: true
     name: ${{ matrix.name }}
@@ -334,7 +516,7 @@ jobs:
     env:
       # the scenarios with a NODE_STORAGE list are laid out for 7 nodes
       # manual scenarios (known failures kept as reproductions) run only when named in `only`
-      SELECTED: ${{ ((inputs.only == '' && matrix.manual != true) || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') }}
+      SELECTED: ${{ ((inputs.only == '' && matrix.manual != true) || contains(format(',{0},', inputs.only), format(',{0},', matrix.name))) && (matrix.fixed != true || inputs.nodes == '' || inputs.nodes == '7') && (inputs.node_alt_ref != 'official' || matrix.official != 'no') }}
     steps:
       - name: Skip unselected scenario
         if: env.SELECTED != 'true'
@@ -394,6 +576,7 @@ jobs:
           if [ -f build-alt/node ]; then
             chmod +x build-alt/node
             export BIN_ALT="$PWD/build-alt/node"
+            [ "${{ inputs.node_alt_ref }}" != official ] || export BIN_ALT_OFFICIAL=1
           fi
           # the scenario's variables come from the matrix above, NAME=value pairs only
           for kv in $SCENARIO; do

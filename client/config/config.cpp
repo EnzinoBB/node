@@ -1,5 +1,9 @@
+#include <algorithm>
 #include <iostream>
+#include <fstream>
 #include <regex>
+#include <sstream>
+#include <set>
 #include <stdexcept>
 #include <string>
 
@@ -28,7 +32,8 @@
 #endif
 
 const NodeVersion NODE_VERSION = 532;
-const uint8_t MINOR_NODE_VERSION = 0;
+// the community release (4.2.532-community.N); also announced to peers in host_data bits 32-47
+const uint8_t MINOR_NODE_VERSION = 14;
 
 const std::string BLOCK_NAME_PARAMS = "params";
 const std::string BLOCK_NAME_HOST_INPUT = "host_input";
@@ -95,6 +100,7 @@ const std::string PARAM_NAME_EXECUTOR_RUN_DELAY = "executor_run_delay";
 const std::string PARAM_NAME_EXECUTOR_BACKGROUND_THREAD_DELAY = "executor_background_thread_delay";
 const std::string PARAM_NAME_EXECUTOR_CHECK_VERSION_DELAY = "executor_check_version_delay";
 const std::string PARAM_NAME_EXECUTOR_MULTI_INSTANCE = "executor_multi_instance";
+const std::string PARAM_NAME_TOKENS_CACHE = "tokens_cache";
 const std::string PARAM_NAME_EXECUTOR_VERSION_COMMIT_MIN = "executor_commit_min";
 const std::string PARAM_NAME_EXECUTOR_VERSION_COMMIT_MAX = "executor_commit_max";
 const std::string PARAM_NAME_JPS_COMMAND_LINE = "jps_command";
@@ -231,6 +237,27 @@ void Config::updateKnownHosts(std::vector<cs::PeerData>& peers) const {
   for (auto& p : peers) {
     f << p.ip << ":" << p.port << " " << p.id << std::endl;
   }
+
+  // the same peers with what they announce, next to known_hosts.txt
+  const auto json = boost::filesystem::path(hostsFileName_).parent_path() / "known_peers.json";
+  std::ofstream j(json.string());
+  if (j.is_open()) {
+    j << knownPeersJson(peers);
+  }
+}
+
+std::string Config::knownPeersJson(const std::vector<cs::PeerData>& peers) {
+  // ids are base58 and addresses are printed by asio: nothing to escape
+  std::ostringstream out;
+  out << "[";
+  for (size_t i = 0; i < peers.size(); ++i) {
+    const auto& p = peers[i];
+    out << (i ? ",\n " : "\n ") << "{\"id\":\"" << p.id << "\",\"ip\":\"" << p.ip << "\",\"port\":" << p.port
+        << ",\"version\":" << p.version << ",\"minor\":" << p.minorVersion << ",\"platform\":" << int(p.platform)
+        << ",\"capabilities\":" << int(p.capabilities) << "}";
+  }
+  out << (peers.empty() ? "]\n" : "\n]\n");
+  return out.str();
 }
 
 Config::Config(const ConveyerData& conveyerData)
@@ -976,6 +1003,7 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, "db_backend",             storageData_.dbBackend);
     checkAndSaveValue(data, block, "rocksdb_block_cache_mb", storageData_.rocksdbBlockCacheMb);
     checkAndSaveValue(data, block, "rocksdb_memtable_mb",    storageData_.rocksdbMemtableMb);
+    readBackfillSettings(data, storageData_);
     // block_db=lmdb (community releases before RocksDB) means db_backend=lmdb, unless db_backend is set
     if (data.count(PARAM_NAME_STORAGE_BLOCK_DB) && !data.count("db_backend")) {
         storageData_.dbBackend = data.get<std::string>(PARAM_NAME_STORAGE_BLOCK_DB);
@@ -1003,6 +1031,45 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
             storageData_.checkpointKeep = 2;
         }
     }
+}
+
+void Config::readBackfillSettings(const boost::property_tree::ptree& data, StorageData& storage) {
+    if (data.count("backfill")) {
+        const auto text = data.get<std::string>("backfill");
+        if (text == "on" || text == "true" || text == "1") {
+            storage.backfill = true;
+        }
+        else if (text == "off" || text == "false" || text == "0") {
+            storage.backfill = false;
+        }
+        else {
+            cswarning() << "config: [storage] backfill=" << text << " is not on or off, using " << (storage.backfill ? "on" : "off");
+        }
+    }
+    auto number = [&data](const char* key, size_t& value, size_t min, size_t max) {
+        if (!data.count(key)) {
+            return;
+        }
+        const auto text = data.get<std::string>(key);
+        try {
+            size_t used = 0;
+            const unsigned long long parsed = std::stoull(text, &used);
+            if (used == text.size() && text.find('-') == std::string::npos) {
+                const auto clamped = std::clamp<unsigned long long>(parsed, min, max);
+                if (clamped != parsed) {
+                    cswarning() << "config: [storage] " << key << "=" << text << " is not in [" << min << ", " << max << "], using " << clamped;
+                }
+                value = static_cast<size_t>(clamped);
+                return;
+            }
+        }
+        catch (const std::exception&) {
+        }
+        cswarning() << "config: [storage] " << key << "=" << text << " is not a number, using " << value;
+    };
+    number("backfill_batch", storage.backfillBatch, 1, 1000);
+    number("backfill_rate", storage.backfillRate, 0, 1'000'000);
+    number("backfill_store_per_turn", storage.backfillStorePerTurn, 1, 1000);
 }
 
 namespace {
@@ -1064,28 +1131,45 @@ SnapshotData Config::parseSnapshotData(const boost::property_tree::ptree& config
         return result;
     }
     const boost::property_tree::ptree& data = config.get_child(BLOCK_NAME_SNAPSHOT);
-    readSnapshotNumber<uint16_t>(data, "serve_port", result.servePort, 0, 65535);
-    if (data.count("serve_bind")) {
-        result.serveBind = data.get<std::string>("serve_bind");
+    static const std::set<std::string> known = {
+        "serve", "serve_rate_kbps", "serve_max_peers", "snapshot_blocks", "fetch", "fetch_wait",
+        "fetch_fallback", "min_sources", "sources", "sources_file", "fetch_rate_kbps"};
+    for (const auto& [key, value] : data) {
+        if (!known.count(key)) {
+            cswarning() << "config: [snapshot] " << key << " is not a setting of this version, ignored";
+        }
     }
-    readSnapshotNumber<size_t>(data, "serve_max_connections", result.serveMaxConnections, 1, 1024);
+    readSnapshotBool(data, "serve", result.serve);
     readSnapshotNumber<size_t>(data, "serve_rate_kbps", result.serveRateKbps, 0, 10'000'000);
-    readSnapshotNumber<size_t>(data, "snapshot_blocks", result.snapshotBlocks, 1000, 10'000'000);
+    readSnapshotNumber<size_t>(data, "serve_max_peers", result.serveMaxPeers, 1, 64);
+    readSnapshotNumber<size_t>(data, "snapshot_blocks", result.snapshotBlocks, 1, 10'000'000);
     readSnapshotChoice(data, "fetch", result.fetch, {"auto", "off"});
-    // empty values are meaningful here: no extra sources, no sources file, no GitHub source
+    readSnapshotNumber<size_t>(data, "fetch_wait", result.fetchWait, 0, 86'400);
+    readSnapshotChoice(data, "fetch_fallback", result.fetchFallback, {"sync", "wait"});
+    readSnapshotNumber<size_t>(data, "min_sources", result.minSources, 1, 20);
     if (data.count("sources")) {
-        result.sources = data.get<std::string>("sources");
+        std::vector<std::string> keys;
+        boost::split(keys, data.get<std::string>("sources"), boost::is_any_of(", \t"), boost::token_compress_on);
+        for (const auto& key : keys) {
+            if (key.empty()) {
+                continue;
+            }
+            std::vector<uint8_t> bytes;
+            if (!DecodeBase58(key, bytes) || bytes.size() != cscrypto::kPublicKeySize) {
+                cswarning() << "config: [snapshot] sources: " << key << " is not a node key, ignored";
+                continue;
+            }
+            cs::PublicKey publicKey;
+            std::copy(bytes.begin(), bytes.end(), publicKey.begin());
+            if (std::find(result.sources.begin(), result.sources.end(), publicKey) == result.sources.end()) {
+                result.sources.push_back(publicKey);
+            }
+        }
     }
+    // an empty value is meaningful here: no sources file
     if (data.count("sources_file")) {
         result.sourcesFile = data.get<std::string>("sources_file");
     }
-    readSnapshotBool(data, "probe_known_hosts", result.probeKnownHosts);
-    if (data.count("github_manifest")) {
-        result.githubManifest = data.get<std::string>("github_manifest");
-    }
-    readSnapshotNumber<size_t>(data, "min_sources", result.minSources, 1, 20);
-    readSnapshotChoice(data, "fallback", result.fallback, {"github", "none"});
-    readSnapshotNumber<size_t>(data, "fetch_connections", result.fetchConnections, 1, 16);
     readSnapshotNumber<size_t>(data, "fetch_rate_kbps", result.fetchRateKbps, 0, 10'000'000);
     return result;
 }
@@ -1107,6 +1191,7 @@ void Config::readApiData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_EXECUTOR_BACKGROUND_THREAD_DELAY, apiData_.executorBackgroundThreadDelay);
     checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_EXECUTOR_CHECK_VERSION_DELAY, apiData_.executorCheckVersionDelay);
     checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_EXECUTOR_MULTI_INSTANCE, apiData_.executorMultiInstance);
+    checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_TOKENS_CACHE, apiData_.tokensCache);
     checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_SERVER_SEND_TIMEOUT, apiData_.serverSendTimeout);
     checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_SERVER_RECEIVE_TIMEOUT, apiData_.serverReceiveTimeout);
     checkAndSaveValue(data, BLOCK_NAME_API, PARAM_NAME_AJAX_SERVER_SEND_TIMEOUT, apiData_.ajaxServerSendTimeout);
@@ -1255,6 +1340,7 @@ bool operator==(const ApiData& lhs, const ApiData& rhs) {
            lhs.executorBackgroundThreadDelay == rhs.executorBackgroundThreadDelay &&
            lhs.executorCheckVersionDelay == rhs.executorCheckVersionDelay &&
            lhs.executorMultiInstance == rhs.executorMultiInstance &&
+           lhs.tokensCache == rhs.tokensCache &&
            lhs.executorCommitMin == rhs.executorCommitMin &&
            lhs.executorCommitMax == rhs.executorCommitMax &&
            lhs.jpsCmdLine == rhs.jpsCmdLine;
@@ -1265,19 +1351,16 @@ bool operator!=(const ApiData& lhs, const ApiData& rhs) {
 }
 
 bool operator==(const SnapshotData& lhs, const SnapshotData& rhs) {
-    return lhs.servePort == rhs.servePort &&
-           lhs.serveBind == rhs.serveBind &&
-           lhs.serveMaxConnections == rhs.serveMaxConnections &&
+    return lhs.serve == rhs.serve &&
            lhs.serveRateKbps == rhs.serveRateKbps &&
+           lhs.serveMaxPeers == rhs.serveMaxPeers &&
            lhs.snapshotBlocks == rhs.snapshotBlocks &&
            lhs.fetch == rhs.fetch &&
+           lhs.fetchWait == rhs.fetchWait &&
+           lhs.fetchFallback == rhs.fetchFallback &&
+           lhs.minSources == rhs.minSources &&
            lhs.sources == rhs.sources &&
            lhs.sourcesFile == rhs.sourcesFile &&
-           lhs.probeKnownHosts == rhs.probeKnownHosts &&
-           lhs.githubManifest == rhs.githubManifest &&
-           lhs.minSources == rhs.minSources &&
-           lhs.fallback == rhs.fallback &&
-           lhs.fetchConnections == rhs.fetchConnections &&
            lhs.fetchRateKbps == rhs.fetchRateKbps;
 }
 

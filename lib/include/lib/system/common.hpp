@@ -50,12 +50,17 @@ constexpr static int8_t OS_UNSPECIFIED = int8_t(-1);
 struct PeerData {
     // encoded to base58 NodeId
     std::string id;
+    // the same NodeId, the node's public key
+    PublicKey key{};
     // p2p public address
     std::string ip;
     // p2p port
     uint16_t port = 0;
     int16_t version = 0;
     int8_t platform = OS_UNSPECIFIED;
+    // community nodes only (host_data bits 24-47), 0 on official nodes
+    uint8_t capabilities = 0;
+    uint16_t minorVersion = 0;
 };
 
 using ConfidantSignature = std::pair<Byte, Signature>;

@@ -15,6 +15,8 @@
 #include <lib/system/structures.hpp>
 #include <lib/system/utils.hpp>
 
+#include <net/hostdata.hpp>
+
 #include <packetvalidator.hpp>
 
 namespace {
@@ -33,21 +35,13 @@ net::NodeId toNodeId(const cs::PublicKey& key) {
 }
 
 uint64_t getHostData() {
+  const auto& config = *cs::ConfigHolder::instance().config();
   auto platform = static_cast<uint8_t>(csconnector::connector::platform());
-  auto node_version = static_cast<uint16_t>(cs::ConfigHolder::instance().config()->getNodeVersion());
-
-  uint64_t user_data = 0;
-  user_data |= platform;
-  user_data |= (uint64_t(node_version) << 8);
-  return user_data;
-}
-
-uint8_t getPlatform(uint64_t user_data) {
-  return static_cast<uint8_t>(user_data);
-}
-
-uint16_t getVersion(uint64_t user_data) {
-  return static_cast<uint16_t>(user_data >> 8);
+  auto node_version = static_cast<uint16_t>(config.getNodeVersion());
+  // fixed for the life of the process: a node started with serve=off is found at its next start
+  uint8_t capabilities = config.getSnapshotSettings().serve ? cs::hostdata::kSnapshotProtocolV1 : 0;
+  auto minor_version = static_cast<uint16_t>(config.getMinorNodeVersion());
+  return cs::hostdata::encode(platform, node_version, capabilities, minor_version);
 }
 
 net::Config createNetConfig(bool& good) {
@@ -127,6 +121,10 @@ Transport::~Transport() {
     if (processorThread_.joinable()) {
         processorThread_.join();
     }
+    // host_ (the last member) goes next: ~Host stops its io_context and joins its thread, then stops
+    // the routing table and clears the Network singleton's reference to it (p2p fork), so the routing
+    // table, its UDP socket and its threads end while the io_context exists. Clearing the reference
+    // here, before ~Host, raced with Network::OnConnected on the p2p io thread.
 }
 
 void Transport::run() {
@@ -396,6 +394,14 @@ void Transport::dispatchNodeMessage(const cs::PublicKey& sender, const MsgTypes 
             return node_->getPacketHashRequest(data, size, rNum, sender);
         case MsgTypes::TransactionsPacketBaseReply:
             return node_->getPacketHashesBaseReply(data, size, rNum, sender);
+        case MsgTypes::SnapshotManifestRequest:
+            return node_->getSnapshotManifestRequest(data, size, sender);
+        case MsgTypes::SnapshotManifestReply:
+            return node_->getSnapshotManifestReply(data, size, sender);
+        case MsgTypes::SnapshotPieceRequest:
+            return node_->getSnapshotPieceRequest(data, size, sender);
+        case MsgTypes::SnapshotPieceReply:
+            return node_->getSnapshotPieceReply(data, size, sender);
         default:
             break;
     }
@@ -445,11 +451,14 @@ void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
         cs::PeerData peerData;
         auto ptr = reinterpret_cast<const uint8_t*>(p.id.GetPtr());
         peerData.id = EncodeBase58(ptr, ptr + p.id.size());
+        peerData.key = toPublicKey(p.id);
         peerData.ip = p.address.to_string();
         peerData.port = p.udp_port;
         if (p.user_data) {
-          peerData.version = static_cast<decltype(peerData.version)>(getVersion(p.user_data));
-          peerData.platform = static_cast<decltype(peerData.platform)>(getPlatform(p.user_data));
+          peerData.version = static_cast<decltype(peerData.version)>(cs::hostdata::version(p.user_data));
+          peerData.platform = static_cast<decltype(peerData.platform)>(cs::hostdata::platform(p.user_data));
+          peerData.capabilities = cs::hostdata::capabilities(p.user_data);
+          peerData.minorVersion = cs::hostdata::minorVersion(p.user_data);
         }
 
         if (uniqueIds.insert(peerData.id).second) {
@@ -465,6 +474,19 @@ void Transport::getKnownPeers(std::vector<cs::PeerData>& result) {
           cserror() << errorMsg;
         }
     }
+}
+
+bool Transport::peerCapabilities(const cs::PublicKey& key, uint8_t& capabilities) {
+    std::vector<net::NodeEntrance> knownPeers;
+    host_.GetKnownNodes(knownPeers);
+    const auto id = toNodeId(key);
+    for (const auto& p : knownPeers) {
+        if (p.id == id) {
+            capabilities = cs::hostdata::capabilities(p.user_data);
+            return true;
+        }
+    }
+    return false;
 }
 
 void Transport::addToNeighbours(const std::set<cs::PublicKey>& keys) {

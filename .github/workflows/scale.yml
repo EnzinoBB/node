@@ -34,6 +34,9 @@ on:
       scenario:
         description: 'More run.sh variables as NAME=value pairs, as a robustness scenario (e.g. PRUNE_NODE=6 SNAPSHOT_AT=2300 TARGET_SEQ=3300)'
         default: ''
+      official:
+        description: '1 = the even nodes run the official 4.2.532 node with the CI test-network hooks (ci/official/testnet-hooks.patch)'
+        default: '0'
 
 permissions:
   contents: read
@@ -52,6 +55,7 @@ jobs:
       trusted: ${{ steps.counts.outputs.trusted }}
       dpos_at: ${{ steps.counts.outputs.dpos_at }}
       low_stake: ${{ steps.counts.outputs.low_stake }}
+      official: ${{ steps.counts.outputs.official }}
     steps:
       - name: Node counts
         id: counts
@@ -62,18 +66,22 @@ jobs:
           LOW: ${{ inputs.low_stake_nodes || '0' }}
           TIMEOUT: ${{ inputs.timeout_min || '60' }}
           LOAD: ${{ inputs.contract_load || '120,2,20' }}
+          OFFICIAL: ${{ inputs.official || '0' }}
         run: |
-          # a tag scale-t<trusted>-n<count>_<count>...[-d<sequence>][-l<nodes>] sets them too
-          # (scale-t7-n33_49-d200-l10: 7 initial confidants, 33 and 49 nodes, stake-based election from
-          # block 200, the last 10 nodes below the minimum stake)
+          # a tag scale-t<trusted>-n<count>_<count>...[-d<sequence>][-l<nodes>][-o] sets them too
+          # (scale-t7-n33_49-d200-l10-o: 7 initial confidants, 33 and 49 nodes, stake-based election from
+          # block 200, the last 10 nodes below the minimum stake, the even nodes official)
           DPOS=${DPOS:-0}
           LOW=${LOW:-0}
-          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^scale-t([0-9]+)-n([0-9_]+)(-d([0-9]+))?(-l([0-9]+))?$ ]]; then
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" =~ ^scale-t([0-9]+)-n([0-9_]+)(-d([0-9]+))?(-l([0-9]+))?(-o)?$ ]]; then
             TRUSTED=${BASH_REMATCH[1]}
             LIST=${BASH_REMATCH[2]//_/,}
             DPOS=${BASH_REMATCH[4]:-0}
             LOW=${BASH_REMATCH[6]:-0}
+            OFFICIAL=$([ -n "${BASH_REMATCH[7]}" ] && echo 1 || echo 0)
           fi
+          case "$OFFICIAL" in 0|1) ;; *) echo "official must be 0 or 1, got '$OFFICIAL'"; exit 1 ;; esac
+          echo "official=$OFFICIAL" >> "$GITHUB_OUTPUT"
           if [ -n "$TRUSTED" ]; then
             case "$TRUSTED" in 5|7|9|11|13|15|17|19|21|23|25) ;; *) echo "trusted nodes must be odd, 5 to 25, got '$TRUSTED'"; exit 1 ;; esac
           fi
@@ -164,6 +172,58 @@ jobs:
           path: build/client/node
           retention-days: 7
 
+      # the official 4.2.532 node (CREDITSCOM 4a95aaaf) with only the two hooks a CI test network
+      # needs (its starter key and genesis recipient), for the even nodes
+      - name: Build the official node
+        if: needs.plan.outputs.official == '1'
+        env:
+          CCACHE_BASEDIR: ${{ github.workspace }}
+        run: |
+          git fetch -q --no-recurse-submodules origin -- 4a95aaaf602daead3ad70ecba113da92374b14f4
+          git worktree add -q node-alt FETCH_HEAD
+          git -C node-alt apply --whitespace=nowarn "$PWD/ci/official/testnet-hooks.patch"
+          git -C node-alt diff --stat
+          # the submodules are copied from this run's checkout, which must point to the same commits,
+          # except p2p: this repository runs its fork (EnzinoBB/p2p, which holds the upstream history),
+          # and the node under comparison gets the files of the p2p commit it points to (same submodules)
+          for m in cscrypto p2p third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
+                   third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb; do
+            alt=$(git -C node-alt ls-tree HEAD -- "$m" | awk '{print $3}')
+            if [ "$(git ls-tree HEAD -- "$m" | awk '{print $3}')" != "$alt" ] && [ "$m" != p2p ]; then
+              echo "the official node points $m to another commit than this run"; exit 1
+            fi
+            rm -rf "node-alt/$m"
+            cp -a "$m" "node-alt/$m"
+            if [ "$m" = p2p ] && [ "$(git -C p2p rev-parse HEAD)" != "$alt" ]; then
+              git -C p2p cat-file -e "$alt^{commit}" 2>/dev/null || git -C p2p fetch -q origin "$alt"
+              for s in $(git -C p2p ls-tree -r HEAD | awk '$2 == "commit" {print $4}'); do
+                [ "$(git -C p2p ls-tree HEAD -- "$s")" = "$(git -C p2p ls-tree "$alt" -- "$s")" ] \
+                  || { echo "p2p $alt points $s to another commit than this run"; exit 1; }
+              done
+              git -C p2p ls-files -s | awk '$1 != "160000" { sub(/^[^\t]*\t/, ""); print }' | (cd node-alt/p2p && xargs rm -f)
+              git -C p2p archive "$alt" | tar -x -C node-alt/p2p
+              echo "the official node: p2p at $alt (this run: $(git -C p2p rev-parse --short HEAD))"
+            fi
+          done
+          cmake -S node-alt -B build-alt -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_TESTS=OFF \
+            -DBoost_ROOT="${BOOST_PREFIX}" \
+            -DBoost_NO_SYSTEM_PATHS=ON \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_FLAGS="-include cstdint -include cstddef" \
+            -DWITH_HASKELL=OFF
+          cmake --build build-alt -j"$(nproc)" --target node
+
+      - name: Upload the official node
+        if: needs.plan.outputs.official == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: testnet-node-official-${{ github.sha }}
+          path: build-alt/client/node
+          retention-days: 7
+
   network:
     needs: [plan, build]
     runs-on: ubuntu-24.04
@@ -198,6 +258,13 @@ jobs:
           name: testnet-node-${{ github.sha }}
           path: build
 
+      - name: Download the official node
+        if: needs.plan.outputs.official == '1'
+        uses: actions/download-artifact@v4
+        with:
+          name: testnet-node-official-${{ github.sha }}
+          path: build-alt
+
       - name: Run private network
         timeout-minutes: 110
         env:
@@ -216,6 +283,10 @@ jobs:
           SCENARIO: ${{ inputs.scenario || '' }}
         run: |
           chmod +x build/node
+          if [ "${{ needs.plan.outputs.official }}" = 1 ]; then
+            chmod +x build-alt/node
+            export BIN_ALT="$PWD/build-alt/node" BIN_ALT_OFFICIAL=1
+          fi
           IFS=, read -r CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE <<< "$CONTRACT_LOAD"
           export CONTRACT_LOAD_SECONDS CONTRACT_WRITE_RATE CONTRACT_READ_RATE
           # NAME=value pairs only, as the robustness scenarios

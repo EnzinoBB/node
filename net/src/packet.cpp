@@ -62,6 +62,14 @@ const char* Packet::messageTypeToString(MsgTypes messageType) {
             return "HashReply";
         case NodeStopRequest:
             return "NodeStopRequest";
+        case SnapshotManifestRequest:
+            return "SnapshotManifestRequest";
+        case SnapshotManifestReply:
+            return "SnapshotManifestReply";
+        case SnapshotPieceRequest:
+            return "SnapshotPieceRequest";
+        case SnapshotPieceReply:
+            return "SnapshotPieceReply";
         case RejectedContracts:
             return "RejectedContracts";
         case RoundPackRequest:

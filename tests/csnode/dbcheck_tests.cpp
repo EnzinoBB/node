@@ -8,11 +8,7 @@
 #include <csdb/storage_backend.hpp>
 #include <csdb/storage_convert.hpp>
 
-#ifndef _WIN32
-#include <fcntl.h>
-#include <sys/file.h>
-#include <unistd.h>
-#endif
+#include <lib/system/platform.hpp>
 
 using dbcheck::Action;
 using dbcheck::Facts;
@@ -85,7 +81,6 @@ TEST(DbCheck, ResumeRefusals) {
     fs::remove_all(dir);
 }
 
-#ifndef _WIN32
 TEST(DbCheck, NoConversionWhileAnotherProcessHoldsTheDatabase) {
     namespace fs = std::filesystem;
     const auto dir = fs::temp_directory_path() / "cs_dbcheck_locked";
@@ -100,9 +95,9 @@ TEST(DbCheck, NoConversionWhileAnotherProcessHoldsTheDatabase) {
     }
     ASSERT_EQ(csdb::backend::detect(dir.string()), std::vector<std::string>{"berkeleydb"});
     // a running node: the lock taken by its own start-up check
-    const int fd = ::open((dir / ".lock").c_str(), O_RDWR | O_CREAT, 0644);
-    ASSERT_GE(fd, 0);
-    ASSERT_EQ(::flock(fd, LOCK_EX | LOCK_NB), 0);
+    const auto fd = cs::platform::openFile(dir / ".lock", cs::platform::Open::ReadWrite);
+    ASSERT_TRUE(cs::platform::valid(fd));
+    ASSERT_EQ(cs::platform::lockExclusive(fd), cs::platform::Lock::Held);
     auto listing = [&] {
         std::vector<std::pair<std::string, uintmax_t>> l;
         for (const auto& e : fs::recursive_directory_iterator(dir)) {
@@ -118,10 +113,9 @@ TEST(DbCheck, NoConversionWhileAnotherProcessHoldsTheDatabase) {
     EXPECT_FALSE(fs::exists(dir / ".convert"));
     EXPECT_FALSE(fs::exists(dir / ".convert-new"));
     EXPECT_EQ(dbcheck::check(dir.string(), "berkeleydb", false, false, 100000), -1);  // a normal start goes on
-    ::close(fd);
+    cs::platform::closeFile(fd);
     fs::remove_all(dir);
 }
-#endif
 
 TEST(DbCheck, PrunedDatabaseToBerkeleyDbStops) {
     // the converter refuses a pruned database to berkeleydb: --convert-db stops with nothing changed

@@ -68,25 +68,28 @@ struct StorageData {
     std::string dbBackend = "berkeleydb";   // runtime DB backend: berkeleydb, rocksdb or lmdb (lmdb also as block_db=lmdb)
     size_t rocksdbBlockCacheMb = 1024;      // RocksDB shared block cache (MiB); 0 = built-in default
     size_t rocksdbMemtableMb = 256;         // RocksDB write_buffer_size (MiB); 0 = built-in default
+    // backward sync: a node whose storage starts above its floor (block 0 for a full node) fetches
+    // the older blocks from its neighbours (docs/specs/2026-10-17-backward-sync-design.md)
+    bool backfill = true;                   // backfill=on|off
+    size_t backfillBatch = 100;             // blocks per request, 1..1000
+    size_t backfillRate = 1000;             // blocks requested per second, 0 = unlimited
+    size_t backfillStorePerTurn = 50;       // blocks verified and stored per processor-thread turn, 1..1000
 };
 
-// [snapshot]: snapshots served by this node and fetched from other nodes at a first start
-// (docs/snapshots.md). Read again by the config observer: every key but fetch applies while the
-// node runs.
+// [snapshot]: snapshots served by this node to its p2p neighbours and fetched from them at a first
+// start (docs/specs/2026-10-25-snapshot-p2p-design.md, section 12). Read again by the config
+// observer: every key but fetch* applies while the node runs.
 struct SnapshotData {
-    uint16_t servePort = 0;                         // 0: no snapshot service
-    std::string serveBind;                          // empty: all interfaces
-    size_t serveMaxConnections = 8;                 // more get 503
-    size_t serveRateKbps = 0;                       // upload cap of all connections; 0: unlimited
+    bool serve = false;                             // build snapshots and answer snapshot requests
+    size_t serveRateKbps = 2000;                    // upload cap of all peers together, KB/s (2000: 2 MB/s); 0: unlimited
+    size_t serveMaxPeers = 8;                       // peers served within 30 s; more get busy
     size_t snapshotBlocks = 101'000;                // blocks before the checkpoint in a snapshot
-    std::string fetch = "auto";                     // auto: restore at a start on an empty database; off: never
-    std::string sources;                            // host:port,host:port
+    std::string fetch = "auto";                     // auto: fetch at a start on an empty database; off: never
+    size_t fetchWait = 600;                         // seconds to look for agreement before the fallback
+    std::string fetchFallback = "sync";             // sync: sync from block 0 after fetch_wait; wait: keep waiting
+    size_t minSources = 2;                          // independent sources that must agree
+    std::vector<cs::PublicKey> sources;             // trusted nodes, counted once each whatever their address
     std::string sourcesFile = "snapshot_sources.txt";
-    bool probeKnownHosts = true;                    // also try every known host at the default port
-    std::string githubManifest = "https://github.com/EnzinoBB/node/releases/download/pruned-snapshot/latest.json";
-    size_t minSources = 3;                          // independent sources that must agree
-    std::string fallback = "github";                // github: GitHub alone when fewer agree; none: sync from block 0
-    size_t fetchConnections = 4;
     size_t fetchRateKbps = 0;                       // 0: unlimited
 };
 
@@ -113,6 +116,8 @@ struct ApiData {
     int executorBackgroundThreadDelay = 100;
     int executorCheckVersionDelay = 5000;
     bool executorMultiInstance = false;
+    // the token cache behind the Token* API methods (always on in RelMonitor and RelWallet builds)
+    bool tokensCache = false;
     int executorCommitMin = 1506;   // first commit with support of checking
     int executorCommitMax{-1};      // unlimited range on the right
     std::string jpsCmdLine = "jps";
@@ -358,6 +363,7 @@ public:
     void swap(Config& config);
 
     void updateKnownHosts(std::vector<cs::PeerData>&) const;
+    static std::string knownPeersJson(const std::vector<cs::PeerData>& peers);
 
     const EventsReportData& getEventsReportData() const {
         return eventsReport_;
@@ -389,6 +395,8 @@ private:
 public:
     // the [snapshot] section, defaults for missing keys, a warning and the default for a bad value
     static SnapshotData parseSnapshotData(const boost::property_tree::ptree& config);
+    // the backfill keys of a [storage] section (backfill, backfill_batch, backfill_rate)
+    static void readBackfillSettings(const boost::property_tree::ptree& storage, StorageData& data);
 private:
 
     void setLoggerSettings(const boost::property_tree::ptree& config);

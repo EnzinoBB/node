@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <csignal>
+#include <filesystem>
 #include <numeric>
 #include <random>
 #include <sstream>
@@ -13,6 +14,13 @@
 #include <csnode/caches_serialization_manager.hpp>
 #include <csnode/conveyer.hpp>
 #include <csnode/datastream.hpp>
+#include <csnode/snapshot_bootstrap.hpp>
+#include <csnode/snapshot_fetcher.hpp>
+#include <csnode/snapshot_importer.hpp>
+#include <csnode/snapshot_messages.hpp>
+#include <csnode/snapshot_provider.hpp>
+#include <csnode/snapshot_service.hpp>
+#include <fstream>
 #include <csnode/node.hpp>
 #include <csnode/blockrequest.hpp>
 #include <csnode/nodecore.hpp>
@@ -119,6 +127,23 @@ Node::Node(cs::config::Observer& observer)
     setupNextMessageBehaviour();
     setupPoolSynchronizerBehaviour();
 
+    // connected here, before the transport runs, not in init(): cs::Signal emits without a lock, and
+    // the processor thread already emits while a node in bootstrap mode fetches its snapshot. Until
+    // the chain is up they are inert (checkPing only counts; processTimer needs sendingTimer_, started
+    // in a round; packetFlushed needs the conveyer's rounds; sendRequest needs a sync) or gated
+    // (onPingChecked)
+    cs::Connector::connect(&transport_->pingReceived, &stat_, &cs::RoundStat::checkPing);
+    cs::Connector::connect(&stat_.pingChecked, this, &Node::onPingChecked);
+
+    cs::Connector::connect(&sendingTimer_.timeOut, this, &Node::processTimer);
+    cs::Connector::connect(&cs::Conveyer::instance().packetFlushed, this, &Node::onTransactionsPacketFlushed);
+    cs::Connector::connect(&poolSynchronizer_->sendRequest, this, &Node::sendBlockRequest);
+    cs::Connector::connect(&snapshotTickTimer_.timeOut, this, &Node::onSnapshotTick);
+    cs::Connector::connect(&backfillTimer_.timeOut, this, &Node::onBackfillTick);
+
+    globalPublicKey_.fill(0);
+    globalPublicKey_.at(31) = 7U;
+
     good_ = init();
 }
 
@@ -126,6 +151,15 @@ Node::~Node() {
     std::cout << "Destructor called\n";
 
     sendingTimer_.stop();
+    stopBackfillTimer();
+    bootstrapStop_ = true;
+    stopSnapshotTimer();
+    {
+        std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+        if (bootstrapThread_.joinable()) {
+            bootstrapThread_.join();
+        }
+    }
 
     delete solver_;
     delete transport_;
@@ -139,10 +173,43 @@ void Node::dumpKnownPeersToFile() {
 }
 
 bool Node::init() {
+    // a state restored from a snapshot that did not match its digest (verifyAtStart): never started on
+    if (std::error_code ec; std::filesystem::exists(cs::snapshot_bootstrap::kMismatchFile, ec)) {
+        cserror() << "SNAPSHOT: " << cs::snapshot_bootstrap::kMismatchFile << " is present: the state restored from a snapshot did not "
+                  << "match its digest; remove db/, caches/, qs/, snapshot.json and the file to start again";
+        exitCode_ = 4;
+        return false;
+    }
+    if (!initCommon()) {
+        return false;
+    }
+    // a survey of the snapshots the neighbours serve: no chain, whatever the database holds
+    if (surveySeconds_ > 0) {
+        return startSurvey(surveySeconds_);
+    }
+    // an empty database: the chain opens once a snapshot is fetched from the neighbours (or after the fallback)
+    if (startBootstrap()) {
+        return true;
+    }
+    const auto chain = initChain();
+    if (chain == ChainInit::Failed) {
+        return false;
+    }
+    if (chain == ChainInit::StopAfterInit) {
+        return true;
+    }
+    if (!verifyAtStart()) {
+        return false;
+    }
+    return initRunning();
+}
+
+bool Node::initCommon() {
     auto& initConfidants = cs::ConfigHolder::instance().config()->getInitialConfidants();
     initialConfidants_ = decltype(initialConfidants_)(initConfidants.begin(), initConfidants.end());
     if (initialConfidants_.find(solver_->getPublicKey()) != initialConfidants_.end()) {
         transport_->setPermanentNeighbours(initialConfidants_);
+        permanentAtStart_ = initialConfidants_;
     }
 
 #ifdef NODE_API
@@ -164,7 +231,10 @@ bool Node::init() {
     solver_->init(nodeIdKey_, nodeIdPrivate_, cachesSerializationManager_);
     solver_->startDefault();
     cachesSerializationManager_.bind(stat_);
+    return true;
+}
 
+Node::ChainInit Node::initChain() {
     if (cs::ConfigHolder::instance().config()->newBlockchainTop()) {
         if (!blockChain_.init(
                 cs::ConfigHolder::instance().config()->getPathToDB(),
@@ -192,7 +262,7 @@ bool Node::init() {
             } else {
                 removeFailedQuickStartData();
             }
-            return false;
+            return ChainInit::Failed;
         }
         Consensus::TimeMinStage1 = blockChain_.getTimeMinStage1();
         Consensus::stakingOn = blockChain_.getStakingOn();
@@ -212,7 +282,7 @@ bool Node::init() {
             solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
             solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
         }
-        return true;
+        return ChainInit::StopAfterInit;
     }
     if (!blockChain_.init(
             cs::ConfigHolder::instance().config()->getPathToDB(),
@@ -238,7 +308,7 @@ bool Node::init() {
         } else {
             removeFailedQuickStartData();
         }
-        return false;
+        return ChainInit::Failed;
     }
 
     if (initialConfidants_.size() < Consensus::MinTrustedNodes) {
@@ -249,7 +319,41 @@ bool Node::init() {
         solver_->smart_contracts().rehydrateContractDbCache(blockChain_);
         solver_->smart_contracts().validateRestoredStatesAgainstChain(blockChain_);
     }
+    return ChainInit::Ready;
+}
 
+bool Node::verifyAtStart() {
+    namespace sb = cs::snapshot_bootstrap;
+    sb::StartupReport report;
+    switch (sb::startupCheck(".", blockChain_.getLastSeq(), blockChain_.checkpointDigest(), report)) {
+        case sb::StartupCheck::NoManifest:
+        case sb::StartupCheck::AlreadyVerified:
+            return true;
+        case sb::StartupCheck::NotFormat2:
+            cslog() << "SNAPSHOT: snapshot.json is not a format-2 manifest (a restore by the Docker image): not compared here";
+            return true;
+        case sb::StartupCheck::Verified:
+            cslog() << "SNAPSHOT: snapshot.json verified at block " << report.seq;
+            return true;
+        case sb::StartupCheck::Skipped:
+            cswarning() << "SNAPSHOT: block " << report.seq << " of snapshot.json is behind the chain (last block "
+                        << blockChain_.getLastSeq() << "): digest not compared";
+            return true;
+        case sb::StartupCheck::Mismatch:
+            break;
+    }
+    if (!report.detail.empty()) {
+        cserror() << "SNAPSHOT DIGEST MISMATCH: " << report.detail << "; stopping (exit code 4)";
+    }
+    else {
+        cserror() << "SNAPSHOT DIGEST MISMATCH at block " << report.seq << ": snapshot " << report.snapshot << ", node " << report.node
+                  << "; stopping (exit code 4)";
+    }
+    exitCode_ = 4;
+    return false;
+}
+
+bool Node::initRunning() {
     cslog() << "Blockchain is ready, contains " << WithDelimiters(stat_.totalTransactions()) << " transactions";
     // full digest once here, before taking part in the network; incremental from now on
     logStateDigest(blockChain_.getLastSeq());
@@ -257,6 +361,29 @@ bool Node::init() {
 #ifdef NODE_API
     api_->run();
 #endif  // NODE_API
+
+    // snapshots served to p2p neighbours: [snapshot] serve, read again every 10 s (off by default)
+    {
+        std::string version;
+        std::ifstream versionFile("VERSION");
+        if (!versionFile || !std::getline(versionFile, version) || version.empty() || version.size() > 64) {
+            version = "4.2." + std::to_string(Config::getNodeVersion()) + "." + std::to_string(Config::getMinorNodeVersion());
+        }
+        for (auto& c : version) {
+            if (c < 0x20 || c >= 0x7f || c == '"' || c == '\\') {
+                c = '_';
+            }
+        }
+        snapshotProvider_ = std::make_unique<cs::SnapshotProvider>();
+        snapshotSummaryAt_ = std::chrono::steady_clock::now();
+        snapshotProvider_->onPeerCompleted = [](const cs::PublicKey& key, cs::Sequence seq, uint64_t bytes, std::chrono::seconds took) {
+            cslog() << "SNAPSHOT: served block " << seq << " to " << EncodeBase58(key.data(), key.data() + key.size()) << ", "
+                    << bytes / (1u << 20) << " MB in " << took.count() << " s";
+        };
+        snapshotService_ = std::make_unique<cs::SnapshotService>(blockChain_, *snapshotProvider_, solver_->getPrivateKey(), version);
+        cs::Connector::connect(&blockChain_.checkpointSavedEvent, snapshotService_.get(), &cs::SnapshotService::onCheckpointSaved);
+        snapshotService_->start();
+    }
 
     if (!transport_->isGood()) {
         return false;
@@ -273,13 +400,6 @@ bool Node::init() {
     cs::Conveyer::instance().setPrivateKey(solver_->getPrivateKey());
     std::cout << "Initialization finished\n";
 
-    cs::Connector::connect(&transport_->pingReceived, &stat_, &cs::RoundStat::checkPing);
-    cs::Connector::connect(&stat_.pingChecked, this, &Node::onPingChecked);
-
-    cs::Connector::connect(&sendingTimer_.timeOut, this, &Node::processTimer);
-    cs::Connector::connect(&cs::Conveyer::instance().packetFlushed, this, &Node::onTransactionsPacketFlushed);
-    cs::Connector::connect(&poolSynchronizer_->sendRequest, this, &Node::sendBlockRequest);
-
     
     if (!getBlockChain().getIncorrectBlockNumbers()->empty()) {
         tryResolveHashProblems();
@@ -287,9 +407,80 @@ bool Node::init() {
  
     initBootstrapRP(initialConfidants_);
     EventReport::sendRunningStatus(*this, Running::Status::Run);
-    globalPublicKey_.fill(0);
-    globalPublicKey_.at(31) = 7U;
+    startBackfill();
     return true;
+}
+
+void Node::startBackfill() {
+    const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+    if (!sto.backfill) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+        if (backwardSync_) {
+            return;
+        }
+    }
+    backfillStartSeq_ = blockChain_.getLastSeq();
+    cs::BackwardSync::Hooks hooks;
+    hooks.anchor = [this] {
+        const auto anchor = blockChain_.getBackfillAnchor();
+        return cs::BackwardSync::Anchor{anchor.first, anchor.prevHash};
+    };
+    hooks.store = [this](const csdb::Pool& pool) { return blockChain_.storeBackfilledBlock(pool); };
+    hooks.flush = [this] { return blockChain_.flushBackfill(); };
+    hooks.floor = [this] { return backfillFloor(); };
+    hooks.sendRequest = [this](const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
+        sendBlockRequestPacket(target, sequences);
+    };
+    cs::BackwardSync::Settings settings;
+    settings.batch = sto.backfillBatch;
+    settings.rate = sto.backfillRate;
+    settings.storePerTurn = sto.backfillStorePerTurn;
+    // created under the lock that stop() takes to read the pointer (finishBootstrap runs this on the
+    // processor thread while a stop may come from another one)
+    std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+    if (bootstrapStop_) {
+        return;
+    }
+    backwardSync_ = std::make_unique<cs::BackwardSync>(std::move(hooks), settings);
+    // ticks are queued to the processor thread, which also handles the replies; every 100 ms, as a
+    // tick stores at most storePerTurn blocks
+    backfillTimer_.start(100, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+}
+
+void Node::stopBackfillTimer() {
+    std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+    backfillTimer_.stop();
+}
+
+cs::Sequence Node::backfillFloor() const {
+    const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+    if (sto.pruneKeepBlocks == 0) {
+        return 0;
+    }
+    // the window a pruned node keeps: what pruning would leave after a checkpoint at its start,
+    // and never below what pruning has scheduled since (it would remove those blocks again)
+    const cs::Sequence window = sto.checkpointEvery + sto.pruneKeepBlocks;
+    const cs::Sequence fromStart = backfillStartSeq_ > window ? backfillStartSeq_ - window : 0;
+    return std::max(fromStart, blockChain_.pruneTarget());
+}
+
+void Node::onBackfillTick() {
+    if (!backwardSync_ || bootstrapStop_ || !good_) {
+        return;
+    }
+    cs::BackwardSync::Context ctx;
+    transport_->forEachNeighbour([&ctx](const cs::PublicKey& key, cs::Sequence lastSeq, cs::RoundNumber) {
+        ctx.peers.push_back(cs::BackwardSync::Peer{key, lastSeq});
+    });
+    ctx.forwardSyncRunning = poolSynchronizer_->isSyncroStarted();
+    ctx.bootstrapRound = isBootstrapRound_;
+    ctx.bootstrapping = bootstrapping_;
+    ctx.round = cs::Conveyer::instance().currentRoundNumber();
+    ctx.lastSeq = blockChain_.getLastSeq();
+    backwardSync_->tick(ctx);
 }
 
 void Node::initPoolSynchronizer() {
@@ -323,6 +514,313 @@ void Node::run() {
     transport_->run();
 }
 
+bool Node::startBootstrap() {
+    namespace sb = cs::snapshot_bootstrap;
+    const auto& config = *cs::ConfigHolder::instance().config();
+    // copied: the config observer may replace the configuration while the fetch runs
+    const SnapshotData cfg = config.getSnapshotSettings();
+    const std::string dbPath = config.getPathToDB();
+    const std::string backend = config.getStorageSettings().dbBackend;
+    bool removedTmp = false;
+    if (const auto skip = sb::notNeeded(cfg, ".", dbPath, backend, config.newBlockchainTop(), &removedTmp)) {
+        if (skip->why == sb::Skip::Backend) {
+            cswarning() << "SNAPSHOT: " << skip->text << ": syncing from block 0";
+        }
+        else if (skip->why == sb::Skip::Checkpoint) {
+            csinfo() << "SNAPSHOT: not fetching: " << skip->text;
+        }
+        else {
+            csdebug() << "SNAPSHOT: not fetching: " << skip->text;
+        }
+        return false;
+    }
+    if (removedTmp) {
+        cslog() << "SNAPSHOT: removed " << sb::kTmpDir << "/ left by an interrupted fetch";
+    }
+    if (!transport_->isGood()) {
+        return false;
+    }
+    bootstrapDbPath_ = dbPath;
+    bootstrapBackend_ = backend;
+    bootstrapPermanent_ = permanentAtStart_;
+
+    snapshotFetcher_ = makeFetcher(cfg, false);
+    bootstrapping_ = true;
+    bootstrapStartedAt_ = std::chrono::steady_clock::now();
+    cslog() << "SNAPSHOT: empty database: looking for snapshots on the network (fetch=" << cfg.fetch << ", min_sources=" << cfg.minSources
+            << ", fetch_wait=" << cfg.fetchWait << " s, fetch_fallback=" << cfg.fetchFallback << ")";
+    // ticks are queued to the processor thread, which starts with Node::run()
+    snapshotTickTimer_.start(500, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+    return true;
+}
+
+std::unique_ptr<cs::SnapshotFetcher> Node::makeFetcher(const SnapshotData& cfg, bool dryRun) {
+    cs::SnapshotFetcher::Hooks hooks;
+    hooks.sendManifestRequest = [this](const cs::PublicKey& to, const cs::snapshot_p2p::ManifestRequest& request) {
+        sendSnapshotMessage(to, MsgTypes::SnapshotManifestRequest, cs::snapshot_p2p::encode(request));
+    };
+    hooks.sendPieceRequest = [this](const cs::PublicKey& to, const cs::snapshot_p2p::PieceRequest& request) {
+        sendSnapshotMessage(to, MsgTypes::SnapshotPieceRequest, cs::snapshot_p2p::encode(request));
+    };
+    hooks.addNeighbours = [this](const std::set<cs::PublicKey>& keys) {
+        // permanent before the VersionRequest: the flag is read when the reply comes
+        // (neighbourhood.cpp), and a source must get past the neighbour limit (design 4.3)
+        bootstrapPermanent_.insert(keys.begin(), keys.end());
+        transport_->setPermanentNeighbours(bootstrapPermanent_);
+        transport_->addToNeighbours(keys);
+    };
+    hooks.addressOf = [this](const cs::PublicKey& key) {
+        const auto it = peerAddresses_.find(key);
+        return it == peerAddresses_.end() ? std::string() : it->second;
+    };
+    return std::make_unique<cs::SnapshotFetcher>(cfg, cs::snapshot_bootstrap::kTmpDir, std::move(hooks), dryRun);
+}
+
+bool Node::startSurvey(uint32_t seconds) {
+    if (!transport_->isGood()) {
+        return false;
+    }
+    SnapshotData cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
+    cfg.fetch = "p2p";
+    cfg.fetchWait = seconds;
+    cfg.minSources = 1'000'000;   // no agreement is ever reached: the survey ends at the time, with every group
+    bootstrapPermanent_ = permanentAtStart_;
+    snapshotFetcher_ = makeFetcher(cfg, true);
+    surveying_ = true;
+    bootstrapping_ = true;   // the gates of the bootstrap: snapshot messages and pings only, no chain
+    bootstrapStartedAt_ = std::chrono::steady_clock::now();
+    cslog() << "SNAPSHOT: survey: asking the neighbours for snapshot manifests for " << seconds << " s";
+    snapshotTickTimer_.start(500, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+    return true;
+}
+
+void Node::finishSurvey() {
+    if (!surveying_) {
+        return;
+    }
+    surveying_ = false;
+    snapshotTickTimer_.stop();
+    std::cout << snapshotFetcher_->surveyText() << std::flush;
+    cslog() << "SNAPSHOT: survey done";
+    Node::stopOnError();   // a stop as a signal makes it; the exit code stays 0
+}
+
+void Node::onSnapshotTick() {
+    // a tick queued before the hand-over or the stop, or the worker runs
+    if (!snapshotFetcher_ || bootstrapStop_ || bootstrapWorking_) {
+        return;
+    }
+    cs::SnapshotFetcher::Peers peers;
+    if (bootstrapTicks_++ % 2 == 0) {
+        // the routing table once a second
+        std::vector<cs::PeerData> known;
+        transport_->getKnownPeers(known);
+        lastKnown_.clear();
+        for (const auto& p : known) {
+            lastKnown_.emplace_back(p.key, p.capabilities);
+            if (!p.ip.empty()) {
+                peerAddresses_[p.key] = p.ip;
+            }
+        }
+    }
+    peers.known = lastKnown_;
+    transport_->forEachNeighbour([&peers](const cs::PublicKey& key, cs::Sequence, cs::RoundNumber) { peers.neighbours.insert(key); });
+    snapshotFetcher_->tick(peers);
+    switch (snapshotFetcher_->phase()) {
+        case cs::SnapshotFetcher::Phase::Done:
+            finishSurvey();   // a dry run ends in Done: only the survey runs one
+            break;
+        case cs::SnapshotFetcher::Phase::Import:
+            if (!snapshotFetcher_->result()) {
+                failBootstrap(1, "the fetch ended without a snapshot to import");
+                break;
+            }
+            startBootstrapWorker(true);
+            break;
+        case cs::SnapshotFetcher::Phase::Fallback:
+            // the fetcher logged why, and the manual way out
+            startBootstrapWorker(false);
+            break;
+        default:
+            break;
+    }
+}
+
+void Node::startBootstrapWorker(bool import) {
+    std::optional<std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>> snapshot;
+    if (import) {
+        // read here: the fetcher is not touched from the worker
+        snapshot = snapshotFetcher_->result();
+        if (!snapshot) {
+            return;
+        }
+        bootstrapSeq_ = snapshot->first.seq;
+        bootstrapSources_ = snapshot->second.size();
+    }
+    else {
+        bootstrapSeq_ = 0;
+        bootstrapSources_ = 0;
+    }
+    std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+    if (bootstrapStop_) {
+        return;
+    }
+    bootstrapWorking_ = true;
+    bootstrapThread_ = std::thread([this, snapshot = std::move(snapshot)] {
+        // the import and the chain's opening may throw (storage engines, caches): a failed bootstrap,
+        // not a terminate
+        std::string what;
+        try {
+            bootstrapWork(snapshot ? &*snapshot : nullptr);
+            return;
+        }
+        catch (const std::exception& e) {
+            what = e.what();
+        }
+        catch (...) {
+            what = "unknown exception";
+        }
+        CallsQueue::instance().insert([this, what] {
+            joinWorker();
+            failBootstrap(1, "the bootstrap failed: " + what);
+        });
+    });
+}
+
+void Node::bootstrapWork(const std::pair<cs::SnapshotManifest, std::vector<cs::SourceManifest>>* snapshot) {
+    namespace sb = cs::snapshot_bootstrap;
+    std::error_code ec;
+    if (snapshot) {
+        const auto& m = snapshot->first;
+        uint64_t bytes = 0;
+        for (const auto& f : m.files) {
+            bytes += f.size;
+        }
+        cslog() << "SNAPSHOT: importing block " << m.seq << " (" << bytes / (1u << 20) << " MB) from " << sb::kTmpDir << "/";
+        const auto started = std::chrono::steady_clock::now();
+        // a kill from here on leaves a partial database: main.cpp removes it at the next start
+        cs::SnapshotImportResult r;
+        if (!sb::writeImportMarker(bootstrapDbPath_, bootstrapBackend_, m.seq)) {
+            r.error = "cannot write " + bootstrapDbPath_ + "/" + sb::kImportingFile;
+        }
+        else {
+            blockChain_.releaseHashDbs();
+            r = cs::importSnapshot(sb::kTmpDir, m, ".", bootstrapDbPath_, bootstrapBackend_, &bootstrapStop_);
+            blockChain_.reopenHashDbs();
+            if (!r.ok) {
+                // the importer removed what it wrote
+                sb::removeImportMarker(bootstrapDbPath_);
+            }
+        }
+        if (!r.ok) {
+            if (bootstrapStop_) {
+                return;
+            }
+            cswarning() << "SNAPSHOT: the import of block " << m.seq << " failed: " << r.error
+                        << (r.fileAtFault.empty() ? "" : " (" + r.fileAtFault + ")");
+            CallsQueue::instance().insert([this, file = r.fileAtFault] {
+                joinWorker();
+                if (snapshotFetcher_ && !bootstrapStop_) {
+                    // Collect again, or the fallback after the last attempt: the next tick sees it
+                    snapshotFetcher_->onImportFailed(file);
+                }
+            });
+            return;
+        }
+        if (!sb::writeSources(".", snapshot->second)) {
+            cswarning() << "SNAPSHOT: cannot write " << sb::kSourcesFile;
+        }
+        std::filesystem::remove_all(sb::kTmpDir, ec);
+        sb::removeImportMarker(bootstrapDbPath_);
+        cslog() << "SNAPSHOT: imported block " << m.seq << " in "
+                << std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count() << " s";
+    }
+    else {
+        std::filesystem::remove_all(sb::kTmpDir, ec);
+        cslog() << "SNAPSHOT: opening an empty database: the node syncs from block 0";
+    }
+    if (bootstrapStop_) {
+        return;
+    }
+
+    // the chain opens on this thread while the processor thread drops every message: the quick start
+    // finds qs/<S>, or the empty database gets its genesis block
+    const auto chain = initChain();
+    if (bootstrapStop_ || isStopRequested()) {
+        return;
+    }
+    if (chain != ChainInit::Ready) {
+        CallsQueue::instance().insert([this] {
+            joinWorker();
+            failBootstrap(1, bootstrapSeq_ != 0 ? "the blockchain could not be opened after the import"
+                                                : "the blockchain could not be opened");
+        });
+        return;
+    }
+    if (!verifyAtStart()) {
+        CallsQueue::instance().insert([this] {
+            joinWorker();
+            failBootstrap(4, "the state restored from the snapshot does not match its digest");
+        });
+        return;
+    }
+    CallsQueue::instance().insert([this] {
+        joinWorker();
+        finishBootstrap();
+    });
+}
+
+void Node::stopSnapshotTimer() {
+    std::lock_guard<std::mutex> lock(snapshotTimerMutex_);
+    snapshotTickTimer_.stop();
+}
+
+void Node::joinWorker() {
+    {
+        std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+        // the worker queued this as its last statement: the join is immediate
+        if (bootstrapThread_.joinable()) {
+            bootstrapThread_.join();
+        }
+    }
+    bootstrapWorking_ = false;
+}
+
+void Node::finishBootstrap() {
+    if (bootstrapStop_) {
+        return;
+    }
+    if (!initRunning()) {
+        failBootstrap(1, "the node could not start after opening the blockchain");
+        return;
+    }
+    // from the next message on, the node processes everything: initRunning() is complete
+    bootstrapping_ = false;
+    stopSnapshotTimer();
+    snapshotFetcher_.reset();
+    transport_->setPermanentNeighbours(permanentAtStart_);
+    bootstrapPermanent_.clear();
+    peerAddresses_.clear();
+    lastKnown_.clear();
+    const auto took = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - bootstrapStartedAt_).count();
+    if (bootstrapSeq_ != 0) {
+        cslog() << "SNAPSHOT: started from block " << bootstrapSeq_ << " fetched from " << bootstrapSources_ << " sources in " << took << " s";
+    }
+    else {
+        cslog() << "SNAPSHOT: started with an empty database after " << took << " s without a snapshot";
+    }
+}
+
+void Node::failBootstrap(int code, const std::string& why) {
+    if (bootstrapStop_) {
+        return;
+    }
+    cserror() << "SNAPSHOT: " << why << "; stopping (exit code " << code << ")";
+    exitCode_ = code;
+    good_ = false;
+    Node::stopOnError();
+}
+
 void Node::removeFailedQuickStartData() {
     const auto loaded = cachesSerializationManager_.getLoadedVersion();
     if (blockChain_.checkpointAheadOfBlocks() && loaded.has_value()) {
@@ -342,6 +840,30 @@ void Node::stop() {
     EventReport::sendRunningStatus(*this, Running::Status::Stop);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
+    // bootstrap mode: the importer stops between two blocks, BlockChain::init at its stop request
+    // (onStopRequested); the thread is taken out under the lock and joined outside it, never by itself
+    bootstrapStop_ = true;
+    stopSnapshotTimer();
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lock(bootstrapThreadMutex_);
+        if (bootstrapThread_.joinable() && bootstrapThread_.get_id() != std::this_thread::get_id()) {
+            worker = std::move(bootstrapThread_);
+        }
+        // on the worker itself the thread stays where it is: ~Node joins it once it has returned
+    }
+    if (worker.joinable()) {
+        worker.join();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+        backfillTimer_.stop();
+        if (backwardSync_) {
+            backwardSync_->stop();
+        }
+    }
+
     if (poolSynchronizer_) {
         poolSynchronizer_->stop();
     }
@@ -354,12 +876,23 @@ void Node::stop() {
 void Node::destroy() {
     good_ = false;
 
-    api_->stop();
-    cswarning() << "[API STOPPED]";
+    if (api_) {
+        api_->stop();
+        cswarning() << "[API STOPPED]";
+    }
+
+    if (snapshotService_) {
+        snapshotService_->stop();
+        cswarning() << "[SNAPSHOT SERVICE STOPPED]";
+    }
 
     solver_->finish();
     cswarning() << "[SOLVER STOPPED]";
 
+    if (backwardSync_ && backwardSync_->stats().stored > 0) {
+        // the index and the block hashes of the blocks backfilled since the last flush, before the storage closes
+        blockChain_.flushBackfill();
+    }
     blockChain_.close();    
     cswarning() << "[BLOCKCHAIN STORAGE CLOSED]";
 
@@ -384,6 +917,11 @@ void Node::initBootstrapRP(const std::set<cs::PublicKey>& confidants) {
 void Node::onNeighbourAdded(const cs::PublicKey& neighbour, cs::Sequence lastSeq, cs::RoundNumber lastRound) {
     cslog() << "NODE: new neighbour added " << EncodeBase58(neighbour.data(), neighbour.data() + neighbour.size())
         << " last seq " << lastSeq << " last round " << lastRound;
+
+    // bootstrap mode: no round to ask for yet (initRunning() and the pings bring it after the hand-over)
+    if (bootstrapping_) {
+        return;
+    }
 
     if (lastRound > cs::Conveyer::instance().currentRoundNumber()) {
         roundPackRequest(neighbour, lastRound);
@@ -1705,12 +2243,19 @@ void Node::sendSyncroMessage(cs::Byte msg, const cs::PublicKey& target) {
 
 void Node::getSyncroMessage(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
     //csdebug() << __func__;
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
-    cs::Byte msg;
+    cs::Byte msg = cs::SyncroMessage::NoAnswer;
     cs::IDataStream stream(data, size);
     stream >> msg;
+    if (!stream.isValid() || msg > cs::SyncroMessage::Sent) {
+        return;
+    }
+    // a responder sends these only once special order 35 is active on its side, which a node that
+    // syncs from block 0 does not know yet: the backfill and the synchronizer read them whatever
+    // this node knows of that round, and pace their requests to that responder; each acts only on
+    // the requests of its own
+    if (backwardSync_) {
+        backwardSync_->onSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
+    }
     poolSynchronizer_->getSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
 }
 
@@ -1892,8 +2437,9 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
 
     bool isSyncOn = poolSynchronizer_->isSyncroStarted();
     bool isBlockchainUncertain = blockChain_.isLastBlockUncertain();
+    const bool isBackfill = backwardSync_ && backwardSync_->hasRequestTo(sender);
 
-    if (!isSyncOn && !isBlockchainUncertain/* && poolSynchronizer_->getTargetSequence() == 0ULL*/) {
+    if (!isSyncOn && !isBlockchainUncertain && !isBackfill/* && poolSynchronizer_->getTargetSequence() == 0ULL*/) {
         csdebug() << "NODE> Get block reply> Pool sync has already finished";
         return;
     }
@@ -1917,6 +2463,13 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
     // used to reach getNecessaryBlockRequest, erase end() of an empty vector and cache the peer's block.
     if (!requestedKeys_.empty() && poolsBlock.size() == 1 && poolsBlock.back().sequence() == neededSequence_) {
         getNecessaryBlockRequest(poolsBlock, sender);
+        return;
+    }
+
+    // blocks below the first stored one answer the backfill's request: forward sync and storeBlock
+    // drop them
+    if (isBackfill && poolsBlock.front().sequence() < blockChain_.getFirstStoredSequence()) {
+        backwardSync_->onBlocks(sender, std::move(poolsBlock));
         return;
     }
 
@@ -1951,6 +2504,45 @@ void Node::sendBlockReply(const cs::PoolsBlock& poolsBlock, const cs::PublicKey&
         csdetails() << "#" << it.sequence() << " signs = " << it.signatures().size();
     }
 
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-tamper-replies holds "<kind> <below>", and every block served
+    // below that sequence goes out altered, as a dishonest peer would send it (ci/testnet/run.sh
+    // BACKFILL_TAMPER): kind signature flips a byte of its first signature (outside the hash),
+    // content a digit of its timestamp (inside the hash, so its hash changes). Both still parse
+    if (std::ifstream marker("testnet-tamper-replies"); marker) {
+        std::string kind;
+        cs::Sequence below = 0;
+        if (marker >> kind >> below) {
+            cs::PoolsBlock altered;
+            for (const auto& pool : poolsBlock) {
+                cs::Bytes bytes = pool.to_binary();
+                bool changed = false;
+                if (pool.sequence() > 0 && pool.sequence() < below) {
+                    cs::Bytes needle;
+                    if (kind == "signature" && !pool.signatures().empty()) {
+                        needle.assign(pool.signatures().front().begin(), pool.signatures().front().end());
+                    }
+                    else if (kind == "content" && pool.user_field_ids().count(BlockChain::kFieldTimestamp) > 0) {
+                        const auto text = pool.user_field(BlockChain::kFieldTimestamp).value<std::string>();
+                        needle.assign(text.begin(), text.end());
+                    }
+                    const auto at = needle.empty() ? bytes.end() : std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end());
+                    if (at != bytes.end()) {
+                        auto& byte = *(at + static_cast<std::ptrdiff_t>(needle.size() - 1));
+                        byte = static_cast<cs::Byte>(kind == "content" ? (byte ^ 1) : (byte ^ 0x5a));   // a digit stays a digit
+                        changed = true;
+                    }
+                }
+                altered.push_back(changed ? csdb::Pool::from_binary(std::move(bytes)) : pool);
+            }
+            cswarning() << "NODE> TESTNET build: blocks below " << below << " served with an altered " << kind;
+            auto region = compressor_.compress(altered);
+            changeSynchroRequestsLog(target, cs::SyncroMessage::Sent);
+            sendDirect(target, MsgTypes::RequestedBlock, cs::Conveyer::instance().currentRoundNumber(), region);
+            return;
+        }
+    }
+#endif
     auto region = compressor_.compress(poolsBlock);
     csdebug() << "NODE> block package compressed";
     changeSynchroRequestsLog(target, cs::SyncroMessage::Sent);
@@ -2132,6 +2724,9 @@ void Node::onTransactionsPacketFlushed(const cs::TransactionsPacket& packet) {
 }
 
 void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
+    if (bootstrapping_) {
+        return;
+    }
     auto lastSequence = blockChain_.getLastSeq();
 
     if (lastSequence < sequence) {
@@ -2144,9 +2739,116 @@ void Node::onPingChecked(cs::Sequence sequence, const cs::PublicKey& sender) {
     }
 }
 
+void Node::sendSnapshotMessage(const cs::PublicKey& target, MsgTypes type, const cs::Bytes& payload) {
+    // the payload goes as it is: lz4 files and JSON, nothing to gain from the packet compression
+    cs::Bytes packetBytes;
+    cs::ODataStream stream(packetBytes);
+    stream << BaseFlags::Clear << type << cs::Conveyer::instance().currentRoundNumber();
+    packetBytes.insert(packetBytes.end(), payload.begin(), payload.end());
+    transport_->sendDirect(Packet(std::move(packetBytes)), target);
+}
+
+namespace {
+void logSnapshotDrop(uint64_t& dropped, const char* what, const cs::PublicKey& sender) {
+    ++dropped;
+    csdebug() << "NODE> snapshot: dropped " << what << " from " << cs::Utils::byteStreamToHex(sender.data(), sender.size())
+              << " (" << dropped << " dropped so far)";
+}
+}  // namespace
+
+void Node::snapshotNodeState(cs::SnapshotNodeState& state) const {
+    state.lastSeq = blockChain_.getLastSeq();
+    state.round = cs::Conveyer::instance().currentRoundNumber();
+    // design 5.2: not syncing, not in a bootstrap round, at most 3 blocks behind a known round
+    state.synced = state.round != 0 && (!poolSynchronizer_ || !poolSynchronizer_->isSyncroStarted()) && !isBootstrapRound_ &&
+                   state.lastSeq + 3 >= state.round;
+    state.trusted = myLevel_ != Level::Normal;
+}
+
+namespace {
+cs::SnapshotProvider::Settings snapshotProviderSettings() {
+    const auto& cfg = cs::ConfigHolder::instance().config()->getSnapshotSettings();
+    cs::SnapshotProvider::Settings settings;
+    settings.serve = cfg.serve;
+    settings.rateKBps = cfg.serveRateKbps;
+    settings.maxPeers = cfg.serveMaxPeers;
+    return settings;
+}
+}  // namespace
+
+void Node::logSnapshotSummary() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now - snapshotSummaryAt_ < std::chrono::hours(1)) {
+        return;
+    }
+    snapshotSummaryAt_ = now;
+    const auto summary = snapshotProvider_->takeSummary();
+    if (!summary.empty()) {
+        cslog() << "SNAPSHOT: in the last hour " << summary;
+    }
+}
+
+void Node::getSnapshotManifestRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::ManifestRequest request;
+    if (!cs::snapshot_p2p::decode(data, size, request)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed manifest request", sender);
+    }
+    if (!snapshotProvider_) {
+        return;
+    }
+    cs::SnapshotNodeState state;
+    snapshotNodeState(state);
+    const auto reply = snapshotProvider_->onManifestRequest(sender, snapshotProviderSettings(), state);
+    if (reply) {
+        sendSnapshotMessage(sender, MsgTypes::SnapshotManifestReply, cs::snapshot_p2p::encode(*reply));
+    }
+    logSnapshotSummary();
+}
+
+void Node::getSnapshotManifestReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::ManifestReply reply;
+    if (!cs::snapshot_p2p::decode(data, size, reply)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed manifest reply", sender);
+    }
+    if (snapshotFetcher_) {
+        return snapshotFetcher_->onManifestReply(sender, reply);
+    }
+    logSnapshotDrop(snapshotMessagesDropped_, "an unexpected manifest reply", sender);
+}
+
+void Node::getSnapshotPieceRequest(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::PieceRequest request;
+    if (!cs::snapshot_p2p::decode(data, size, request)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed piece request", sender);
+    }
+    if (!snapshotProvider_) {
+        return;
+    }
+    cs::SnapshotNodeState state;
+    snapshotNodeState(state);
+    const auto reply = snapshotProvider_->onPieceRequest(sender, request, snapshotProviderSettings(), state);
+    sendSnapshotMessage(sender, MsgTypes::SnapshotPieceReply, cs::snapshot_p2p::encode(reply));
+    logSnapshotSummary();
+}
+
+void Node::getSnapshotPieceReply(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
+    cs::snapshot_p2p::PieceReply reply;
+    if (!cs::snapshot_p2p::decode(data, size, reply)) {
+        return logSnapshotDrop(snapshotMessagesDropped_, "a malformed piece reply", sender);
+    }
+    if (snapshotFetcher_) {
+        return snapshotFetcher_->onPieceReply(sender, std::move(reply));
+    }
+    logSnapshotDrop(snapshotMessagesDropped_, "an unexpected piece reply", sender);
+}
+
 // thread safe slot (called from poolSynchronizer_)
 void Node::sendBlockRequest(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
     status_ = cs::NodeStatus::Synchronization;
+    sendBlockRequestPacket(target, sequences);
+}
+
+void Node::sendBlockRequestPacket(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
     const auto round = cs::Conveyer::instance().currentRoundNumber();
     csmeta(csdetails) << "Target out(): " << ", sequence from: " << sequences.front()
                       << ", to: " << sequences.back() << ", round: " << round;
@@ -2171,6 +2873,12 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         return MessageActions::Drop;
     }
 
+    // bootstrap mode: the two snapshot replies reach the fetcher, everything else, the snapshot
+    // requests too (nothing is served yet), is dropped without a word
+    if (bootstrapping_) {
+        return cs::snapshot_bootstrap::processWhileBootstrapping(type) ? MessageActions::Process : MessageActions::Drop;
+    }
+
     // always process this types
     switch (type) {
         case MsgTypes::FirstSmartStage:
@@ -2192,6 +2900,11 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         case MsgTypes::BlockAlarm:
         case MsgTypes::EventReport:
         case MsgTypes::SyncroMsg:
+        // answered or dropped whatever the round: a joining node is at round 0
+        case MsgTypes::SnapshotManifestRequest:
+        case MsgTypes::SnapshotManifestReply:
+        case MsgTypes::SnapshotPieceRequest:
+        case MsgTypes::SnapshotPieceReply:
             return MessageActions::Process;
 
         default:
@@ -2223,6 +2936,7 @@ Node::MessageActions Node::chooseMessageAction(const cs::RoundNumber rNum, const
         // which round would not be on the remote we may require the requested block or get block request
         return MessageActions::Process;
     }
+
 
     if (type == MsgTypes::RoundTableReply) {
         return (rNum >= round ? MessageActions::Process : MessageActions::Drop);
@@ -3990,7 +4704,8 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
 
     cslog() << s;
     csdebug() << " Node key " << KeyToBase58(nodeIdKey_);
-    cslog() << " Last written sequence = " << WithDelimiters(blockChain_.getLastSeq()) << ", neighbour nodes = " << transport_->getNeighboursCount();
+    cslog() << " Last written sequence = " << WithDelimiters(blockChain_.getLastSeq()) << ", neighbour nodes = " << transport_->getNeighboursCount()
+            << (backwardSync_ && backwardSync_->stats().started ? ", oldest stored = " + std::to_string(blockChain_.getFirstStoredSequence()) : std::string{});
 
     std::ostringstream line2;
 
@@ -4607,6 +5322,10 @@ void Node::deepBlockValidation(const csdb::Pool& block, bool* check_failed) {//c
 }
 
 void Node::onRoundTimeElapsed() {
+    // bootstrap mode: no chain to start a round from
+    if (bootstrapping_) {
+        return;
+    }
     solver_->resetGrayList();
     const cs::PublicKey& own_key = solver_->getPublicKey();
     if (initialConfidants_.find(own_key) == initialConfidants_.end()) {

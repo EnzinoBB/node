@@ -8,6 +8,8 @@
 
 #include <lib/system/logger.hpp>
 #include <csnode/configholder.hpp>
+#include <csnode/node.hpp>
+#include <csnode/snapshot_bootstrap.hpp>
 
 #include <params.hpp>
 #include "dbcheck.hpp"
@@ -63,6 +65,8 @@ int main(int argc, char* argv[]) {
         ("convert-batch", po::value<uint32_t>()->default_value(100000), "blocks per conversion batch (1 to 1000000)")
         ("export-snapshot", po::value<std::string>(), "build the snapshot of the latest periodic checkpoint into the given folder, then exit (the node must be stopped)")
         ("import-snapshot", po::value<std::string>(), "restore the snapshot of the given snapshot.json into this node's empty database, then exit")
+        ("download-snapshot", po::value<std::string>()->implicit_value(""), "download the published snapshot (or the snapshot.json at the given address) with curl, check it and restore it into this node's empty database, then exit")
+        ("survey-snapshots", po::value<uint32_t>()->implicit_value(600), "ask the neighbours for the snapshots they serve for this many seconds (default 600; 10 to 86400), print what they declared and stop; no chain is opened, whatever this folder holds")
         ("config-file", po::value<std::string>(), "path to configuration file (default: \"config.ini\")")
         ("public-key-file", po::value<std::string>(), "path to public key file (default: \"NodePublic.txt\")")
         ("private-key-file", po::value<std::string>(), "path to private key file (default: \"NodePrivate.txt\")")
@@ -191,6 +195,24 @@ int main(int argc, char* argv[]) {
     }
 
     {
+        // db/ first, so that dbcheck takes db/.lock for the whole run, a start on an empty database
+        // too (it may fetch a snapshot and import it); then what an import killed midway left, before
+        // dbcheck would take it for a database
+        std::error_code ec;
+        std::filesystem::create_directories(config.getPathToDB(), ec);
+        // the lock first: another node in this folder may be importing right now, and the cleanup
+        // below would remove its files (the lock is kept for the whole run)
+        if (dbcheck::lockedByAnotherProcess(config.getPathToDB())) {
+            std::cerr << "another node runs with " << config.getPathToDB() << " (db/.lock is held): not starting" << std::endl;
+            return 3;
+        }
+        std::string removed;
+        if (cs::snapshot_bootstrap::cleanupInterruptedImport(".", config.getPathToDB(), removed)) {
+            std::cout << "SNAPSHOT: removed the files of an interrupted import (" << removed << ")" << std::endl;
+        }
+    }
+
+    {
         const bool convertOnly = vm.count("convert-only") > 0;
         const int rc = dbcheck::check(config.getPathToDB(), config.getStorageSettings().dbBackend,
                                       convertOnly || vm.count("convert-db") > 0, convertOnly,
@@ -200,9 +222,24 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // The snapshot commands end before Peer sets the logger up. Without it Boost.Log prints every
+    // record of the import, hundreds of thousands of debug and trace lines, to the console: the
+    // configured levels apply to them as to a running node.
+    const bool snapshotCommand = vm.count("download-snapshot") > 0 || vm.count("import-snapshot") > 0 || vm.count("export-snapshot") > 0;
+    if (snapshotCommand) {
+        logger::initialize(config.getLoggerSettings());
+    }
+    auto finishCommand = [](int code) {
+        logger::cleanup();
+        return code;
+    };
+
     // no keys needed: the import writes only the database, the caches and the checkpoint
+    if (vm.count("download-snapshot") > 0) {
+        return finishCommand(snapshot_export::runDownload(config, vm["download-snapshot"].as<std::string>()));
+    }
     if (vm.count("import-snapshot") > 0) {
-        return snapshot_export::runImport(config, vm["import-snapshot"].as<std::string>());
+        return finishCommand(snapshot_export::runImport(config, vm["import-snapshot"].as<std::string>()));
     }
 
     if (vm.count(cmdline::argSeed) == 0) {
@@ -217,7 +254,7 @@ int main(int argc, char* argv[]) {
     }
 
     if (vm.count("export-snapshot") > 0) {
-        return snapshot_export::run(config, vm["export-snapshot"].as<std::string>());
+        return finishCommand(snapshot_export::run(config, vm["export-snapshot"].as<std::string>()));
     }
 
     if (vm.count(cmdline::argDumpKeys) > 0) {
@@ -229,7 +266,21 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    if (vm.count("survey-snapshots") > 0) {
+        const auto seconds = vm["survey-snapshots"].as<uint32_t>();
+        if (seconds < 10 || seconds > 86400) {
+            std::cerr << "--survey-snapshots takes 10 to 86400 seconds" << std::endl;
+            return EXIT_FAILURE;
+        }
+        Node::setSurvey(seconds);
+    }
+
     cs::Peer peer(kServiceName, config, vm);
     int result = peer.executeProtocol();
+    // the node's own code wins (a refused start returns -1 from executeProtocol): 4 for a state
+    // restored from a snapshot that does not match its digest
+    if (Node::exitCode() != 0) {
+        result = Node::exitCode();
+    }
     return result;
 }

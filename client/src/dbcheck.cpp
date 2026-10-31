@@ -6,21 +6,21 @@
 #include <iostream>
 #ifdef CREDITS_TESTNET
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #endif
 
 #include <csdb/storage_backend.hpp>
 #include <csdb/storage_convert.hpp>
+#include <lib/system/platform.hpp>
+
+#include <map>
 
 #ifdef _WIN32
 #include <io.h>
 #define CS_ISATTY(fd) _isatty(fd)
 #define CS_STDIN_FD 0
 #else
-#include <cerrno>
-#include <fcntl.h>
-#include <map>
-#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #define CS_ISATTY(fd) isatty(fd)
@@ -32,6 +32,16 @@ namespace dbcheck {
 namespace {
 
 std::atomic<bool> stopFlag{false};
+
+#ifdef CREDITS_TESTNET
+// the kill of the conversion test (testnet-convert-kill below); Windows has no SIGKILL, an exit
+// without any cleanup stands for it there
+#ifdef _WIN32
+[[noreturn]] void testnetKill() { std::_Exit(137); }
+#else
+void testnetKill() { std::raise(SIGKILL); }
+#endif
+#endif
 
 extern "C" void onStopSignal(int) {
     stopFlag = true;
@@ -51,12 +61,8 @@ enum class Lock { Held, Busy, None };
 // a second process sees the database in use for the node's whole run. A missing db/ is left
 // untouched (first start), and then nothing is locked.
 Lock lockDatabase(const std::string& dbPath) {
-#ifdef _WIN32
-    (void)dbPath;
-    return Lock::None;
-#else
     namespace fs = std::filesystem;
-    static std::map<std::string, int> held;
+    static std::map<std::string, cs::platform::Handle> held;
     std::error_code ec;
     if (!fs::is_directory(dbPath, ec)) {
         return Lock::None;
@@ -64,26 +70,30 @@ Lock lockDatabase(const std::string& dbPath) {
     const std::string path = (fs::path(dbPath) / ".lock").string();
     auto it = held.find(path);
     if (it != held.end()) {
+#ifdef _WIN32
+        // a locked .lock cannot be removed, so the folder was not replaced under it
+        return Lock::Held;   // checked again in this process
+#else
         struct stat mine {}, now {};
         if (::fstat(it->second, &mine) == 0 && ::stat(path.c_str(), &now) == 0 && mine.st_dev == now.st_dev && mine.st_ino == now.st_ino) {
             return Lock::Held;   // checked again in this process
         }
-        ::close(it->second);     // the folder was replaced (tests reuse folder names)
+        cs::platform::closeFile(it->second);   // the folder was replaced (tests reuse folder names)
         held.erase(it);
+#endif
     }
-    // O_CLOEXEC: the contract executor started by the node must not keep the lock after the node exits
-    const int fd = ::open(path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
+    // not inherited: the contract executor started by the node must not keep the lock after the node exits
+    const auto fd = cs::platform::openFile(path, cs::platform::Open::ReadWrite);
+    if (!cs::platform::valid(fd)) {
         return Lock::None;
     }
-    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
-        const int err = errno;
-        ::close(fd);
-        return err == EWOULDBLOCK ? Lock::Busy : Lock::None;
+    const auto lock = cs::platform::lockExclusive(fd);
+    if (lock != cs::platform::Lock::Held) {
+        cs::platform::closeFile(fd);
+        return lock == cs::platform::Lock::Busy ? Lock::Busy : Lock::None;
     }
     held[path] = fd;
     return Lock::Held;
-#endif
 }
 
 bool inUse(Lock lock, const std::string& dbPath) {
@@ -144,12 +154,12 @@ int convertNow(const std::string& dbPath, const std::string& from, const std::st
         std::remove("testnet-convert-kill");
         if (at == "checked") {
             opt.hook = [](csdb::convert::Step s, uint32_t, uint32_t) {
-                if (s == csdb::convert::Step::Checked) std::raise(SIGKILL);
+                if (s == csdb::convert::Step::Checked) testnetKill();
             };
         }
         else if (!at.empty() && at.find_first_not_of("0123456789") == std::string::npos && std::stoul(at) > 0) {
             opt.hook = [left = std::stoul(at)](csdb::convert::Step s, uint32_t, uint32_t) mutable {
-                if (s == csdb::convert::Step::Removed && --left == 0) std::raise(SIGKILL);
+                if (s == csdb::convert::Step::Removed && --left == 0) testnetKill();
             };
         }
     }
