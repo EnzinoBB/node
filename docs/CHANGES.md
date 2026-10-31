@@ -59,6 +59,7 @@ lines under the new release.
 | #136 | csnode: forward sync reads the responders' SyncroMsg before it has applied special order 35 itself, and does not ask a responder with an anti-duplicate log for a range that responder would refuse as a duplicate; it asks another neighbour instead (a node syncing from block 0 among mostly pruned peers could otherwise wait for ever for its first blocks) |
 | #138 | ci: macOS jobs run on `macos-15` (GitHub retires the macOS 14 images on 2026-11-02 and fails them during brownouts until then), with binaries built for macOS 14 and later, and time out after their measured duration plus a margin (build 60, platform sync 40, private network 60 minutes instead of 240, 90, 150) |
 | #139 | ci: the backfill crash steps (kill, power cut...) wait until the node stored a block since its last start, so that every restart resumes lower; in `fund.py` a transfer rejected by consensus right after an earlier transfer of the same sender ended with an unknown outcome (a partition longer than the 60 s wait) counts with the pending answers, not as a fault (net-partition) |
+| #144 | csnode: stream reads bounded by the data: `IDataStream` checks a length without overflow (a length near 2^64 wrapped the check and stopped the node), a vector reserves no more than the bytes left and stops at the first missing element, a smart stage-one message whose fee count exceeds its size or that lacks its hash is refused, the API checks a string field's length before reading it |
 
 ## community.14 — 2026-10-27
 
