@@ -6,7 +6,7 @@ consensus with them. This page lists what it adds; each item links the pull requ
 The full list of changes is in [CHANGES.md](CHANGES.md), the operational details in
 [differences.md](differences.md).
 
-Everything listed here is in release 4.2.532-community.14 or earlier.
+Everything listed here is in release 4.2.532-community.15 or earlier.
 
 ## Storage
 
@@ -29,6 +29,12 @@ Everything listed here is in release 4.2.532-community.14 or earlier.
   rebuilt from the stored blocks instead of re-reading the chain from block 0.
   [#53](https://github.com/EnzinoBB/node/pull/53), [#54](https://github.com/EnzinoBB/node/pull/54),
   [#56](https://github.com/EnzinoBB/node/pull/56)
+- **A full node in minutes, the history in the background.** A full node on lmdb or rocksdb starts
+  from the snapshot and then fetches the older blocks from its neighbours down to block 0, checking
+  each against the hash chain and its signatures; the API serves every block and history as it
+  arrives. Consensus comes first: the backfill gets a bounded share of the processor thread, less
+  while the node is a confidant. A pruned node switched to full fetches what it pruned the same way.
+  [#122](https://github.com/EnzinoBB/node/pull/122), [#123](https://github.com/EnzinoBB/node/pull/123), [#125](https://github.com/EnzinoBB/node/pull/125), [#129](https://github.com/EnzinoBB/node/pull/129), [#130](https://github.com/EnzinoBB/node/pull/130), [#133](https://github.com/EnzinoBB/node/pull/133), [#140](https://github.com/EnzinoBB/node/pull/140), [#145](https://github.com/EnzinoBB/node/pull/145), [#146](https://github.com/EnzinoBB/node/pull/146), [#147](https://github.com/EnzinoBB/node/pull/147)
 
 ## Starting a node in minutes: snapshots
 
@@ -89,6 +95,14 @@ Everything listed here is in release 4.2.532-community.14 or earlier.
   work on nodes that quick-started or pruned the blocks involved.
   [#20](https://github.com/EnzinoBB/node/pull/20), [#46](https://github.com/EnzinoBB/node/pull/46),
   [#74](https://github.com/EnzinoBB/node/pull/74)
+- **Tokens in the API.** A token cache that follows every token standard (`[api] tokens_cache=true`),
+  contract results after a quick start, and contract calls that no method matches refused before
+  their fee is paid; a token template and a Python client in `samples/`.
+  [#126](https://github.com/EnzinoBB/node/pull/126), [#128](https://github.com/EnzinoBB/node/pull/128), [#132](https://github.com/EnzinoBB/node/pull/132), [#134](https://github.com/EnzinoBB/node/pull/134), [#135](https://github.com/EnzinoBB/node/pull/135)
+- **Executor community-2** (build 1555): tokens of the v2 standard are reported as tokens, and
+  contract code that runs past its time limit, or whose caller has gone, is stopped. Contract results
+  are the same as with the official build 1518.
+  [#137](https://github.com/EnzinoBB/node/pull/137)
 
 ## Consensus robustness
 
@@ -102,6 +116,10 @@ Everything listed here is in release 4.2.532-community.14 or earlier.
   delegations are restored and reverted correctly.
   [#8](https://github.com/EnzinoBB/node/pull/8), [#9](https://github.com/EnzinoBB/node/pull/9),
   [#11](https://github.com/EnzinoBB/node/pull/11), [#12](https://github.com/EnzinoBB/node/pull/12)
+- **Forward sync under special order 35.** A syncing node no longer asks a neighbour for blocks that
+  neighbour would refuse as a duplicate, and asks another one instead: a node syncing among mostly
+  pruned peers could otherwise wait for ever for its first blocks.
+  [#136](https://github.com/EnzinoBB/node/pull/136)
 
 ## Crash and safety fixes
 
@@ -112,6 +130,11 @@ the storage engines (a full disk, a failed write) that hung or stopped the node.
 [#7](https://github.com/EnzinoBB/node/pull/7), [#47](https://github.com/EnzinoBB/node/pull/47),
 [#57](https://github.com/EnzinoBB/node/pull/57), [#59](https://github.com/EnzinoBB/node/pull/59),
 [#63](https://github.com/EnzinoBB/node/pull/63)
+
+Since community.15: packet parsers bounded by the bytes received, a network stop request that no
+longer stops the node, a utility message obeyed only with the blockchain key's signature, size
+limits in the p2p layer (a fork of the p2p library), and two races in the cache databases.
+[#121](https://github.com/EnzinoBB/node/pull/121), [#124](https://github.com/EnzinoBB/node/pull/124), [#142](https://github.com/EnzinoBB/node/pull/142), [#143](https://github.com/EnzinoBB/node/pull/143), [#144](https://github.com/EnzinoBB/node/pull/144)
 
 ## Packages and Docker
 
@@ -132,6 +155,9 @@ the storage engines (a full disk, a failed write) that hung or stopped the node.
   [#109](https://github.com/EnzinoBB/node/pull/109)
 - **Drop-in upgrade.** An official node's folder upgrades to the community node and back.
   [#43](https://github.com/EnzinoBB/node/pull/43), [#44](https://github.com/EnzinoBB/node/pull/44)
+- **Guided set-up** in every package (`setup.sh`, `setup.bat`): pruned or full, database, how the
+  first start gets the chain, snapshot sharing and the contract executor.
+  [#131](https://github.com/EnzinoBB/node/pull/131)
 
 ## Tested on every change
 

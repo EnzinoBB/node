@@ -135,7 +135,7 @@ Start: cd csnode && $start                                  (full storage, as th
 A pruned node can start from the published snapshot: $start --config-file config.pruned.ini --download-snapshot
 A full node can too, on lmdb or rocksdb: set db_backend=lmdb (or rocksdb) in the [storage] section
   of config.ini, run $start --download-snapshot, then start it. It fetches the older blocks from its
-  neighbours in the background down to block 0 (backward sync: about two days and 400 GB with lmdb,
+  neighbours in the background down to block 0 (backward sync: about five days and 400 GB with lmdb,
   130 GB with rocksdb, on mainnet; [storage] backfill=off keeps only the snapshot's blocks). A
   pruned node switched to full (prune_keep_blocks=0) fetches the blocks it pruned the same way.
   https://github.com/EnzinoBB/node/blob/master/docs/storage.md#a-full-node-from-a-snapshot
