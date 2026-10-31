@@ -32,6 +32,7 @@ BackwardSync::BackwardSync(Hooks hooks, Settings settings)
     }
     settings_.batch = std::clamp<size_t>(settings_.batch, 1, 1000);
     settings_.storePerTurn = std::clamp<size_t>(settings_.storePerTurn, 1, 1000);
+    settings_.turnBudgetMs = std::min<uint64_t>(settings_.turnBudgetMs, 1000);
 }
 
 uint64_t BackwardSync::now() const {
@@ -73,6 +74,8 @@ BackwardSync::Stats BackwardSync::stats() const {
     s.buffered = bufferedCount_;
     s.busyUs = busyUs_;
     s.longestTurnUs = longestTurnUs_;
+    s.slowTurns = slowTurns_;
+    s.longestFlushUs = longestFlushUs_;
     s.started = started_;
     s.done = done_;
     return s;
@@ -167,7 +170,9 @@ void BackwardSync::tick(const Context& ctx) {
         log("BACKFILL: stored down to #" + std::to_string(next_ + 1) + ", " + std::to_string(static_cast<size_t>(rate)) +
             " blocks/s over the last " + std::to_string(stored_ - progressStored_) + ", " + std::to_string(inFlight_.size()) +
             " peers in use, about " + std::to_string(static_cast<size_t>(hoursLeft + 0.5)) + " h left, " +
-            std::to_string(busyUs_ / 1000) + " ms of processor thread so far (longest turn " + std::to_string(longestTurnUs_ / 1000) + " ms)");
+            std::to_string(busyUs_ / 1000) + " ms of processor thread so far (longest turn " + std::to_string(longestTurnUs_ / 1000) + " ms, " +
+            std::to_string(slowTurns_.load()) + " over " + std::to_string(kSlowTurnMs) + " ms; longest flush " +
+            std::to_string(longestFlushUs_ / 1000) + " ms)");
         progressAt_ = t;
         progressStored_ = stored_;
     }
@@ -482,19 +487,37 @@ void BackwardSync::drain() {
             return;
         }
     }
-    const auto startedAt = std::chrono::steady_clock::now();
+    using Clock = std::chrono::steady_clock;
+    const auto usSince = [](Clock::time_point from) {
+        return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - from).count());
+    };
+    const auto startedAt = Clock::now();
+    const uint64_t startedMs = now();   // the budget and the slow-turn decision: the hooks' clock (tests drive it)
     size_t storedNow = 0;
+    size_t transactions = 0;
+    uint64_t verifyUs = 0;
+    uint64_t storeUs = 0;
+    uint64_t confirmUs = 0;
     while (!done_ && storedNow < settings_.storePerTurn) {
+        if (storedNow > 0 && settings_.turnBudgetMs > 0 && now() >= startedMs + settings_.turnBudgetMs) {
+            break;
+        }
         const auto it = buffer_.find(next_);
         if (it == buffer_.end()) {
             break;
         }
+        auto stepAt = Clock::now();
         const std::string why = verify(it->second.pool);
+        verifyUs += usSince(stepAt);
         if (!why.empty()) {
-            reject(it->second.peer, next_, why);
+            const PublicKey peer = it->second.peer;   // reject() erases the node this iterator points to
+            reject(peer, next_, why);
             continue;
         }
-        if (!hooks_.store || !hooks_.store(it->second.pool)) {
+        stepAt = Clock::now();
+        const bool stored = hooks_.store && hooks_.store(it->second.pool);
+        storeUs += usSince(stepAt);
+        if (!stored) {
             if (!storeFailing_) {
                 log("BACKFILL: block " + std::to_string(next_) + " could not be stored: trying again in 60 s", true);
             }
@@ -508,6 +531,7 @@ void BackwardSync::drain() {
         }
         // the round confirmations of the block stored before are signed by the confidants of this
         // one: inside the hash, so a mismatch is the chain's, not the peer's. Counted, never refused
+        stepAt = Clock::now();
         if (lastStored_) {
             std::string bad;
             if (!BlockVerifier::verifyConfirmations(*lastStored_, it->second.pool.confidants(), bad)) {
@@ -519,6 +543,8 @@ void BackwardSync::drain() {
                 }
             }
         }
+        confirmUs += usSince(stepAt);
+        transactions += it->second.pool.transactions_count();
         lastStored_ = std::move(it->second.pool);
         expectedHash_ = lastStored_->previous_hash();
         buffer_.erase(it);
@@ -533,11 +559,19 @@ void BackwardSync::drain() {
         --next_;
     }
     bufferedCount_ = buffer_.size();
-    const auto us = static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - startedAt).count());
+    const uint64_t us = usSince(startedAt);
     busyUs_ += us;
     if (us > longestTurnUs_) {
         longestTurnUs_ = us;
+    }
+    if (now() >= startedMs + kSlowTurnMs) {
+        const size_t n = ++slowTurns_;
+        if (n <= 20 || n % 100 == 0) {
+            log("BACKFILL: slow turn of " + std::to_string(now() - startedMs) + " ms (" + std::to_string(n) + " so far): " +
+                std::to_string(storedNow) + " blocks down to #" + std::to_string(first_.load()) + ", " +
+                std::to_string(transactions) + " transactions; verify " + std::to_string(verifyUs / 1000) + " ms, store " +
+                std::to_string(storeUs / 1000) + " ms, confirmations " + std::to_string(confirmUs / 1000) + " ms");
+        }
     }
     flushIfDue(false);
 }
@@ -550,10 +584,18 @@ void BackwardSync::flushIfDue(bool force) {
     if (!force && storedSinceFlush_ < kFlushBlocks && t < lastFlushAt_ + kFlushMs) {
         return;
     }
+    // on the processor thread too, outside the turn budget: timed, so that a slow disk shows
+    const auto flushAt = std::chrono::steady_clock::now();
     const bool ok = !hooks_.flush || hooks_.flush();
+    const auto us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - flushAt).count());
+    busyUs_ += us;
+    if (us > longestFlushUs_) {
+        longestFlushUs_ = us;
+    }
     lastFlushAt_ = t;
     log("BACKFILL: flushed, " + std::to_string(storedSinceFlush_) + " blocks since the last flush, down to #" +
-            std::to_string(first_.load()) + (ok ? "" : ": the storage flush failed"),
+            std::to_string(first_.load()) + " in " + std::to_string(us / 1000) + " ms" + (ok ? "" : ": the storage flush failed"),
         !ok);
     storedSinceFlush_ = 0;
 }
