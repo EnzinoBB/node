@@ -39,7 +39,8 @@ official node.
 | `backfill_batch` | `100` | Blocks per request, `1` to `1000`. |
 | `backfill_rate` | `1000` | Blocks requested per second over all peers (`0` = no limit). |
 | `backfill_store_per_turn` | `50` | Blocks checked and stored per turn of the thread that also runs consensus, `1` to `1000`; the rest waits for the next turn, 100 ms later. A turn over 200 ms is logged (`BACKFILL: slow turn of ...`) with the time spent verifying, storing and checking confirmations. |
-| `backfill_turn_budget_ms` | `50` | A turn also ends once it has taken this long (after at least one block), `0` (no limit) to `1000`. A shorter turn leaves more of the thread to consensus; on mainnet 50 ms gives about 400 blocks/s. |
+| `backfill_turn_budget_ms` | `50` | While the node is a confidant, a turn also ends once it has taken this long (after at least one block), `0` (no limit) to `1000`: consensus keeps most of the thread; on mainnet about 250 blocks/s. |
+| `backfill_idle_turn_budget_ms` | `90` | The same while the node is not a confidant, with little consensus work: on mainnet about 450 blocks/s. |
 
 ### Choosing a backend
 

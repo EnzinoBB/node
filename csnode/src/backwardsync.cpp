@@ -33,6 +33,7 @@ BackwardSync::BackwardSync(Hooks hooks, Settings settings)
     settings_.batch = std::clamp<size_t>(settings_.batch, 1, 1000);
     settings_.storePerTurn = std::clamp<size_t>(settings_.storePerTurn, 1, 1000);
     settings_.turnBudgetMs = std::min<uint64_t>(settings_.turnBudgetMs, 1000);
+    settings_.idleTurnBudgetMs = std::min<uint64_t>(settings_.idleTurnBudgetMs, 1000);
 }
 
 uint64_t BackwardSync::now() const {
@@ -114,6 +115,7 @@ void BackwardSync::tick(const Context& ctx) {
     if (stopped_ || done_) {
         return;
     }
+    trusted_ = ctx.trusted;
     if (inFlight_.empty() && buffer_.empty() && !refreshAnchor(ctx)) {
         return;
     }
@@ -503,13 +505,14 @@ void BackwardSync::drain() {
     };
     const auto startedAt = Clock::now();
     const uint64_t startedMs = now();   // the budget and the slow-turn decision: the hooks' clock (tests drive it)
+    const uint64_t budgetMs = trusted_ ? settings_.turnBudgetMs : settings_.idleTurnBudgetMs;
     size_t storedNow = 0;
     size_t transactions = 0;
     uint64_t verifyUs = 0;
     uint64_t storeUs = 0;
     uint64_t confirmUs = 0;
     while (!done_ && storedNow < settings_.storePerTurn) {
-        if (storedNow > 0 && settings_.turnBudgetMs > 0 && now() >= startedMs + settings_.turnBudgetMs) {
+        if (storedNow > 0 && budgetMs > 0 && now() >= startedMs + budgetMs) {
             break;
         }
         const auto it = buffer_.find(next_);
