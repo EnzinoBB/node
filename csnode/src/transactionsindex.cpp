@@ -21,6 +21,8 @@ constexpr const char* kLastIndexedKey   = "__last_indexed__";
 constexpr const char* kIncompleteKey    = "__incomplete__";
 constexpr const char* kCompleteKey      = "__walked_complete__";
 constexpr const char* kSchemaVersionKey = "__schema_version__";
+// backward sync: the lowest block indexed downwards
+constexpr const char* kBackfillFloorKey = "__backfill_floor__";
 constexpr uint32_t    kCurrentSchema    = 2;  // bumped when trimToFloor was added
 constexpr size_t      kTrimBatchSize    = 50000;
 constexpr size_t      kTrxIndexKeySize  = 40;  // 32 (pubkey) + 8 (seq)
@@ -31,6 +33,16 @@ auto getTrxIndexKey(const cs::PublicKey& _pubKey, cs::Sequence _seq) {
 
     auto ptr = reinterpret_cast<uint8_t*>(&_seq);
     std::copy(ptr, ptr + sizeof(_seq), ret.begin() + _pubKey.size());
+    return ret;
+}
+
+// backward sync: the lowest indexed block of a wallet, 't' + public key (33 bytes, never the length
+// of an entry, so the scans that look at entries only skip it)
+cs::Bytes getTailKey(const cs::PublicKey& _pubKey) {
+    cs::Bytes ret;
+    ret.reserve(1 + _pubKey.size());
+    ret.push_back('t');
+    ret.insert(ret.end(), _pubKey.begin(), _pubKey.end());
     return ret;
 }
 } // namespace
@@ -327,6 +339,9 @@ void TransactionsIndex::trimToFloor(Sequence floor) {
     size_t deleted = 0;
     size_t rewrittenAtFloor = 0;
 
+    // transactions on env() directly, outside cs::Lmdb's lock against a growth of the map: this
+    // runs only at start-up (--set-bc-top, or an index ahead of the chain), before any other thread
+    // reads the index
     // Phase 1: collect keys to delete (curr_seq > floor) and keys at floor with prev_seq > floor.
     std::vector<std::vector<uint8_t>> toDelete;
     std::vector<std::vector<uint8_t>> toRewrite;
@@ -475,6 +490,146 @@ void TransactionsIndex::removeLastTransBlock(const PublicKey& _pubKey, cs::Seque
     db_->remove(getTrxIndexKey(_pubKey, _curr));
 }
 
+std::optional<Sequence> TransactionsIndex::prevTransBlockOf(const PublicKey& _pubKey, Sequence _seq) const {
+    if (!db_->isOpen()) {
+        return std::nullopt;
+    }
+    // values are decimal strings, never empty: an empty one is a missing key, in one read
+    const auto value = db_->value<std::string>(getTrxIndexKey(_pubKey, _seq));
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    return Lmdb::convert<Sequence>(value.data(), value.size());
+}
+
+void TransactionsIndex::setChainView(ChainView view) {
+    chainView_ = std::move(view);
+}
+
+Sequence TransactionsIndex::lastTransactionBlock(const csdb::Address& key) const {
+    if (chainView_.lastTransactionBlock) {
+        return chainView_.lastTransactionBlock(key);
+    }
+    return bc_.getLastTransaction(key).pool_seq();
+}
+
+Sequence TransactionsIndex::firstStored() const {
+    return chainView_.firstStored ? chainView_.firstStored() : bc_.getFirstStoredSequence();
+}
+
+Sequence TransactionsIndex::backfillFloor() const {
+    if (!db_->isOpen() || !db_->isKeyExists(kBackfillFloorKey)) {
+        return kWrongSequence;
+    }
+    return db_->value<Sequence>(kBackfillFloorKey);
+}
+
+// The tail record names the wallet's lowest indexed block if that entry still exists (pruning
+// removes entries and leaves records behind). Otherwise the wallet's chain is walked down from its
+// last transaction, as TransactionsIterator does but without loading blocks, to the entry whose
+// previous block is none or not stored.
+Sequence TransactionsIndex::tailOf(const csdb::Address& key) {
+    const auto record = db_->value<std::string>(getTailKey(key.public_key()));
+    if (!record.empty()) {
+        const Sequence tail = Lmdb::convert<Sequence>(record.data(), record.size());
+        if (prevTransBlockOf(key.public_key(), tail)) {
+            return tail;
+        }
+    }
+    return walkToTail(key);
+}
+
+Sequence TransactionsIndex::walkToTail(const csdb::Address& key) {
+    const auto& pubKey = key.public_key();
+    Sequence cur = lastTransactionBlock(key);
+    if (cur == kWrongSequence) {
+        return kWrongSequence;
+    }
+    auto prev = prevTransBlockOf(pubKey, cur);
+    if (!prev) {
+        // no entry for the last transaction: all of the wallet's blocks lie below the stored ones
+        return kWrongSequence;
+    }
+    const Sequence first = firstStored();
+    size_t steps = 0;
+    // prev < cur: an entry pointing up or to itself ends the walk instead of looping
+    while (*prev != kWrongSequence && *prev < cur && *prev >= first) {
+        const auto next = prevTransBlockOf(pubKey, *prev);
+        if (!next) {
+            break;
+        }
+        cur = *prev;
+        prev = next;
+        if (++steps % 100'000 == 0) {
+            // a busy wallet after an index rebuild: once, one read per stored block of it
+            cslog() << "trxIndex: backfill: walking the history of "
+                    << EncodeBase58(pubKey.data(), pubKey.data() + pubKey.size()) << ", " << steps << " blocks so far";
+        }
+    }
+    csdebug() << "trxIndex: backfill: tail of " << EncodeBase58(pubKey.data(), pubKey.data() + pubKey.size())
+              << " is block " << cur << ", " << steps << " steps";
+    return cur;
+}
+
+void TransactionsIndex::indexBackfilledBlock(const csdb::Pool& _pool) {
+    if (!db_->isOpen()) {
+        return;
+    }
+    const Sequence seq = _pool.sequence();
+    std::set<csdb::Address> indexedAddrs;
+
+    auto lbd = [&indexedAddrs, seq, this](const csdb::Address& _addr) {
+        auto key = bc_.getAddressByType(_addr, BlockChain::AddressType::PublicKey);
+        if (!indexedAddrs.insert(key).second) {
+            return;
+        }
+        const auto& pubKey = key.public_key();
+        const Sequence tail = tailOf(key);
+        // a tail below this block: the block was indexed before (a crash), and the blocks below it too
+        const bool below = tail == kWrongSequence || tail > seq;
+        if (tail != kWrongSequence && tail > seq && prevTransBlockOf(pubKey, tail) != seq) {
+            // the tail names a pruned block or none: it is this one (seq < tail, never itself)
+            setPrevTransBlock(pubKey, tail, seq);
+        }
+        if (!prevTransBlockOf(pubKey, seq)) {
+            // the previous block is not known yet: the next block of this wallet below sets it. An
+            // entry left by a crash keeps its value
+            setPrevTransBlock(pubKey, seq, kWrongSequence);
+        }
+        if (below) {
+            db_->insert(getTailKey(pubKey), seq);
+        }
+    };
+
+    for (const auto& tr : _pool.transactions()) {
+        lbd(tr.source());
+        lbd(tr.target());
+    }
+    db_->insert(kBackfillFloorKey, seq);
+}
+
+size_t TransactionsIndex::repairBackfillFloor(Sequence first, const std::function<csdb::Pool(Sequence)>& load) {
+    const Sequence floor = backfillFloor();
+    if (!db_->isOpen() || floor == kWrongSequence || first >= floor) {
+        return 0;
+    }
+    size_t indexed = 0;
+    size_t missing = 0;
+    for (Sequence seq = floor; seq-- > first;) {
+        const csdb::Pool pool = load(seq);
+        if (!pool.is_valid()) {
+            ++missing;
+            continue;
+        }
+        indexBackfilledBlock(pool);
+        ++indexed;
+    }
+    db_->flush();
+    cslog() << "trxIndex: re-indexed " << indexed << " backfilled blocks " << floor - 1 << ".." << first
+            << " left unindexed by a crash" << (missing > 0 ? ", " + std::to_string(missing) + " could not be read" : std::string{});
+    return indexed;
+}
+
 Sequence TransactionsIndex::getPrevTransBlock(const csdb::Address& _addr, Sequence _prev) const {
     auto key = getTrxIndexKey(bc_.getAddressByType(_addr, BlockChain::AddressType::PublicKey).public_key(), _prev);
     if (db_->size() == 0 || !db_->isKeyExists(key)) {
@@ -507,6 +662,8 @@ bool TransactionsIndex::hasIndexEntries() const {
     if (!db_->isOpen()) {
         return false;
     }
+    // a transaction on env() directly, outside cs::Lmdb's lock against a growth of the map: called
+    // from the constructor only, before any other thread reads the index
     try {
         auto& env = db_->env();
         auto txn = lmdb::txn::begin(env, nullptr, MDB_RDONLY);

@@ -165,6 +165,7 @@ void PoolSynchronizer::getBlockReply(cs::PoolsBlock&& poolsBlock, const cs::Publ
         << ", seqs: [" << poolsBlock.front().sequence()
         << ", " << poolsBlock.back().sequence() << "]";
     removeSynchroLog(sender);
+    pacing_.onReply(sender, cs::Utils::currentTimestamp());
     //std::thread sThread(&PoolSynchronizer::manageSyncBlocks, this, std::move(poolsBlock));;
     //sThread.detach();
     manageSyncBlocks(std::move(poolsBlock));
@@ -296,6 +297,7 @@ void PoolSynchronizer::onPingReceived(cs::Sequence sequence, const cs::PublicKey
 
 void PoolSynchronizer::onNeighbourRemoved(const cs::PublicKey& publicKey) {
     neighbours_.erase(publicKey);
+    pacing_.forget(publicKey);
 }
 
 //
@@ -356,15 +358,22 @@ void PoolSynchronizer::sendBlockRequest() {
             csdetails() << "SYNC: All sequences already requested";
             break;
         }
+        const auto now = cs::Utils::currentTimestamp();
+        if (!pacing_.allows(neighbour->first, neededSequences.back(), now)) {
+            // its anti-duplicate log would refuse a request ending there: the range goes to the next
+            csdebug() << "SYNC: " << cs::Utils::byteStreamToHex(neighbour->first) << " would refuse blocks up to "
+                      << neededSequences.back() << " as a duplicate, asking another neighbour";
+        }
         else {
             maxRequestedSequence_ = neededSequences.back();
-        }
-        if (checkSynchroLog(neighbour->first)) {
-            cslog() << "SYNC: requesting for " << neededSequences.size()
-                << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
-                << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
-            emit sendRequest(neighbour->first, neededSequences);
-            addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
+            if (checkSynchroLog(neighbour->first)) {
+                cslog() << "SYNC: requesting for " << neededSequences.size()
+                    << " blocks [" << neededSequences.front() << ", " << neededSequences.back()
+                    << "] from " << cs::Utils::byteStreamToHex(neighbour->first);
+                emit sendRequest(neighbour->first, neededSequences);
+                pacing_.onRequest(neighbour->first, neededSequences.back(), now);
+                addSynchroLog(neighbour->first, neededSequences, SyncroMessage::NoAnswer);
+            }
         }
 
         ++neighbour;
@@ -444,11 +453,22 @@ void PoolSynchronizer::stop() {
     cslog() << "SYNC: shutdown — pool synchronizer stopped";
 }
 
+// A responder sends SyncroMsg only once special order 35 is active on its side: read whatever this
+// node knows of that round, so that a node syncing from block 0 (before the order) paces its requests
+// to that responder as the responder expects
 void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (!pacing_.active(sender)) {
+        cslog() << "SYNC: " << cs::Utils::byteStreamToHex(sender)
+                << " keeps an anti-duplicate log of requests (special order 35): requests to it are paced";
+    }
+    const auto now = cs::Utils::currentTimestamp();
+    // an answer to a forward request in flight; any other (the backfill's) only marks the peer active
+    const bool forward = pacing_.inFlight(sender, now);
+    pacing_.onSyncroMessage(sender, msg, now);
+    csdebug() << __func__;
+    if (!forward) {
         return;
     }
-    csdebug() << __func__;
     if (msg == SyncroMessage::AwaitAnswer) {
         changeSynchroLog(sender, msg);
     }
@@ -458,7 +478,7 @@ void PoolSynchronizer::getSyncroMessage(const cs::PublicKey& sender, SyncroMessa
 }
 
 void PoolSynchronizer::addSynchroLog(const cs::PublicKey& sender, cs::PoolsRequestedSequences& sequences, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (!synchroLogFor(sender)) {
         return;
     }
     //csdebug() << __func__;
@@ -467,7 +487,7 @@ void PoolSynchronizer::addSynchroLog(const cs::PublicKey& sender, cs::PoolsReque
 }
 
 bool PoolSynchronizer::changeSynchroLog(const cs::PublicKey& sender, SyncroMessage msg) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (!synchroLogFor(sender)) {
         return true;
     }
     //csdebug() << __func__;
@@ -480,7 +500,7 @@ bool PoolSynchronizer::changeSynchroLog(const cs::PublicKey& sender, SyncroMessa
 }
 
 void PoolSynchronizer::updateSynchroLog() {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound && !pacing_.anyActive()) {
         return;
     }
     auto timeNow = cs::Utils::currentTimestamp();
@@ -488,7 +508,9 @@ void PoolSynchronizer::updateSynchroLog() {
     while (it != synchroLog_.end()) {
         auto msg = std::get<1>(it->second);
         auto timeEvent = std::get<2>(it->second);
-        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + 2000))) {
+        // an AwaitAnswer whose reply was lost: asked again after 30 s
+        if ((msg != SyncroMessage::AwaitAnswer && timeNow > timeEvent + 50000) || ((std::get<1>(it->second) == SyncroMessage::NoAnswer && timeNow > timeEvent + 2000))
+            || (msg == SyncroMessage::AwaitAnswer && timeNow > timeEvent + SyncroPacing::kInFlightMs)) {
             it = synchroLog_.erase(it);
         }
         else {
@@ -498,7 +520,7 @@ void PoolSynchronizer::updateSynchroLog() {
 }
 
 bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (!synchroLogFor(sender)) {
         return true;
     }
     //csdebug() << __func__;
@@ -511,8 +533,12 @@ bool PoolSynchronizer::removeSynchroLog(const cs::PublicKey& sender) {
     return true;
 }
 
+bool PoolSynchronizer::synchroLogFor(const cs::PublicKey& sender) const {
+    return cs::Conveyer::instance().currentRoundNumber() >= Consensus::syncroChangeRound || pacing_.active(sender);
+}
+
 bool PoolSynchronizer::checkSynchroLog(const cs::PublicKey& sender) { //is true when we can request blocks's set
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (!synchroLogFor(sender)) {
         return true;
     }
     auto it = synchroLog_.find(sender);

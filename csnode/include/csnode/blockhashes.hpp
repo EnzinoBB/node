@@ -49,6 +49,15 @@ public:
     bool rebuild(cs::Sequence first, cs::Sequence last, const std::function<csdb::Pool(cs::Sequence)>& load,
                  const std::function<bool()>& stopRequested);
 
+    // writes both databases to disk
+    void flush();
+
+    // Backward sync stores blocks downwards and writes these databases before the storage: after a
+    // crash they may hold entries below the first stored block, or miss the entries of the lowest
+    // stored blocks. Removes the former and inserts the latter from the stored blocks first..last;
+    // each walk stops at the first sequence that needs nothing. Returns how many entries changed.
+    size_t repairBottom(cs::Sequence first, cs::Sequence last, const std::function<csdb::Pool(cs::Sequence)>& load);
+
 private slots:
     void onDbFailed(const cs::LmdbException& exception);
 
