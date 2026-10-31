@@ -63,6 +63,7 @@ lines under the new release.
 | #141 | ci: the pruned snapshot is published when the public monitor does not answer (it answered HTTP 500 from 2026-10-30): the balance comparison is skipped with a warning and the release notes list each snapshot published without it; a mismatch still blocks publication |
 | #142 | node: a `NodeStopRequest` from the network no longer stops the node (its signature was not checked since upstream `af4de3f8`, so it was not authenticated); it is counted and logged; a node too old for the network still stops by the special order of the version change |
 | #143 | node: a `Utility` message (ban or unban a node key) is obeyed only with the blockchain key's signature, an exact length and a round at most 100 rounds old (its signature was not checked since upstream `af4de3f8`, so it was not authenticated) |
+| #144 | csnode: stream reads bounded by the data: `IDataStream` checks a length without overflow, a vector reserves no more than the bytes left and stops at the first missing element, a smart stage-one message whose fee count exceeds its size or that lacks its hash is refused, the API checks a string field's length before reading it |
 
 ## community.14 — 2026-10-27
 
