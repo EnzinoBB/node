@@ -61,6 +61,7 @@ lines under the new release.
 | #139 | ci: the backfill crash steps (kill, power cut...) wait until the node stored a block since its last start, so that every restart resumes lower; in `fund.py` a transfer rejected by consensus right after an earlier transfer of the same sender ended with an unknown outcome (a partition longer than the 60 s wait) counts with the pending answers, not as a fault (net-partition) |
 | #140 | csnode: a backfill turn also ends after 50 ms (`backfill_turn_budget_ms`) (on mainnet a turn of 50 blocks took up to 1.7 s, longer than a round, on a node that may be a confidant); a turn over 200 ms is logged with its blocks, transactions and the time spent verifying, storing and checking confirmations, and the progress line counts them; the storage flush every 10,000 blocks is timed in its log line; fix: a rejected block's peer key was read after its buffer entry was freed |
 | #141 | ci: the pruned snapshot is published when the public monitor does not answer (it answered HTTP 500 from 2026-10-30): the balance comparison is skipped with a warning and the release notes list each snapshot published without it; a mismatch still blocks publication |
+| #142 | node: a `NodeStopRequest` from the network no longer stops the node (its signature was not checked since upstream `af4de3f8`, so it was not authenticated); it is counted and logged; a node too old for the network still stops by the special order of the version change |
 
 ## community.14 — 2026-10-27
 
