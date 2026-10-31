@@ -206,7 +206,9 @@ void BackwardSync::request(const Context& ctx) {
                 requestedAll_ = true;   // the floor rose (pruning) past what is left to ask for
                 break;
             }
-            if (next_ - nextToRequest_ >= window) {
+            // what is asked for and not stored yet, this batch included, fits in the buffer: a reply
+            // never meets a full buffer however slowly the blocks are stored
+            if (next_ - nextToRequest_ + settings_.batch > window) {
                 break;
             }
             const Sequence hi = nextToRequest_;
@@ -299,6 +301,7 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
     }
     Batch& batch = it->second;
     const size_t limit = kBufferBatches * settings_.batch;
+    std::set<Sequence> noRoom;   // sent, but not kept: asked for again, not held against the peer
     for (auto& block : blocks) {
         const Sequence seq = block.sequence();
         if (!block.is_valid() || batch.missing.count(seq) == 0) {
@@ -306,8 +309,8 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
             continue;
         }
         if (buffer_.size() >= limit && buffer_.count(seq) == 0) {
-            // left missing: asked for again when the batch times out
             ++dropped_;
+            noRoom.insert(seq);
             if (!bufferFullLogged_) {
                 bufferFullLogged_ = true;
                 log("BACKFILL: " + std::to_string(buffer_.size()) + " blocks wait to be stored: the others of " + keyText(sender) +
@@ -317,6 +320,13 @@ void BackwardSync::onBlocks(const PublicKey& sender, PoolsBlock&& blocks) {
         }
         buffer_[seq] = Buffered{std::move(block), sender};
         batch.missing.erase(seq);
+    }
+    if (!noRoom.empty()) {
+        for (const Sequence seq : noRoom) {
+            batch.missing.erase(seq);
+        }
+        auto& again = retry_[*noRoom.rbegin()];
+        again.insert(noRoom.begin(), noRoom.end());
     }
     if (batch.missing.empty()) {
         inFlight_.erase(it);

@@ -555,6 +555,24 @@ TEST_F(BackfillTest, TheWorkPerTurnIsBounded) {
 
 // a slow store ends the turn once it has used its time, however many blocks it may still store;
 // such a turn is logged with where its time went
+// stores slower than the replies arrive: the requests never ask for more than the buffer holds,
+// so no block is dropped and no peer that answered is taken for one that did not
+TEST_F(BackfillTest, SlowStoresNeitherDropBlocksNorMarkPeers) {
+    auto settings = settingsOf(20, 0, 50);
+    settings.turnBudgetMs = 30;
+    make(settings);
+    storeDelayMs_ = 12;   // three blocks a turn
+    for (int i = 0; i < 400 && !sync_->stats().done; ++i) {
+        tick(100);
+        answerAll();
+    }
+    EXPECT_TRUE(sync_->stats().done);
+    EXPECT_EQ(first_, 0u);
+    EXPECT_EQ(sync_->stats().dropped, 0u);
+    EXPECT_EQ(logged("are dropped"), 0u);
+    EXPECT_EQ(logged("did not answer"), 0u);
+}
+
 TEST_F(BackfillTest, ASlowTurnStopsAtItsTimeBudget) {
     auto settings = settingsOf(100, 0, 50);
     settings.turnBudgetMs = 30;

@@ -64,6 +64,7 @@ lines under the new release.
 | #142 | node: a `NodeStopRequest` from the network no longer stops the node (its signature was not checked since upstream `af4de3f8`, so it was not authenticated); it is counted and logged; a node too old for the network still stops by the special order of the version change |
 | #143 | node: a `Utility` message (ban or unban a node key) is obeyed only with the blockchain key's signature, an exact length and a round at most 100 rounds old (its signature was not checked since upstream `af4de3f8`, so it was not authenticated) |
 | #144 | csnode: stream reads bounded by the data: `IDataStream` checks a length without overflow, a vector reserves no more than the bytes left and stops at the first missing element, a smart stage-one message whose fee count exceeds its size or that lacks its hash is refused, the API checks a string field's length before reading it |
+| #145 | csnode: backward sync asks for no more blocks than its buffer holds (a request could overrun it by one batch); blocks a reply brings when the buffer is full are asked for again at once and no longer count against the peer that sent them (with slow stores, on mainnet after a restart, peers that had answered were left out for an hour and the backfill fell to ~30 blocks/s) |
 
 ## community.14 — 2026-10-27
 
