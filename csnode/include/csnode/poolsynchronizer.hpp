@@ -7,6 +7,7 @@
 
 #include <csnode/blockchain.hpp>
 #include <csnode/nodecore.hpp>
+#include <csnode/syncropacing.hpp>
 
 #include <lib/system/common.hpp>
 #include <lib/system/timer.hpp>
@@ -60,6 +61,9 @@ private:
     void updateSynchroLog();
     bool removeSynchroLog(const cs::PublicKey& sender);
     bool checkSynchroLog(const cs::PublicKey& sender);
+    // the request log is kept for this peer: special order 35 applied here, or the peer sent a
+    // SyncroMsg (its own anti-duplicate log is active)
+    bool synchroLogFor(const cs::PublicKey& sender) const;
 
     bool showSyncronizationProgress(Sequence lastWrittenSequence) const;
     void manageSyncBlocks(cs::PoolsBlock&& poolsBlock);
@@ -81,6 +85,7 @@ private:
     std::unordered_map<PublicKey, Sequence> neighbours_;
 
     std::map<cs::PublicKey, std::tuple<cs::PoolsRequestedSequences, SyncroMessage, uint64_t>> synchroLog_;
+    SyncroPacing pacing_;
     Timer timer_;
 };
 }  // namespace cs

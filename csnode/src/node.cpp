@@ -2246,13 +2246,15 @@ void Node::getSyncroMessage(const uint8_t* data, const size_t size, const cs::Pu
     cs::Byte msg = cs::SyncroMessage::NoAnswer;
     cs::IDataStream stream(data, size);
     stream >> msg;
-    // a responder sends these only once special order 35 is active on its side: the backfill reads
-    // them whatever this node knows of that round, to pace its requests to that peer
-    if (backwardSync_ && stream.isValid()) {
-        backwardSync_->onSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
-    }
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
+    if (!stream.isValid() || msg > cs::SyncroMessage::Sent) {
         return;
+    }
+    // a responder sends these only once special order 35 is active on its side, which a node that
+    // syncs from block 0 does not know yet: the backfill and the synchronizer read them whatever
+    // this node knows of that round, and pace their requests to that responder; each acts only on
+    // the requests of its own
+    if (backwardSync_) {
+        backwardSync_->onSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
     }
     poolSynchronizer_->getSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
 }
