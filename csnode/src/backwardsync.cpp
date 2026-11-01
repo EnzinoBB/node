@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <stdexcept>
+#include <system_error>
 
 #include <base58.h>
 
@@ -78,8 +80,13 @@ void BackwardSync::stopFlusher() {
         worker = std::move(flushThread_);
     }
     flushCv_.notify_all();
-    if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) {
-        worker.join();
+    if (worker.joinable()) {
+        if (worker.get_id() == std::this_thread::get_id()) {
+            worker.detach();   // stopped from the flush thread itself: it returns on its own
+        }
+        else {
+            worker.join();
+        }
     }
 }
 
@@ -99,7 +106,13 @@ void BackwardSync::flushWorker() {
         lock.unlock();
 
         const auto at = std::chrono::steady_clock::now();
-        const bool ok = !hooks_.flush || hooks_.flush();
+        bool ok = false;
+        try {
+            ok = !hooks_.flush || hooks_.flush();
+        }
+        catch (const std::exception& e) {
+            log(std::string("BACKFILL: the flush thread caught: ") + e.what(), true);
+        }
         const auto us = static_cast<uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - at).count());
         if (us > longestFlushUs_) {
@@ -658,19 +671,30 @@ void BackwardSync::flushIfDue(bool force) {
     }
     if (!force && settings_.asyncFlush) {
         std::lock_guard<std::mutex> lock(flushMutex_);
-        if (flushStopping_ || flushRunning_ || flushRequested_) {
+        if (flushStopping_) {
+            return;   // stopped: the node flushes once more itself before its storage closes (Node::destroy)
+        }
+        if (flushRunning_ || flushRequested_) {
             return;   // one at a time: the blocks stored meanwhile go with the next one
         }
         if (!flushThread_.joinable()) {
-            flushThread_ = std::thread([this] { flushWorker(); });
+            try {
+                flushThread_ = std::thread([this] { flushWorker(); });
+            }
+            catch (const std::system_error& e) {
+                log(std::string("BACKFILL: no flush thread (") + e.what() + "): flushing on the processor thread", true);
+                settings_.asyncFlush = false;
+            }
         }
-        flushRequested_ = true;
-        flushBlocks_ = storedSinceFlush_;
-        flushDown_ = first_;
-        lastFlushAt_ = t;
-        storedSinceFlush_ = 0;
-        flushCv_.notify_one();
-        return;
+        if (flushThread_.joinable()) {
+            flushRequested_ = true;
+            flushBlocks_ = storedSinceFlush_;
+            flushDown_ = first_;
+            lastFlushAt_ = t;
+            storedSinceFlush_ = 0;
+            flushCv_.notify_one();
+            return;
+        }
     }
     // on the processor thread too, outside the turn budget: timed, so that a slow disk shows
     const auto flushAt = std::chrono::steady_clock::now();

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <thread>
 #include <string>
 #include <utility>
 #include <vector>
@@ -639,24 +640,29 @@ TEST_F(BackfillTest, AConfidantDefersTheFlush) {
 // the periodic flush runs on its own thread: storing goes on while it lasts, a second one waits
 // for the first, and the last flush (end of the backfill) waits for the one under way
 TEST_F(BackfillTest, ThePeriodicFlushRunsOnItsOwnThread) {
-    std::mutex m;
-    std::condition_variable cv;
-    bool release = false;
-    std::atomic<int> started{0};
-    struct Release {   // a failed assertion must not leave the flush thread waiting for ever
-        std::function<void()> f;
-        ~Release() { f(); }
-    } guard{[&] {
-        {
-            std::lock_guard<std::mutex> lock(m);
-            release = true;
+    // shared with the flush thread by value: it may outlive this body if an assertion fails
+    struct Gate {
+        std::mutex m;
+        std::condition_variable cv;
+        bool release = false;
+        std::atomic<int> started{0};
+        void open() {
+            {
+                std::lock_guard<std::mutex> lock(m);
+                release = true;
+            }
+            cv.notify_all();
         }
-        cv.notify_all();
-    }};
-    flushGate_ = [&] {
-        ++started;
-        std::unique_lock<std::mutex> lock(m);
-        cv.wait(lock, [&] { return release; });
+    };
+    const auto gate = std::make_shared<Gate>();
+    struct Release {   // a failed assertion must not leave the flush thread waiting for ever
+        std::shared_ptr<Gate> g;
+        ~Release() { g->open(); }
+    } guard{gate};
+    flushGate_ = [gate] {
+        ++gate->started;
+        std::unique_lock<std::mutex> lock(gate->m);
+        gate->cv.wait(lock, [&] { return gate->release; });
     };
     auto settings = settingsOf(100, 0, 50);
     settings.asyncFlush = true;
@@ -665,20 +671,20 @@ TEST_F(BackfillTest, ThePeriodicFlushRunsOnItsOwnThread) {
     sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
     tick(cs::BackwardSync::kFlushMs + 1);   // a flush is due: handed to the flush thread
     const cs::Sequence storedWhenDue = first_;
-    for (int i = 0; i < 200 && started.load() == 0; ++i) {
+    for (int i = 0; i < 1000 && gate->started.load() == 0; ++i) {   // up to 5 s on a busy runner
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    ASSERT_EQ(started.load(), 1) << "the flush thread took the flush";
+    ASSERT_EQ(gate->started.load(), 1) << "the flush thread took the flush";
 
     // the flush hangs: blocks are still stored, and no second flush starts
     answerAll();
     tick(cs::BackwardSync::kFlushMs + 1);
     tick(cs::BackwardSync::kFlushMs + 1);
     EXPECT_LT(first_, storedWhenDue) << "storing goes on during the flush";
-    EXPECT_EQ(started.load(), 1) << "one flush at a time";
+    EXPECT_EQ(gate->started.load(), 1) << "one flush at a time";
     EXPECT_EQ(flushes_.load(), 0u);
 
-    guard.f();
+    gate->open();
     // the end of the backfill waits for the flush under way, then flushes the rest itself
     runToEnd();
     EXPECT_TRUE(sync_->stats().done);
