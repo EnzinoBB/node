@@ -239,6 +239,16 @@ void BackwardSync::tick(const Context& ctx) {
             std::to_string(busyUs_ / 1000) + " ms of processor thread so far (longest turn " + std::to_string(longestTurnUs_ / 1000) + " ms, " +
             std::to_string(slowTurns_.load()) + " over " + std::to_string(kSlowTurnMs) + " ms; longest flush " +
             std::to_string(longestFlushUs_ / 1000) + " ms)");
+        // where the time of a block goes, on average: what to move off the processor thread next
+        const uint64_t blocks = std::max<uint64_t>(1, stored_ - progressStored_);
+        const uint64_t busy = busyUs_ - progressBusyUs_;
+        log("BACKFILL: per block over the last " + std::to_string(blocks) + ": verify " + std::to_string(phaseVerifyUs_ / blocks) +
+            " us, store " + std::to_string(phaseStoreUs_ / blocks) + " us, confirmations " + std::to_string(phaseConfirmUs_ / blocks) +
+            " us, " + std::to_string(phaseTransactions_ * 100 / blocks / 100) + "." +
+            std::to_string(phaseTransactions_ * 100 / blocks % 100 / 10) + " transactions; processor thread busy " +
+            std::to_string(busy / 10 / std::max<uint64_t>(1, t - progressAt_)) + " % of the time");
+        phaseVerifyUs_ = phaseStoreUs_ = phaseConfirmUs_ = phaseTransactions_ = 0;
+        progressBusyUs_ = busyUs_;
         progressAt_ = t;
         progressStored_ = stored_;
     }
@@ -641,6 +651,10 @@ void BackwardSync::drain() {
     if (us > longestTurnUs_) {
         longestTurnUs_ = us;
     }
+    phaseVerifyUs_ += verifyUs;
+    phaseStoreUs_ += storeUs;
+    phaseConfirmUs_ += confirmUs;
+    phaseTransactions_ += transactions;
     if (now() >= startedMs + kSlowTurnMs) {
         const size_t n = ++slowTurns_;
         if (n <= 20 || n % 100 == 0) {
