@@ -1,8 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <future>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <utility>
@@ -117,6 +122,7 @@ cs::BackwardSync::Settings settingsOf(size_t batch = 100, size_t rate = 1000, si
     s.storePerTurn = perTurn;
     s.turnBudgetMs = 0;   // no time limit unless a test sets one
     s.idleTurnBudgetMs = 0;
+    s.asyncFlush = false;   // flushes on the calling thread unless a test says otherwise
     return s;
 }
 
@@ -152,13 +158,22 @@ protected:
             ++storedCount_;
             return true;
         };
-        hooks.flush = [this] { ++flushes_; return true; };
+        hooks.flush = [this] {
+            if (flushGate_) {
+                flushGate_();   // a slow disk: the test decides when the flush ends
+            }
+            ++flushes_;
+            return true;
+        };
         hooks.floor = [this] { return floor_; };
         hooks.sendRequest = [this](const cs::PublicKey& to, const cs::PoolsRequestedSequences& seqs) {
             requests_.emplace_back(to, seqs);
         };
         hooks.clock = [this] { return now_; };
-        hooks.onLog = [this](const std::string& line) { logs_.push_back(line); };
+        hooks.onLog = [this](const std::string& line) {
+            std::lock_guard<std::mutex> lock(logsMutex_);   // the flush thread logs too
+            logs_.push_back(line);
+        };
         sync_ = std::make_unique<cs::BackwardSync>(std::move(hooks), settings);
     }
 
@@ -194,6 +209,7 @@ protected:
         }
     }
     size_t logged(const std::string& text) const {
+        std::lock_guard<std::mutex> lock(logsMutex_);
         return static_cast<size_t>(std::count_if(logs_.begin(), logs_.end(), [&](const std::string& l) { return l.find(text) != std::string::npos; }));
     }
     // ticks and answers until the backfill is done or `limit` simulated seconds pass
@@ -208,11 +224,13 @@ protected:
     std::unique_ptr<cs::BackwardSync> sync_;
     std::vector<std::pair<cs::PublicKey, cs::PoolsRequestedSequences>> requests_;
     std::vector<std::string> logs_;
+    mutable std::mutex logsMutex_;
+    std::function<void()> flushGate_;
     cs::Sequence first_ = kFirst;
     cs::Sequence floor_ = 0;
     uint64_t now_ = 1'000'000;
     size_t storedCount_ = 0;
-    size_t flushes_ = 0;
+    std::atomic<size_t> flushes_{0};
     bool failStore_ = false;
     uint64_t storeDelayMs_ = 0;   // a slow disk: simulated time spent in every store
     bool forwardSync_ = false;
@@ -616,6 +634,57 @@ TEST_F(BackfillTest, AConfidantDefersTheFlush) {
     EXPECT_EQ(flushes_, before + 1);
     tick(cs::BackwardSync::kTrustedFlushDeferMs);
     EXPECT_EQ(flushes_, before + 2);
+}
+
+// the periodic flush runs on its own thread: storing goes on while it lasts, a second one waits
+// for the first, and the last flush (end of the backfill) waits for the one under way
+TEST_F(BackfillTest, ThePeriodicFlushRunsOnItsOwnThread) {
+    std::mutex m;
+    std::condition_variable cv;
+    bool release = false;
+    std::atomic<int> started{0};
+    struct Release {   // a failed assertion must not leave the flush thread waiting for ever
+        std::function<void()> f;
+        ~Release() { f(); }
+    } guard{[&] {
+        {
+            std::lock_guard<std::mutex> lock(m);
+            release = true;
+        }
+        cv.notify_all();
+    }};
+    flushGate_ = [&] {
+        ++started;
+        std::unique_lock<std::mutex> lock(m);
+        cv.wait(lock, [&] { return release; });
+    };
+    auto settings = settingsOf(100, 0, 50);
+    settings.asyncFlush = true;
+    make(settings);
+    tick();
+    sync_->onBlocks(requests_[0].first, blocksFor(requests_[0].second));
+    tick(cs::BackwardSync::kFlushMs + 1);   // a flush is due: handed to the flush thread
+    const cs::Sequence storedWhenDue = first_;
+    for (int i = 0; i < 200 && started.load() == 0; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    ASSERT_EQ(started.load(), 1) << "the flush thread took the flush";
+
+    // the flush hangs: blocks are still stored, and no second flush starts
+    answerAll();
+    tick(cs::BackwardSync::kFlushMs + 1);
+    tick(cs::BackwardSync::kFlushMs + 1);
+    EXPECT_LT(first_, storedWhenDue) << "storing goes on during the flush";
+    EXPECT_EQ(started.load(), 1) << "one flush at a time";
+    EXPECT_EQ(flushes_.load(), 0u);
+
+    guard.f();
+    // the end of the backfill waits for the flush under way, then flushes the rest itself
+    runToEnd();
+    EXPECT_TRUE(sync_->stats().done);
+    EXPECT_GE(flushes_.load(), 2u);
+    EXPECT_GE(logged("on the flush thread"), 1u);
+    sync_->stop();   // joins the flush thread
 }
 
 TEST_F(BackfillTest, ASlowTurnStopsAtItsTimeBudget) {

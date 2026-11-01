@@ -60,8 +60,59 @@ bool BackwardSync::isActive() const {
     return started_ && !done_ && !stopped_;
 }
 
+BackwardSync::~BackwardSync() {
+    stopFlusher();
+}
+
 void BackwardSync::stop() {
     stopped_ = true;
+    stopFlusher();
+}
+
+// a flush under way ends first: nothing flushes the storage behind the node's back once it stops
+void BackwardSync::stopFlusher() {
+    std::thread worker;
+    {
+        std::lock_guard<std::mutex> lock(flushMutex_);
+        flushStopping_ = true;
+        worker = std::move(flushThread_);
+    }
+    flushCv_.notify_all();
+    if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) {
+        worker.join();
+    }
+}
+
+void BackwardSync::flushWorker() {
+    std::unique_lock<std::mutex> lock(flushMutex_);
+    for (;;) {
+        flushCv_.wait(lock, [this] { return flushRequested_ || flushStopping_; });
+        if (flushStopping_) {
+            flushRequested_ = false;   // the node flushes once more before its storage closes
+            flushCv_.notify_all();
+            return;
+        }
+        flushRequested_ = false;
+        flushRunning_ = true;
+        const size_t blocks = flushBlocks_;
+        const Sequence down = flushDown_;
+        lock.unlock();
+
+        const auto at = std::chrono::steady_clock::now();
+        const bool ok = !hooks_.flush || hooks_.flush();
+        const auto us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - at).count());
+        if (us > longestFlushUs_) {
+            longestFlushUs_ = us;
+        }
+        log("BACKFILL: flushed, " + std::to_string(blocks) + " blocks since the last flush, down to #" + std::to_string(down) +
+                " in " + std::to_string(us / 1000) + " ms on the flush thread" + (ok ? "" : ": the storage flush failed"),
+            !ok);
+
+        lock.lock();
+        flushRunning_ = false;
+        flushCv_.notify_all();
+    }
 }
 
 BackwardSync::Stats BackwardSync::stats() const {
@@ -590,6 +641,11 @@ void BackwardSync::drain() {
 }
 
 void BackwardSync::flushIfDue(bool force) {
+    if (force && settings_.asyncFlush) {
+        // the last flush covers every block: after the one under way, if any
+        std::unique_lock<std::mutex> lock(flushMutex_);
+        flushCv_.wait(lock, [this] { return (!flushRunning_ && !flushRequested_) || (flushStopping_ && !flushRunning_); });
+    }
     if (storedSinceFlush_ == 0) {
         return;
     }
@@ -599,6 +655,22 @@ void BackwardSync::flushIfDue(bool force) {
     }
     if (!force && trusted_ && t < lastFlushAt_ + kTrustedFlushDeferMs) {
         return;   // consensus first: flushed at the first turn outside the trusted set
+    }
+    if (!force && settings_.asyncFlush) {
+        std::lock_guard<std::mutex> lock(flushMutex_);
+        if (flushStopping_ || flushRunning_ || flushRequested_) {
+            return;   // one at a time: the blocks stored meanwhile go with the next one
+        }
+        if (!flushThread_.joinable()) {
+            flushThread_ = std::thread([this] { flushWorker(); });
+        }
+        flushRequested_ = true;
+        flushBlocks_ = storedSinceFlush_;
+        flushDown_ = first_;
+        lastFlushAt_ = t;
+        storedSinceFlush_ = 0;
+        flushCv_.notify_one();
+        return;
     }
     // on the processor thread too, outside the turn budget: timed, so that a slow disk shows
     const auto flushAt = std::chrono::steady_clock::now();

@@ -893,6 +893,9 @@ void Node::destroy() {
     solver_->finish();
     cswarning() << "[SOLVER STOPPED]";
 
+    if (backwardSync_) {
+        backwardSync_->stop();   // its flush thread ends before the storage closes
+    }
     if (backwardSync_ && backwardSync_->stats().stored > 0) {
         // the index and the block hashes of the blocks backfilled since the last flush, before the storage closes
         blockChain_.flushBackfill();
