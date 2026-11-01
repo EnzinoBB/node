@@ -76,6 +76,7 @@ Nothing yet.
 | #146 | csnode: the backfill turn budget depends on the node's role: 50 ms while it is a confidant (`backfill_turn_budget_ms`), 90 ms otherwise (`backfill_idle_turn_budget_ms`); on mainnet a node outside the trusted set backfills at about 450 blocks/s instead of about 250 |
 | #147 | csnode: while the node is a confidant, the backfill storage flush (median 358 ms, up to 2.4 s on mainnet, on the processor thread) waits until the node is out of the trusted set, 10 minutes at most; blocks not flushed are fetched again after a crash |
 | #148 | csnode: the periodic backfill flush runs on a thread of its own instead of the processor thread (on mainnet it took up to 5.6 s, with the storing of blocks waiting); one at a time, the final flush waits for the one under way, and the node stops the thread before its storage closes |
+| #150 | p2p: the submodule points again at the community fork `09252ec` (`community/p9`): the merge of #137 had recorded the official `8fb3c516` by mistake, without the limits of #121 (robustness `net-huge-frame` caught it before the release) |
 | — | release: the version announced to peers (`MINOR_NODE_VERSION`) is 15; the packages ship the contract executor community-2 (build 1555) |
 
 Backward sync (#122–#125, #129, #130, #133, #136, #139, #140, #145–#148). A full node on LMDB or
