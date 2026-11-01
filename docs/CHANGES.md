@@ -40,7 +40,9 @@ lines under the new release.
 
 ## Not released yet
 
-Nothing yet.
+| PR | Change |
+|---|---|
+| #151 | csnode: every backfill progress line (each 100,000 blocks) is followed by the average cost of a block per phase (verify, store, confirmations), the transactions per block and the share of the processor thread the backfill took |
 
 ## community.15 — 2026-11-01
 

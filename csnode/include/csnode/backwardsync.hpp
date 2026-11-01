@@ -194,6 +194,12 @@ private:
     size_t storedSinceFlush_ = 0;
     uint64_t progressAt_ = 0;
     size_t progressStored_ = 0;
+    // the phases of storing since the last progress line, for its averages per block
+    uint64_t phaseVerifyUs_ = 0;
+    uint64_t phaseStoreUs_ = 0;
+    uint64_t phaseConfirmUs_ = 0;
+    uint64_t phaseTransactions_ = 0;
+    uint64_t progressBusyUs_ = 0;
 
     std::atomic<bool> stopped_{false};
     std::atomic<bool> started_{false};
