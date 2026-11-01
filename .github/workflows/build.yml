@@ -36,7 +36,7 @@ jobs:
         run: |
           git submodule update --init -- cscrypto p2p \
             third-party/berkeleydb third-party/thrift third-party/thrift-interface-definitions \
-            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof third-party/rocksdb
+            third-party/googletest third-party/lmdb third-party/lmdbxx third-party/nameof
           git -C cscrypto submodule update --init
           git -C p2p submodule update --init
 
@@ -79,8 +79,8 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-ubuntu-24.04-${{ github.sha }}
-          restore-keys: ccache-ubuntu-24.04-
+          key: ccache-official-ubuntu-24.04-${{ github.sha }}
+          restore-keys: ccache-official-ubuntu-24.04-
 
       # -include cstdint/cstddef: some sources (third-party base58, csnode/bitheap.hpp)
       # rely on headers that GCC 13 no longer includes transitively.
@@ -109,7 +109,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-ubuntu-24.04-${{ github.sha }}
+          key: ccache-official-ubuntu-24.04-${{ github.sha }}
 
       # Locally the whole suite runs in about 35 s: a per-test timeout makes a hang fail
       # fast and print the output of the stuck test instead of holding the runner.
