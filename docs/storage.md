@@ -42,6 +42,8 @@ official node.
 | `backfill_turn_budget_ms` | `50` | While the node is a confidant, a turn also ends once it has taken this long (after at least one block), `0` (no limit) to `1000`: consensus keeps most of the thread; on mainnet about 250 blocks/s. |
 | `backfill_idle_turn_budget_ms` | `90` | The same while the node is not a confidant, with little consensus work: on mainnet about 450 blocks/s. |
 
+The periodic flush of the backfilled blocks (every 10,000 blocks or a minute; up to several seconds on mainnet) runs on a thread of its own, not on the thread that runs consensus; one flush at a time, and while the node is a confidant it waits until the node is out of the trusted set (10 minutes at most). The log line says `on the flush thread`. One wait remains possible: an LMDB index that must grow its map while the flush thread syncs it waits for that sync (rare: the map grows in steps).
+
 ### Choosing a backend
 
 | Backend | Use it for | Notes |
