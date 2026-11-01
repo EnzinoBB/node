@@ -67,6 +67,7 @@ lines under the new release.
 | #145 | csnode: backward sync asks for no more blocks than its buffer holds (a request could overrun it by one batch); blocks a reply brings when the buffer is full are asked for again at once and no longer count against the peer that sent them (with slow stores, on mainnet after a restart, peers that had answered were left out for an hour and the backfill fell to ~30 blocks/s) |
 | #146 | csnode: the backfill turn budget depends on the node's role: 50 ms while it is a confidant (`backfill_turn_budget_ms`), 90 ms otherwise (`backfill_idle_turn_budget_ms`); on mainnet a node outside the trusted set backfills at about 450 blocks/s instead of about 250 |
 | #147 | csnode: while the node is a confidant, the backfill storage flush (median 358 ms, up to 2.4 s on mainnet, on the processor thread) waits until the node is out of the trusted set, 10 minutes at most; blocks not flushed are fetched again after a crash |
+| #148 | csnode: the periodic backfill flush runs on a thread of its own instead of the processor thread (on mainnet it took up to 5.6 s, with the storing of blocks waiting); one at a time, the final flush waits for the one under way, and the node stops the thread before its storage closes |
 
 ## community.14 — 2026-10-27
 

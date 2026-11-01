@@ -2,12 +2,15 @@
 #define BACKWARDSYNC_HPP
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <optional>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <csdb/pool.hpp>
@@ -21,8 +24,9 @@ namespace cs {
 // with BlockRequest, newest first, checks each against the hash chain and its signatures, and
 // stores it strictly downwards, never applying it to the caches. Requests go out only while the
 // node is synced; replies already asked for are stored in any case. Single-threaded: every call
-// comes from the node's processor thread, but stop() and stats(). The chain, the network and the
-// clock are reached only through Hooks.
+// comes from the node's processor thread, but stop() and stats(); the periodic flush runs on a
+// thread of its own (Settings::asyncFlush). The chain, the network and the clock are reached only
+// through Hooks.
 class BackwardSync {
 public:
     struct Peer {
@@ -70,6 +74,9 @@ public:
         // the same while the node is not a confidant, with little consensus work: about 450 blocks/s
         // on mainnet instead of about 250
         uint64_t idleTurnBudgetMs = 90;
+        // the periodic flush (up to several seconds on mainnet) runs on a thread of its own instead of
+        // the processor thread; the flushes at the end and at a stop stay where they are
+        bool asyncFlush = true;
     };
 
     struct Stats {
@@ -107,6 +114,9 @@ public:
     static constexpr uint64_t kSlowTurnMs = 200;              // a longer turn is logged, with where its time went
 
     BackwardSync(Hooks hooks, Settings settings);
+    ~BackwardSync();
+    BackwardSync(const BackwardSync&) = delete;
+    BackwardSync& operator=(const BackwardSync&) = delete;
 
     // every 500 ms
     void tick(const Context& ctx);
@@ -149,6 +159,8 @@ private:
     void mark(const PublicKey& peer, uint64_t until, const std::string& why);
     void expire();
     void flushIfDue(bool force);
+    void flushWorker();
+    void stopFlusher();
     void request(const Context& ctx);
     std::optional<PublicKey> pickPeer(const Context& ctx, Sequence highest);
     void finish();
@@ -198,6 +210,16 @@ private:
     std::atomic<size_t> slowTurns_{0};
     bool trusted_ = false;   // from the last tick: the budget of the turns until the next one
     std::atomic<uint64_t> longestFlushUs_{0};
+
+    // the flush thread: started at the first periodic flush, joined by stop() and the destructor
+    std::mutex flushMutex_;
+    std::condition_variable flushCv_;
+    std::thread flushThread_;
+    bool flushRequested_ = false;   // the fields below: under flushMutex_
+    bool flushRunning_ = false;
+    bool flushStopping_ = false;
+    size_t flushBlocks_ = 0;        // what the requested flush covers, for its log line
+    Sequence flushDown_ = 0;
 };
 
 }  // namespace cs

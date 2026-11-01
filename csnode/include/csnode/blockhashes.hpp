@@ -1,6 +1,7 @@
 #ifndef BLOCKHASHES_HPP
 #define BLOCKHASHES_HPP
 
+#include <atomic>
 #include <functional>
 #include <map>
 #include <memory>
@@ -68,7 +69,7 @@ private:
     std::string path_;
     std::unique_ptr<cs::Lmdb> seqDb_;
     std::unique_ptr<cs::Lmdb> hashDb_;
-    size_t failures_ = 0;
+    std::atomic<size_t> failures_{0};   // the backfill flush thread reports LMDB failures too
 };
 }  // namespace cs
 
