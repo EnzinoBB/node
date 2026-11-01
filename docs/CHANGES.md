@@ -25,6 +25,9 @@ lines under the new release.
   starts in minutes from several independent sources. See [snapshots.md](snapshots.md).
 - **Windows and macOS.** Packages for Windows (x64) and macOS (Apple Silicon), with a mainnet check
   that the three systems agree on the state.
+- **Full nodes from a snapshot.** A full node on LMDB or RocksDB starts from the snapshot in minutes
+  and fetches the older blocks from its neighbours in the background (backward sync), each checked
+  against the chain; consensus keeps priority. See [storage.md](storage.md).
 - **Wallet state digest.** A digest of all wallet state, logged every 1000 blocks, lets different
   nodes and builds compare their state.
 - **Continuous integration.**
@@ -36,6 +39,10 @@ lines under the new release.
   - release packages and the Docker image.
 
 ## Not released yet
+
+Nothing yet.
+
+## community.15 — 2026-11-01
 
 | PR | Change |
 |---|---|
@@ -69,6 +76,12 @@ lines under the new release.
 | #146 | csnode: the backfill turn budget depends on the node's role: 50 ms while it is a confidant (`backfill_turn_budget_ms`), 90 ms otherwise (`backfill_idle_turn_budget_ms`); on mainnet a node outside the trusted set backfills at about 450 blocks/s instead of about 250 |
 | #147 | csnode: while the node is a confidant, the backfill storage flush (median 358 ms, up to 2.4 s on mainnet, on the processor thread) waits until the node is out of the trusted set, 10 minutes at most; blocks not flushed are fetched again after a crash |
 | #148 | csnode: the periodic backfill flush runs on a thread of its own instead of the processor thread (on mainnet it took up to 5.6 s, with the storing of blocks waiting); one at a time, the final flush waits for the one under way, and the node stops the thread before its storage closes |
+| — | release: the version announced to peers (`MINOR_NODE_VERSION`) is 15; the packages ship the contract executor community-2 (build 1555) |
+
+Backward sync (#122–#125, #129, #130, #133, #136, #139, #140, #145–#148). A full node on LMDB or
+RocksDB starts from the snapshot and fetches the whole history in the background; on mainnet about
+400 blocks/s while the node is not a confidant, about five days for the 186 million blocks.
+Security (#142–#144): see the rows above; they were reported privately to the Credits team first.
 
 ## community.14 — 2026-10-27
 
