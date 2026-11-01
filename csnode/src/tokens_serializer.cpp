@@ -21,16 +21,19 @@ namespace cs {
 void TokensMaster_Serializer::bind(TokensMaster& tokens) {
     tokens_ = reinterpret_cast<decltype(tokens_)>(&tokens.tokens_);
     holders_ = reinterpret_cast<decltype(holders_)>(&tokens.holders_);
+    mutex_ = &tokens.dataMut_;
     csdebug() << "TokensMaster bindings made";
 }
 
 void TokensMaster_Serializer::clear(const std::filesystem::path& rootDir) {
     (void)rootDir;
+    std::lock_guard lock(*mutex_);
     tokens_->clear();
     holders_->clear();
 }
 
 void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {
+    std::lock_guard lock(*mutex_);
     std::ofstream ofs(rootDir / kDataFileName, std::ios::binary);
     boost::archive::text_oarchive oa(ofs);
     oa << *tokens_;
@@ -39,6 +42,7 @@ void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {
 
 ::cscrypto::Hash TokensMaster_Serializer::hash() {
     {
+        std::lock_guard lock(*mutex_);
         std::ofstream ofs(kDataFileName, std::ios::binary);   // text mode on Windows would write \r\n and change the hash
         ofs.imbue(std::locale::classic());   // with no_codecvt the archive formats numbers in the stream's locale
         boost::archive::text_oarchive oa(
@@ -62,6 +66,7 @@ void TokensMaster_Serializer::save(const std::filesystem::path& rootDir) {
 }
 
 void TokensMaster_Serializer::load(const std::filesystem::path& rootDir) {
+    std::lock_guard lock(*mutex_);
     std::ifstream ifs(rootDir / kDataFileName, std::ios::binary);
     boost::archive::text_iarchive ia(ifs);
     ia >> *tokens_;

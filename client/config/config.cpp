@@ -1003,6 +1003,7 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
     checkAndSaveValue(data, block, "db_backend",             storageData_.dbBackend);
     checkAndSaveValue(data, block, "rocksdb_block_cache_mb", storageData_.rocksdbBlockCacheMb);
     checkAndSaveValue(data, block, "rocksdb_memtable_mb",    storageData_.rocksdbMemtableMb);
+    readBackfillSettings(data, storageData_);
     // block_db=lmdb (community releases before RocksDB) means db_backend=lmdb, unless db_backend is set
     if (data.count(PARAM_NAME_STORAGE_BLOCK_DB) && !data.count("db_backend")) {
         storageData_.dbBackend = data.get<std::string>(PARAM_NAME_STORAGE_BLOCK_DB);
@@ -1030,6 +1031,47 @@ void Config::readStorageData(const boost::property_tree::ptree& config) {
             storageData_.checkpointKeep = 2;
         }
     }
+}
+
+void Config::readBackfillSettings(const boost::property_tree::ptree& data, StorageData& storage) {
+    if (data.count("backfill")) {
+        const auto text = data.get<std::string>("backfill");
+        if (text == "on" || text == "true" || text == "1") {
+            storage.backfill = true;
+        }
+        else if (text == "off" || text == "false" || text == "0") {
+            storage.backfill = false;
+        }
+        else {
+            cswarning() << "config: [storage] backfill=" << text << " is not on or off, using " << (storage.backfill ? "on" : "off");
+        }
+    }
+    auto number = [&data](const char* key, size_t& value, size_t min, size_t max) {
+        if (!data.count(key)) {
+            return;
+        }
+        const auto text = data.get<std::string>(key);
+        try {
+            size_t used = 0;
+            const unsigned long long parsed = std::stoull(text, &used);
+            if (used == text.size() && text.find('-') == std::string::npos) {
+                const auto clamped = std::clamp<unsigned long long>(parsed, min, max);
+                if (clamped != parsed) {
+                    cswarning() << "config: [storage] " << key << "=" << text << " is not in [" << min << ", " << max << "], using " << clamped;
+                }
+                value = static_cast<size_t>(clamped);
+                return;
+            }
+        }
+        catch (const std::exception&) {
+        }
+        cswarning() << "config: [storage] " << key << "=" << text << " is not a number, using " << value;
+    };
+    number("backfill_batch", storage.backfillBatch, 1, 1000);
+    number("backfill_rate", storage.backfillRate, 0, 1'000'000);
+    number("backfill_store_per_turn", storage.backfillStorePerTurn, 1, 1000);
+    number("backfill_turn_budget_ms", storage.backfillTurnBudgetMs, 0, 1000);
+    number("backfill_idle_turn_budget_ms", storage.backfillIdleTurnBudgetMs, 0, 1000);
 }
 
 namespace {

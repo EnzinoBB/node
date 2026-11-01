@@ -7,7 +7,9 @@ curl -fsSL -o .env https://raw.githubusercontent.com/EnzinoBB/node/master/packag
 docker compose up -d && docker compose logs -f
 ```
 
-A pruned node (the default) starts from a snapshot instead of syncing from block 0 for days. On its first start, with `CREDITS_SNAPSHOT=github` (the default), the container runs `node --download-snapshot`: it downloads the latest snapshot published on GitHub, checks every file against its signed manifest and restores it. When that fails, the node looks for a snapshot among its p2p neighbours (the community nodes that serve one) and, after `fetch_wait` (10 minutes) without one, syncs from block 0. `CREDITS_SNAPSHOT=p2p` skips the GitHub download, `off` syncs from block 0. The node checks a restored snapshot's state digest at its first start and stops if it differs. A full node syncs from block 0.
+A pruned node (the default) starts from a snapshot instead of syncing from block 0 for days. On its first start, with `CREDITS_SNAPSHOT=github` (the default), the container runs `node --download-snapshot`: it downloads the latest snapshot published on GitHub, checks every file against its signed manifest and restores it. When that fails, the node looks for a snapshot among its p2p neighbours (the community nodes that serve one) and, after `fetch_wait` (10 minutes) without one, syncs from block 0. `CREDITS_SNAPSHOT=p2p` skips the GitHub download, `off` syncs from block 0. The node checks a restored snapshot's state digest at its first start and stops if it differs.
+
+A full node on lmdb or rocksdb (`CREDITS_STORAGE=full`, `CREDITS_DB_BACKEND=lmdb` or `rocksdb`) starts from the snapshot the same way. Then it fetches the older blocks from its neighbours in the background, down to block 0 (backward sync). It takes part in the network meanwhile, and the API serves each block and history as it arrives. On mainnet that is about 186 million blocks: about two days, and the disk of a full node, about 400 GB with lmdb or 130 GB with rocksdb. `CREDITS_BACKFILL=off` keeps only the snapshot's blocks. A full node on berkeleydb (the full default) syncs from block 0, as the official node does: a berkeleydb database cannot start above block 0. See `docs/storage.md`, "Backward sync".
 
 The node also serves its own snapshots to its neighbours (`CREDITS_SERVE_SNAPSHOT=on`, the default; at most 2 MB/s, half while it is a confidant). See `docs/snapshots.md`.
 
@@ -31,7 +33,7 @@ The container runs as uid 1000: the directory must be writable by it (`sudo chow
 | Change | Result |
 | --- | --- |
 | Full to pruned, same database | Allowed: old blocks are removed at the next checkpoints. |
-| Pruned to full | Refused: the pruned blocks are gone. |
+| Pruned to full | Allowed: the node keeps its blocks and fetches the pruned ones from its neighbours in the background (backward sync). |
 | A different database (`db_backend`) | Refused, unless `CREDITS_CONVERT_DB=yes` is set (see below). |
 
 To start over, set `CREDITS_RESET=1` once. The old data is moved to `~/.credits/old-<date>`, not deleted.

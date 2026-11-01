@@ -31,7 +31,7 @@ jobs:
             package: '*-windows-x64.zip'
             node: ./node.exe
           - os: macos
-            runner: macos-14
+            runner: macos-15
             package: '*-macos-arm64.tar.gz'
             node: ./node
     runs-on: ${{ matrix.runner }}

@@ -295,6 +295,9 @@ def main():
             if last < src.wait_for and time.time() < src.wait_until:
                 time.sleep(1)
                 continue
+            # gave up waiting (a partition can outlast the 60 s): the pending transfer may still land with
+            # the inner id read again below, and get the next transfer of this sender rejected by consensus
+            src.unsure = last < src.wait_for
             src.wait_for = None
             src.next_inner_id = None
         try:
@@ -306,11 +309,17 @@ def main():
             time.sleep(5)
             continue
         sent += 1 if ok else 0
+        if ok:
+            src.unsure = False
         if not ok and message.startswith("Transaction in progress"):
             # the API stopped waiting for consensus (a node was just killed): the outcome is unknown
             pending += 1
             src.wait_for, src.wait_until = src.last_sent_id, time.time() + 60
             print(f"load transfer still in progress: {message}", flush=True)
+        elif not ok and "rejected by consensus" in message and getattr(src, "unsure", False):
+            # the inner id of a transfer whose outcome was unknown: an answer, not a fault
+            pending += 1
+            print(f"load transfer rejected after an unknown outcome: {message}", flush=True)
         elif not ok and "not syncronized" in message:
             # the node refuses transfers while it catches up after a restart (power-cut scenario)
             unsynced += 1

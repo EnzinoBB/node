@@ -175,6 +175,46 @@ bool BlockHashes::rebuild(cs::Sequence first, cs::Sequence last, const std::func
     return true;
 }
 
+void BlockHashes::flush() {
+    if (seqDb_->isOpen()) {
+        seqDb_->flush();
+    }
+    if (hashDb_->isOpen()) {
+        hashDb_->flush();
+    }
+}
+
+size_t BlockHashes::repairBottom(cs::Sequence first, cs::Sequence last, const std::function<csdb::Pool(cs::Sequence)>& load) {
+    size_t removed = 0;
+    for (cs::Sequence seq = first; seq-- > 0 && remove(seq);) {
+        ++removed;
+    }
+    size_t inserted = 0;
+    for (cs::Sequence seq = first; seq <= last; ++seq) {
+        const csdb::Pool pool = load(seq);
+        if (!pool.is_valid()) {
+            break;
+        }
+        const csdb::PoolHash hash = pool.hash();
+        const bool bySeq = find(seq) == hash;
+        if (bySeq && find(hash) == seq) {
+            break;
+        }
+        if (bySeq) {
+            hashDb_->insert(hash.to_binary(), seq);
+        }
+        else {
+            update(pool);
+        }
+        ++inserted;
+    }
+    if (removed > 0 || inserted > 0) {
+        cslog() << "blockHashes: bottom edge repaired at block " << first << ": " << removed
+                << " entries below it removed, " << inserted << " entries from it inserted";
+    }
+    return removed + inserted;
+}
+
 void BlockHashes::onDbFailed(const LmdbException& exception) {
     ++failures_;
     if (failures_ == 1) {

@@ -31,6 +31,7 @@
 #include <csnode/roundpackage.hpp>
 #include <csnode/configholder.hpp>
 #include <csnode/eventreport.hpp>
+#include <csnode/utilitymessage.hpp>
 
 #include <lib/system/logger.hpp>
 #include <lib/system/progressbar.hpp>
@@ -139,6 +140,7 @@ Node::Node(cs::config::Observer& observer)
     cs::Connector::connect(&cs::Conveyer::instance().packetFlushed, this, &Node::onTransactionsPacketFlushed);
     cs::Connector::connect(&poolSynchronizer_->sendRequest, this, &Node::sendBlockRequest);
     cs::Connector::connect(&snapshotTickTimer_.timeOut, this, &Node::onSnapshotTick);
+    cs::Connector::connect(&backfillTimer_.timeOut, this, &Node::onBackfillTick);
 
     globalPublicKey_.fill(0);
     globalPublicKey_.at(31) = 7U;
@@ -150,6 +152,7 @@ Node::~Node() {
     std::cout << "Destructor called\n";
 
     sendingTimer_.stop();
+    stopBackfillTimer();
     bootstrapStop_ = true;
     stopSnapshotTimer();
     {
@@ -405,7 +408,83 @@ bool Node::initRunning() {
  
     initBootstrapRP(initialConfidants_);
     EventReport::sendRunningStatus(*this, Running::Status::Run);
+    startBackfill();
     return true;
+}
+
+void Node::startBackfill() {
+    const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+    if (!sto.backfill) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+        if (backwardSync_) {
+            return;
+        }
+    }
+    backfillStartSeq_ = blockChain_.getLastSeq();
+    cs::BackwardSync::Hooks hooks;
+    hooks.anchor = [this] {
+        const auto anchor = blockChain_.getBackfillAnchor();
+        return cs::BackwardSync::Anchor{anchor.first, anchor.prevHash};
+    };
+    hooks.store = [this](const csdb::Pool& pool) { return blockChain_.storeBackfilledBlock(pool); };
+    hooks.flush = [this] { return blockChain_.flushBackfill(); };
+    hooks.floor = [this] { return backfillFloor(); };
+    hooks.sendRequest = [this](const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
+        sendBlockRequestPacket(target, sequences);
+    };
+    cs::BackwardSync::Settings settings;
+    settings.batch = sto.backfillBatch;
+    settings.rate = sto.backfillRate;
+    settings.storePerTurn = sto.backfillStorePerTurn;
+    settings.turnBudgetMs = sto.backfillTurnBudgetMs;
+    settings.idleTurnBudgetMs = sto.backfillIdleTurnBudgetMs;
+    // created under the lock that stop() takes to read the pointer (finishBootstrap runs this on the
+    // processor thread while a stop may come from another one)
+    std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+    if (bootstrapStop_) {
+        return;
+    }
+    backwardSync_ = std::make_unique<cs::BackwardSync>(std::move(hooks), settings);
+    // ticks are queued to the processor thread, which also handles the replies; every 100 ms, as a
+    // tick stores at most storePerTurn blocks
+    backfillTimer_.start(100, cs::Timer::Type::Standard, cs::RunPolicy::CallQueuePolicy);
+}
+
+void Node::stopBackfillTimer() {
+    std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+    backfillTimer_.stop();
+}
+
+cs::Sequence Node::backfillFloor() const {
+    const auto& sto = cs::ConfigHolder::instance().config()->getStorageSettings();
+    if (sto.pruneKeepBlocks == 0) {
+        return 0;
+    }
+    // the window a pruned node keeps: what pruning would leave after a checkpoint at its start,
+    // and never below what pruning has scheduled since (it would remove those blocks again)
+    const cs::Sequence window = sto.checkpointEvery + sto.pruneKeepBlocks;
+    const cs::Sequence fromStart = backfillStartSeq_ > window ? backfillStartSeq_ - window : 0;
+    return std::max(fromStart, blockChain_.pruneTarget());
+}
+
+void Node::onBackfillTick() {
+    if (!backwardSync_ || bootstrapStop_ || !good_) {
+        return;
+    }
+    cs::BackwardSync::Context ctx;
+    transport_->forEachNeighbour([&ctx](const cs::PublicKey& key, cs::Sequence lastSeq, cs::RoundNumber) {
+        ctx.peers.push_back(cs::BackwardSync::Peer{key, lastSeq});
+    });
+    ctx.forwardSyncRunning = poolSynchronizer_->isSyncroStarted();
+    ctx.bootstrapRound = isBootstrapRound_;
+    ctx.bootstrapping = bootstrapping_;
+    ctx.round = cs::Conveyer::instance().currentRoundNumber();
+    ctx.lastSeq = blockChain_.getLastSeq();
+    ctx.trusted = myLevel_ != Level::Normal;
+    backwardSync_->tick(ctx);
 }
 
 void Node::initPoolSynchronizer() {
@@ -781,6 +860,14 @@ void Node::stop() {
         worker.join();
     }
 
+    {
+        std::lock_guard<std::mutex> lock(backfillTimerMutex_);
+        backfillTimer_.stop();
+        if (backwardSync_) {
+            backwardSync_->stop();
+        }
+    }
+
     if (poolSynchronizer_) {
         poolSynchronizer_->stop();
     }
@@ -806,6 +893,10 @@ void Node::destroy() {
     solver_->finish();
     cswarning() << "[SOLVER STOPPED]";
 
+    if (backwardSync_ && backwardSync_->stats().stored > 0) {
+        // the index and the block hashes of the blocks backfilled since the last flush, before the storage closes
+        blockChain_.flushBackfill();
+    }
     blockChain_.close();    
     cswarning() << "[BLOCKCHAIN STORAGE CLOSED]";
 
@@ -917,7 +1008,6 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
     cs::IDataStream stream(data, size);
     cs::Signature sig;
     cs::Bytes msg;
-    cs::RoundNumber rNum;
     stream >> msg >> sig ;
     
     if (!stream.isValid() || !stream.isEmpty()) {
@@ -925,14 +1015,28 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
         return;
     }
 
-    cs::Byte order;
-    cs::PublicKey pKey;
-    cs::IDataStream bytes(msg.data(), msg.size());
-    bytes >> rNum;
-    bytes >> order;
-    bytes >> pKey;
+    // an order from the project, signed with the blockchain key: see cs::readUtilityMessage
+    const cs::UtilityMessage message = cs::readUtilityMessage(msg, sig, cs::PacketValidator::getBlockChainKey());
+    switch (message.status) {
+        case cs::UtilityMessage::Status::BadFormat:
+            cserror() << "NODE> Bad Utility message format (" << msg.size() << " bytes), drop";
+            return;
+        case cs::UtilityMessage::Status::BadSignature:
+            cswarning() << "NODE> The Utility message is incorrect: signature isn't valid, drop";
+            return;
+        case cs::UtilityMessage::Status::Ok:
+            break;
+    }
 
-    switch (order) {
+    // ignore too aged command to prevent store & re-use by enemies, as a stop request is
+    const cs::RoundNumber currentRound = cs::Conveyer::instance().currentRoundNumber();
+    if (!cs::isUtilityRoundInWindow(message.round, currentRound)) {
+        cswarning() << "NODE> Utility message for round " << message.round << " while round is " << currentRound << ", drop";
+        return;
+    }
+
+    const cs::PublicKey& pKey = message.key;
+    switch (message.order) {
         case Orders::Release:
             if (pKey == cs::Zero::key) {
                 /* @TODO redesign this code 
@@ -959,6 +1063,9 @@ void Node::getUtilityMessage(const uint8_t* data, const size_t size) {
             break;
     }
 }
+
+static_assert(cs::kUtilityRelease == Node::Orders::Release && cs::kUtilitySeal == Node::Orders::Seal,
+              "a utility message carries Node::Orders as one byte");
 
 static_assert(cs::kMaxBootstrapTable == Consensus::MaxTrustedNodes, "a bootstrap table holds at most MaxTrustedNodes keys");
 
@@ -1298,42 +1405,21 @@ void Node::getTransactionsPacket(const uint8_t* data, const std::size_t size, co
 
 }
 
+// Only the node's owner stops the node. The request carries no checked signature (the check was left
+// out in 2019 and the signing key removed since), so any peer could send it: it is counted and
+// dropped. A node that is too old for the network still stops by the special order of the version
+// change (order 5), which comes in a block.
 void Node::getNodeStopRequest(const cs::RoundNumber round, const uint8_t* data, const std::size_t size) {
-    const auto localRound = cs::Conveyer::instance().currentRoundNumber();
-
-    if (round < localRound && localRound - round > cs::MaxRoundDeltaInStopRequest) {
-        // ignore too aged command to prevent store & re-use by enemies
-        return;
+    csunused(data);
+    static std::atomic<uint64_t> ignored{0};
+    static std::atomic<int64_t> lastLogged{0};
+    const auto count = ++ignored;
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    auto last = lastLogged.load();
+    if (now - last >= 60 && lastLogged.compare_exchange_strong(last, now)) {
+        cswarning() << "NODE> stop request from the network ignored (round " << round << ", " << size
+                    << " bytes, " << count << " ignored so far): only the node's owner stops the node";
     }
-
-    cs::IDataStream stream(data, size);
-
-    uint16_t version = 0;
-    cs::Signature sig;
-    stream >> version >> sig;
-
-    if (!stream.isValid() || !stream.isEmpty()) {
-        cswarning() << "NODE> Get stop request parsing failed";
-        return;
-    }
-
-    cs::Bytes message;
-    cs::ODataStream roundStream(message);
-    roundStream << round << version;
-
-    // packet validator have already tested starter signature
-    cswarning() << "NODE> Get stop request, received version " << version << ", received bytes " << size;
-
-    if (NODE_VERSION > version) {
-        cswarning() << "NODE> stop request does not cover my version, continue working";
-        return;
-    }
-
-    cswarning() << "NODE> Get stop request, node will be closed...";
-    stopRequested_ = true;
-
-    // unconditional stop
-    stop();
 }
 
 bool Node::canBeTrusted(bool critical) {
@@ -2156,12 +2242,19 @@ void Node::sendSyncroMessage(cs::Byte msg, const cs::PublicKey& target) {
 
 void Node::getSyncroMessage(const uint8_t* data, const size_t size, const cs::PublicKey& sender) {
     //csdebug() << __func__;
-    if (cs::Conveyer::instance().currentRoundNumber() < Consensus::syncroChangeRound) {
-        return;
-    }
-    cs::Byte msg;
+    cs::Byte msg = cs::SyncroMessage::NoAnswer;
     cs::IDataStream stream(data, size);
     stream >> msg;
+    if (!stream.isValid() || msg > cs::SyncroMessage::Sent) {
+        return;
+    }
+    // a responder sends these only once special order 35 is active on its side, which a node that
+    // syncs from block 0 does not know yet: the backfill and the synchronizer read them whatever
+    // this node knows of that round, and pace their requests to that responder; each acts only on
+    // the requests of its own
+    if (backwardSync_) {
+        backwardSync_->onSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
+    }
     poolSynchronizer_->getSyncroMessage(sender, static_cast<cs::SyncroMessage>(msg));
 }
 
@@ -2343,8 +2436,9 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
 
     bool isSyncOn = poolSynchronizer_->isSyncroStarted();
     bool isBlockchainUncertain = blockChain_.isLastBlockUncertain();
+    const bool isBackfill = backwardSync_ && backwardSync_->hasRequestTo(sender);
 
-    if (!isSyncOn && !isBlockchainUncertain/* && poolSynchronizer_->getTargetSequence() == 0ULL*/) {
+    if (!isSyncOn && !isBlockchainUncertain && !isBackfill/* && poolSynchronizer_->getTargetSequence() == 0ULL*/) {
         csdebug() << "NODE> Get block reply> Pool sync has already finished";
         return;
     }
@@ -2368,6 +2462,13 @@ void Node::getBlockReply(const uint8_t* data, const size_t size, const cs::Publi
     // used to reach getNecessaryBlockRequest, erase end() of an empty vector and cache the peer's block.
     if (!requestedKeys_.empty() && poolsBlock.size() == 1 && poolsBlock.back().sequence() == neededSequence_) {
         getNecessaryBlockRequest(poolsBlock, sender);
+        return;
+    }
+
+    // blocks below the first stored one answer the backfill's request: forward sync and storeBlock
+    // drop them
+    if (isBackfill && poolsBlock.front().sequence() < blockChain_.getFirstStoredSequence()) {
+        backwardSync_->onBlocks(sender, std::move(poolsBlock));
         return;
     }
 
@@ -2402,6 +2503,45 @@ void Node::sendBlockReply(const cs::PoolsBlock& poolsBlock, const cs::PublicKey&
         csdetails() << "#" << it.sequence() << " signs = " << it.signatures().size();
     }
 
+#ifdef CREDITS_TESTNET
+    // test-network builds only: ./testnet-tamper-replies holds "<kind> <below>", and every block served
+    // below that sequence goes out altered, as a dishonest peer would send it (ci/testnet/run.sh
+    // BACKFILL_TAMPER): kind signature flips a byte of its first signature (outside the hash),
+    // content a digit of its timestamp (inside the hash, so its hash changes). Both still parse
+    if (std::ifstream marker("testnet-tamper-replies"); marker) {
+        std::string kind;
+        cs::Sequence below = 0;
+        if (marker >> kind >> below) {
+            cs::PoolsBlock altered;
+            for (const auto& pool : poolsBlock) {
+                cs::Bytes bytes = pool.to_binary();
+                bool changed = false;
+                if (pool.sequence() > 0 && pool.sequence() < below) {
+                    cs::Bytes needle;
+                    if (kind == "signature" && !pool.signatures().empty()) {
+                        needle.assign(pool.signatures().front().begin(), pool.signatures().front().end());
+                    }
+                    else if (kind == "content" && pool.user_field_ids().count(BlockChain::kFieldTimestamp) > 0) {
+                        const auto text = pool.user_field(BlockChain::kFieldTimestamp).value<std::string>();
+                        needle.assign(text.begin(), text.end());
+                    }
+                    const auto at = needle.empty() ? bytes.end() : std::search(bytes.begin(), bytes.end(), needle.begin(), needle.end());
+                    if (at != bytes.end()) {
+                        auto& byte = *(at + static_cast<std::ptrdiff_t>(needle.size() - 1));
+                        byte = static_cast<cs::Byte>(kind == "content" ? (byte ^ 1) : (byte ^ 0x5a));   // a digit stays a digit
+                        changed = true;
+                    }
+                }
+                altered.push_back(changed ? csdb::Pool::from_binary(std::move(bytes)) : pool);
+            }
+            cswarning() << "NODE> TESTNET build: blocks below " << below << " served with an altered " << kind;
+            auto region = compressor_.compress(altered);
+            changeSynchroRequestsLog(target, cs::SyncroMessage::Sent);
+            sendDirect(target, MsgTypes::RequestedBlock, cs::Conveyer::instance().currentRoundNumber(), region);
+            return;
+        }
+    }
+#endif
     auto region = compressor_.compress(poolsBlock);
     csdebug() << "NODE> block package compressed";
     changeSynchroRequestsLog(target, cs::SyncroMessage::Sent);
@@ -2704,6 +2844,10 @@ void Node::getSnapshotPieceReply(const uint8_t* data, const size_t size, const c
 // thread safe slot (called from poolSynchronizer_)
 void Node::sendBlockRequest(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
     status_ = cs::NodeStatus::Synchronization;
+    sendBlockRequestPacket(target, sequences);
+}
+
+void Node::sendBlockRequestPacket(const cs::PublicKey& target, const cs::PoolsRequestedSequences& sequences) {
     const auto round = cs::Conveyer::instance().currentRoundNumber();
     csmeta(csdetails) << "Target out(): " << ", sequence from: " << sequences.front()
                       << ", to: " << sequences.back() << ", round: " << round;
@@ -4559,7 +4703,8 @@ void Node::onRoundStart(const cs::RoundTable& roundTable, bool updateRound) {
 
     cslog() << s;
     csdebug() << " Node key " << KeyToBase58(nodeIdKey_);
-    cslog() << " Last written sequence = " << WithDelimiters(blockChain_.getLastSeq()) << ", neighbour nodes = " << transport_->getNeighboursCount();
+    cslog() << " Last written sequence = " << WithDelimiters(blockChain_.getLastSeq()) << ", neighbour nodes = " << transport_->getNeighboursCount()
+            << (backwardSync_ && backwardSync_->stats().started ? ", oldest stored = " + std::to_string(blockChain_.getFirstStoredSequence()) : std::string{});
 
     std::ostringstream line2;
 
