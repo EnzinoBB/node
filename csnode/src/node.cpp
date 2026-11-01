@@ -3229,6 +3229,17 @@ void Node::getRoundTable(const uint8_t* data, const size_t size, const cs::Round
             }
             else {
                 csdebug() << "Throw received RP " << rNum << " using the own one";
+                // the same block with another set of real trusted is another block: the writer's round
+                // goes on with it, this node keeps its own and will not match the next hashes (a
+                // stage-3 retry race). Logged only; the decision is the official one
+                const auto& own = currentRoundPackage_.poolMetaInfo();
+                const auto& got = rPackage.poolMetaInfo();
+                if (got.sequenceNumber == own.sequenceNumber && got.previousHash == own.previousHash
+                    && cs::Utils::maskToBits(got.realTrustedMask) != cs::Utils::maskToBits(own.realTrustedMask)) {
+                    cswarning() << "NODE> block #" << own.sequenceNumber << " differs from the round package's: real trusted "
+                                << cs::TrustedMask::toString(got.realTrustedMask) << " there, " << cs::TrustedMask::toString(own.realTrustedMask)
+                                << " here, this node keeps its own (fork)";
+                }
                 roundPackageCache_.push_back(currentRoundPackage_);
                 rPackage = currentRoundPackage_;
             }

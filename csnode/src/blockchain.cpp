@@ -1492,6 +1492,15 @@ bool BlockChain::updateLastBlock(cs::RoundPackage& rPackage, const csdb::Pool& p
     }
     if (poolFrom.signatures().size() >= rPackage.poolSignatures().size()) {
         csdebug() << kLogPrefix << "Deferred block has more or the same amount Signatures, than received roundPackage, can't update it";
+        // the same block with another set of real trusted is another block: the round goes on on the
+        // writer's, this node keeps its own and will not match the next round's hashes (a stage-3
+        // retry race). Logged only; the decision is the official one
+        const uint64_t packageMask = cs::Utils::maskToBits(rPackage.poolMetaInfo().realTrustedMask);
+        if (poolFrom.previous_hash() == rPackage.poolMetaInfo().previousHash && poolFrom.realTrusted() != packageMask) {
+            cswarning() << kLogPrefix << "block #" << poolFrom.sequence() << " differs from the round package's: real trusted "
+                        << cs::TrustedMask::toString(rPackage.poolMetaInfo().realTrustedMask) << " there, " << poolFrom.signatures().size()
+                        << " signatures here against " << rPackage.poolSignatures().size() << ", this node keeps its own (fork)";
+        }
         return true;
     }
     if (poolFrom.previous_hash() != rPackage.poolMetaInfo().previousHash) {
